@@ -556,3 +556,122 @@ def test_imu_reaches_the_motion_status(client):
         "age_ms",
         "fresh",
     }
+
+
+ROUTE = [
+    {"lat": 38.99, "lon": -76.94},
+    {"lat": 38.991, "lon": -76.94},
+    {"lat": 38.991, "lon": -76.939},
+]
+
+
+def test_route_goal_round_trip(client):
+    assert _status(client)["goal"] is None
+    assert client.get("/api/goal").json()["data"] is None
+
+    response = client.post(
+        "/api/goal", json={"kind": "route", "points": ROUTE}, headers=SAME_ORIGIN
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "kind": "route",
+        "version": 1,
+        "instruction": None,
+        "route_points": 3,
+        "route": ROUTE,
+    }
+    status = _status(client)
+    # The status carries the summary only; the route itself is fetched once.
+    assert status["goal"] == {"kind": "route", "version": 1, "instruction": None, "route_points": 3}
+    # A route's destination is its last point.
+    assert (status["destination"]["lat"], status["destination"]["lon"]) == (38.991, -76.939)
+    assert client.get("/api/goal").json()["data"]["route"] == ROUTE
+
+
+def test_instruction_goal_replaces_the_route(client):
+    client.post("/api/goal", json={"kind": "route", "points": ROUTE})
+
+    response = client.post(
+        "/api/goal", json={"kind": "instruction", "text": "  go to   the kitchen "}
+    )
+
+    assert response.json()["data"] == {
+        "kind": "instruction",
+        "version": 2,
+        "instruction": "go to the kitchen",
+        "route_points": 0,
+        "route": [],
+    }
+    status = _status(client)
+    assert status["goal"]["instruction"] == "go to the kitchen"
+    # Indoors there is no point on the map.
+    assert status["destination"] is None
+
+
+def test_goal_reaches_the_viewer(client):
+    client.post("/api/goal", json={"kind": "instruction", "text": "follow the hallway"})
+    with client.websocket_connect("/ws/viewer") as viewer:
+        status = json.loads(viewer.receive_text())
+    assert status["goal"]["instruction"] == "follow the hallway"
+
+
+def test_a_bare_destination_drops_the_goal(client):
+    client.post("/api/goal", json={"kind": "route", "points": ROUTE})
+    client.post("/api/destination", json={"lat": 1.0, "lon": 2.0})
+    assert _status(client)["goal"] is None
+    assert _status(client)["destination"]["lat"] == 1.0
+
+
+def test_clearing_the_destination_drops_the_goal(client):
+    client.post("/api/goal", json={"kind": "instruction", "text": "go to the door"})
+    assert client.delete("/api/destination", headers=SAME_ORIGIN).status_code == 200
+    assert _status(client)["goal"] is None
+
+
+def test_clearing_the_goal_drops_the_destination(client):
+    client.post("/api/goal", json={"kind": "route", "points": ROUTE})
+    assert client.delete("/api/goal", headers=SAME_ORIGIN).json()["success"] is True
+    assert _status(client)["goal"] is None
+    assert _status(client)["destination"] is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"kind": "route", "points": [{"lat": 0.0, "lon": 0.0}]},
+        {"kind": "route", "points": [{"lat": 91.0, "lon": 0.0}, {"lat": 0.0, "lon": 0.0}]},
+        {"kind": "route", "points": ROUTE, "note": "x"},
+        {"kind": "instruction", "text": "   "},
+        {"kind": "instruction", "text": "x" * 201},
+        {"kind": "instruction", "text": 5},
+        {"kind": "teleport", "text": "home"},
+        {"text": "go to the kitchen"},
+        "go to the kitchen",
+    ],
+)
+def test_bad_goal_is_refused(client, body):
+    response = client.post("/api/goal", json=body)
+    assert response.status_code == 422
+    assert response.json()["error"].startswith("goal must be")
+    assert _status(client)["goal"] is None
+
+
+def test_goal_body_must_be_json_and_not_huge(client):
+    not_json = client.post("/api/goal", content=b"kitchen", headers={"content-type": "text/plain"})
+    assert not_json.status_code == 400
+    assert not_json.json()["error"].startswith("body must be JSON like")
+
+    huge = client.post("/api/goal", content=b"{" + b" " * (300 * 1024) + b"}")
+    assert huge.status_code == 413
+    assert _status(client)["goal"] is None
+
+
+def test_cross_origin_goal_changes_are_forbidden(client):
+    client.post("/api/goal", json={"kind": "instruction", "text": "go to the door"})
+    posted = client.post(
+        "/api/goal", json={"kind": "instruction", "text": "go outside"}, headers=OTHER_ORIGIN
+    )
+    deleted = client.delete("/api/goal", headers=OTHER_ORIGIN)
+    assert (posted.status_code, deleted.status_code) == (403, 403)
+    assert _status(client)["goal"]["instruction"] == "go to the door"

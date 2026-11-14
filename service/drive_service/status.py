@@ -8,7 +8,13 @@ from typing import Any
 from drive_service.clock import is_synced
 from drive_service.config import Settings
 from drive_service.declination import resolve_declination
-from drive_service.destination import Destination, DestinationStore, destination_status
+from drive_service.destination import (
+    Destination,
+    DestinationStore,
+    Goal,
+    destination_status,
+    goal_status,
+)
 from drive_service.heading import best_heading
 from drive_service.hub import Hub
 from drive_service.recorder import Recorder, RecordingInfo
@@ -117,6 +123,7 @@ def build_status(
     now_mono: float,
     settings: Settings,
     destination: Destination | None = None,
+    goal: Goal | None = None,
 ) -> dict[str, Any]:
     frame_fresh = is_fresh(snapshot.frame, settings.frame_stale_ms, now_mono)
     gps_fresh = is_fresh(snapshot.gps, settings.gps_stale_ms, now_mono)
@@ -147,6 +154,8 @@ def build_status(
         "destination": destination_status(
             destination, snapshot.gps.value if snapshot.gps and gps_fresh else None
         ),
+        # The route or instruction a driving model follows; GET /api/goal has the route itself.
+        "goal": goal_status(goal),
         "link": _link(snapshot, now_mono, settings),
     }
 
@@ -168,4 +177,5 @@ def live_status(
         now_mono,
         settings,
         destination=destinations.current,
+        goal=destinations.goal,
     )

@@ -12,7 +12,12 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from drive_service.config import Settings
-from drive_service.destination import DestinationStore, parse_destination
+from drive_service.destination import (
+    DestinationStore,
+    goal_detail,
+    parse_destination,
+    parse_goal,
+)
 from drive_service.hub import Hub
 from drive_service.origin import origin_allowed
 from drive_service.recorder import (
@@ -34,6 +39,15 @@ BAD_DESTINATION_MESSAGE = (
 )
 # A destination body is a few dozen bytes; anything much bigger is not one.
 MAX_DESTINATION_BODY_BYTES = 1024
+BAD_GOAL_JSON_MESSAGE = (
+    'body must be JSON like {"kind": "instruction", "text": "go to the kitchen"}'
+    ' or {"kind": "route", "points": [{"lat": 38.99, "lon": -76.94}, ...]}'
+)
+BAD_GOAL_MESSAGE = (
+    "goal must be a route of 2 to 2000 lat/lon points, or an instruction of 1 to 200 characters"
+)
+# 2000 points at about 50 bytes each, with room to spare.
+MAX_GOAL_BODY_BYTES = 256 * 1024
 HTTP_BAD_REQUEST = 400
 HTTP_FORBIDDEN = 403
 HTTP_CONFLICT = 409
@@ -115,6 +129,42 @@ def build_router(
         return ok(
             live_status(hub, recorder, destinations, time_source.mono(), settings)["destination"]
         )
+
+    @router.get("/goal")
+    async def get_goal() -> JSONResponse:
+        return ok(goal_detail(destinations.goal))
+
+    @router.post("/goal")
+    async def set_goal(request: Request) -> JSONResponse:
+        if not origin_allowed(request.headers, settings.allowed_origins):
+            return fail(HTTP_FORBIDDEN, FOREIGN_ORIGIN_MESSAGE)
+        raw = await request.body()
+        if len(raw) > MAX_GOAL_BODY_BYTES:
+            return fail(HTTP_PAYLOAD_TOO_LARGE, BAD_GOAL_JSON_MESSAGE)
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return fail(HTTP_BAD_REQUEST, BAD_GOAL_JSON_MESSAGE)
+        try:
+            wanted = parse_goal(body)
+        except ValidationError as error:
+            log.info("refused goal: %d validation errors", error.error_count())
+            return fail(HTTP_UNPROCESSABLE, BAD_GOAL_MESSAGE)
+        if isinstance(wanted, str):
+            goal = destinations.set_instruction(wanted)
+        else:
+            goal = destinations.set_route(wanted)
+        # Never log the words or the points: they say where the rider is going.
+        log.info("goal set: %s", goal.kind)
+        return ok(goal_detail(goal))
+
+    @router.delete("/goal")
+    async def clear_goal(request: Request) -> JSONResponse:
+        if not origin_allowed(request.headers, settings.allowed_origins):
+            return fail(HTTP_FORBIDDEN, FOREIGN_ORIGIN_MESSAGE)
+        destinations.clear()
+        log.info("goal cleared")
+        return ok(None)
 
     @router.delete("/destination")
     async def clear_destination(request: Request) -> JSONResponse:

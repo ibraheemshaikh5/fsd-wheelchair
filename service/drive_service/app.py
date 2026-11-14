@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 API_PREFIX = "/api/"
 # Requests that change something; they share a budget separate from status reads.
-CONTROL_PREFIXES = ("/api/recording/", "/api/destination")
+CONTROL_PREFIXES = ("/api/recording/", "/api/destination", "/api/goal")
 
 
 def _rate_budget(path: str, settings: Settings) -> tuple[str, int] | None:
