@@ -1,7 +1,7 @@
 """Drive window. Mode button: JOYSTICK (real stick drives) or FSD (hold W/A/S/D / arrows, let go to stop).
 
 Speed and deadband sliders. Calls Wheelchair.set(x, y) 20x per second, exactly like the AI will.
-Run:  python3 hardware/teleop.py   (USB or Tailscale, picked automatically)
+Run:  python3 hardware/teleop.py   (Mac and board on the team Tailscale)
 """
 import time, tkinter as tk
 from wheelchair import Wheelchair
@@ -61,7 +61,7 @@ def tick():
 def show_stats():
     try:
         st = chair.stats()
-        if chair.fsd and st["takeover"]: toggle()            # rider pushed the stick: show JOYSTICK
+        if chair.fsd and (st["takeover"] or st["dropout_latched"]): toggle()   # stick pushed / Wi-Fi dropout: show JOYSTICK
         status.set(f"chair reads {st['reads']} resets {st['resets']} | sent {st['sent']} | "
                    f"stick {st['stick']} ok {st['stick_good']} bad {st['stick_bad']}")
     except Exception as e:

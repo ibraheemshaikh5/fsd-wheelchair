@@ -4,9 +4,11 @@ jitter never reaches the chair.
 Mac/AI -> UDP "x y mode" (stick %, already past the deadband) -> this daemon -> 50 Hz writes
 into the MCU's RAM command box (SWD via local openocd) -> fake MLX90393 -> chair.
 
-Gaps in UDP (bad Wi-Fi):  <= HOLD_S keep the last command (no stutter),
-                           then ease to zero over RAMP_S,
-                           after HANDBACK_S fall back to JOYSTICK mode (real stick drives).
+Packet: "x y mode arm session seq". Gaps in UDP (bad Wi-Fi):
+  <= HOLD_S keep the last command (no stutter), then ease to zero over RAMP_S,
+  after HANDBACK_S fall back to JOYSTICK mode and LATCH it: FSD stays off until the sender
+  re-arms (arm counter changes = user clicked FSD again). Late/out-of-order packets are dropped
+  (seq per session), so a delayed old command can never restart motion.
 If this daemon dies, the MCU's own ~0.25 s watchdog hands control to the real stick.
 Listens only on the Tailscale address (and localhost), so only tailnet devices can drive.
 Each received packet is answered with a stats line.
@@ -60,19 +62,25 @@ def main():
             s, ocd = ocd_connect(); box = find_box(ocd); socks = listen()
             print(f"wheelchaird: box {box:#x}, listening on {[u.getsockname() for u in socks]}", flush=True)
             x = y = mode = 0; last_rx = 0.0; seq = 0
+            session = last_seq = None; latched = False; dead_arm = None
             while True:
                 t0 = time.time()
                 for u in socks:
                     while True:
                         try: data, addr = u.recvfrom(64)
                         except BlockingIOError: break
-                        try: x, y, mode = (int(v) for v in data.split()[:3]); last_rx = t0
+                        try: px, py, pm, arm, sess, sq = (int(v) for v in data.split()[:6])
                         except ValueError: continue
+                        if sess != session: session, last_seq, latched = sess, -1, False   # new sender
+                        if sq <= last_seq: continue                                         # late / duplicate
+                        last_seq = sq; x, y, mode, last_rx = px, py, pm, t0
+                        if latched and arm != dead_arm: latched = False                     # re-armed
                         st = ocd(f"read_memory {box + 28:#x} 32 10").replace("0x", "")
-                        u.sendto(st.encode(), addr)
+                        u.sendto(f"{st} {int(latched)}".encode(), addr)
                 gap = t0 - last_rx
+                if gap > HANDBACK_S and mode == 1 and not latched: latched, dead_arm = True, arm
                 k = 1.0 if gap <= HOLD_S else max(0.0, 1 - (gap - HOLD_S) / RAMP_S)
-                m = mode if gap <= HANDBACK_S else 0
+                m = 0 if latched or gap > HANDBACK_S else mode
                 seq = (seq + 1) & 0xFFFFFFFF
                 ocd(f"write_memory {box + 4:#x} 32 {{{int(x * k) & 0xFFFFFFFF} {int(y * k) & 0xFFFFFFFF} {m} 0 0 {seq}}}")
                 time.sleep(max(0, 1 / RATE_HZ - (time.time() - t0)))

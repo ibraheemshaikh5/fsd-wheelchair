@@ -6,6 +6,7 @@ the UNO Q (board/wheelchaird.py), which feeds the fake joystick locally at 50 Hz
 waits on the network, so Wi-Fi jitter doesn't stall the caller.
 
 Mode: chair.fsd = False -> the real stick drives (stock behaviour); True -> set(x, y) drives.
+Dropout: after > 2 s without packets FSD latches off (stats()['dropout_latched']); set fsd again to re-arm.
 Takeover: in FSD, pushing the real stick hands control back (stats()['takeover'] == True).
 Deadman layers:
   - here: if set() has not been called for 0.3 s, we send zeros;
@@ -24,7 +25,8 @@ class Wheelchair:
     def __init__(self, deadband=41, turn_deadband=37):   # measured: forward creeps at 41%, turning at 37%
         self.deadband = deadband            # % of stick the chair ignores (forward/back); mapped past it
         self.turn_deadband = turn_deadband  # same for left/right
-        self.fsd = False                    # False: the real stick drives. True: set(x, y) drives.
+        self._fsd = False; self._arm = 0    # arm bumps on every off->on, so the board can re-arm after a dropout
+        self._session = int.from_bytes(os.urandom(3), "big"); self._seq = 0
         self._x = self._y = 0; self._at = 0.0; self._stop = False
         self._stats = None; self._stats_at = 0.0
         self._addr = (socket.gethostbyname(HOST), PORT)
@@ -35,6 +37,15 @@ class Wheelchair:
             if self._stats: return
             time.sleep(0.05)
         raise ConnectionError(f"no answer from {HOST}:{PORT} (board on? Tailscale up? wheelchaird running?)")
+
+    @property
+    def fsd(self): return self._fsd
+
+    @fsd.setter
+    def fsd(self, on):
+        """False: the real stick drives. True: set(x, y) drives (re-arms after a Wi-Fi dropout)."""
+        if on and not self._fsd: self._arm += 1
+        self._fsd = bool(on)
 
     def set(self, x, y):
         """Latest wish from the driver (GUI or AI). Must be called at least every 0.3 s."""
@@ -60,7 +71,9 @@ class Wheelchair:
 
     def _send(self, x, y):
         sx, sy = self._past_deadband(x, self.turn_deadband), self._past_deadband(y)
-        self._sock.sendto(f"{sx} {sy} {1 if self.fsd else 0}".encode(), self._addr)
+        self._seq += 1
+        msg = f"{sx} {sy} {1 if self._fsd else 0} {self._arm} {self._session} {self._seq}"
+        self._sock.sendto(msg.encode(), self._addr)
 
     def _sender(self):
         while not self._stop:
@@ -69,7 +82,8 @@ class Wheelchair:
                 self._send(self._x if fresh else 0, self._y if fresh else 0)
                 v = [int(w, 16) for w in self._sock.recv(256).split()]
                 self._stats = dict(reads=v[0], resets=v[2], sent=(v[3], v[4]), stick=(v[5], v[6]),
-                                   stick_good=v[7], stick_bad=v[8], takeover=bool(v[9]))
+                                   stick_good=v[7], stick_bad=v[8], takeover=bool(v[9]),
+                                   dropout_latched=bool(v[10]) if len(v) > 10 else False)
                 self._stats_at = time.time()
             except (OSError, ValueError, IndexError):
                 pass                        # lost packet / no reply: the board holds or hands back safely
@@ -77,6 +91,7 @@ class Wheelchair:
 
 
 if __name__ == "__main__":  # self-check of the deadband mapping (no hardware needed)
-    c = Wheelchair.__new__(Wheelchair); c.deadband = 30
+    c = Wheelchair.__new__(Wheelchair); c.deadband = 30; c._fsd = False; c._arm = 0
+    c.fsd = True; c.fsd = True; c.fsd = False; c.fsd = True; assert c._arm == 2   # only off->on re-arms
     assert [c._past_deadband(p) for p in (0, 10, 100, -1, 150)] == [0, 37, 100, -31, 100]
     print("ok")
