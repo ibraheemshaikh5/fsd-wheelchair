@@ -29,14 +29,19 @@ iPad web app ──destination, start/stop──▶ Driving service
 | [`service/`](service) | Driving service (Python, FastAPI). Today: receives the phone stream, keeps the latest sensor readings, records drives. |
 | [`web/`](web) | Browser pages (TypeScript, Vite): the phone's capture page, a sensor viewer, and a device check. |
 | [`app/`](app) | iPad app (React, TypeScript, Vite). See below. |
+| [`ml/`](ml) | Offline model work (Python): run candidate models over recorded drives, download checkpoints. Post-training and evaluation go here. |
 
 ## Docs
 
+Index: [docs/README.md](docs/README.md).
+
 - [Architecture](docs/architecture.md): data flow, interfaces, safety
 - [Model](docs/model.md): base model candidates and post-training plan
-- [Open questions](docs/open-questions.md): what has to be decided before building
+- [Driving pipeline](docs/driving-pipeline.md): how sensor data becomes a decision
+- [Outputs](docs/outputs.md): what the service sends to the chair, the iPad and disk
 - [Phone protocol](docs/phone-protocol.md): how the phone streams to the service
 - [Running](docs/running.md): setup, each session, tests
+- [Open questions](docs/open-questions.md): what has to be decided before building
 
 ## iPad app
 

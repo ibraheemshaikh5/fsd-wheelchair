@@ -8,6 +8,8 @@
 4. Service converts the trajectory to linear and angular velocity and sends it to the chair.
 5. Service pushes state to the iPad: video, planned path, detected obstacles, speed, route progress.
 
+Stage by stage: [driving pipeline](driving-pipeline.md). What is sent out: [outputs](outputs.md).
+
 ## Where it drives
 
 Sidewalks and indoors.
