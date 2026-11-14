@@ -8,8 +8,11 @@ import { type Deferred, deferred, flush, harness, OPEN, startFully, type Harness
 
 const WALL_BASE = 1_000_000;
 const MONO_BASE = 5_000;
+/** The simulated camera's rate unless a test sets one: 60 fps, the training-data setting and the busiest link. */
 const CAMERA_FPS = 60;
 const FRAME_MS = 1000 / CAMERA_FPS;
+/** The phone's default when driving. */
+const DRIVING_FPS = DEFAULT_SETTINGS.fps;
 
 function header(bytes: Uint8Array<ArrayBuffer>): FrameHeader {
   const length = new DataView(bytes.buffer).getUint32(0, true);
@@ -67,13 +70,16 @@ interface SimOptions {
   readonly startMs?: number;
   /** How long each JPEG encode takes; 0 resolves at once. */
   readonly encodeMs?: number;
+  /** Frames the camera delivers per second (CAMERA_FPS unless set). */
+  readonly fps?: number;
 }
 
 type Encoded = { bytes: Uint8Array<ArrayBuffer>; w: number; h: number; rot: 0 } | null;
 
-/** Capture at 60 fps for `durationMs`, acking each sent frame when the link model says. */
+/** Capture at `fps` (default 60) for `durationMs`, acking each sent frame when the link model says. */
 async function simulate(h: Harness, link: LinkModel, durationMs: number, options: SimOptions = {}): Promise<SimResult> {
-  const { startMs = 0, encodeMs = 0 } = options;
+  const { startMs = 0, encodeMs = 0, fps = CAMERA_FPS } = options;
+  const frameMs = 1000 / fps;
   const pending: { seq: number; t: number; ackAt: number; gated: boolean }[] = [];
   const encoding: { readyAt: number; done: Deferred<Encoded> }[] = [];
   const ages: number[] = [];
@@ -100,7 +106,7 @@ async function simulate(h: Harness, link: LinkModel, durationMs: number, options
       return done.promise;
     });
   }
-  let nextFrame = Math.ceil(startMs / FRAME_MS);
+  let nextFrame = Math.ceil(startMs / frameMs);
   for (now = startMs; now <= startMs + durationMs; now += 1) {
     setTime(h, now);
     while (pending.length > 0 && (pending[0]?.ackAt ?? Infinity) <= now) {
@@ -114,7 +120,7 @@ async function simulate(h: Harness, link: LinkModel, durationMs: number, options
       await flush();
     }
     if (now > 0 && now % 1000 === 0) h.sensors.tick?.();
-    if (now >= nextFrame * FRAME_MS) {
+    if (now >= nextFrame * frameMs) {
       nextFrame += 1;
       h.frame.onFrame?.(undefined);
       await flush();
@@ -134,19 +140,19 @@ describe('Session flow control', () => {
     h.transport().state(OPEN);
   });
 
-  it('on a link whose acks come 300 ms late, keeps 3 frames in flight and none old', async () => {
+  it('on a link whose acks come 300 ms late, keeps 2 frames in flight and none old', async () => {
     const delayMs = 300;
     const result = await simulate(h, delayedAcks(delayMs), 4000);
     expect(result.ages.length).toBeGreaterThan(20);
     expect(result.maxInFlight).toBe(MAX_FRAMES_IN_FLIGHT);
     expect(Math.max(...result.ages)).toBeLessThanOrEqual(MAX_FRAMES_IN_FLIGHT * FRAME_MS + delayMs);
-    // 3 frames per round trip: about 10 fps get through (after the first ack, 300 ms in), not 60.
+    // 2 frames per round trip: about 6.7 fps get through (after the first ack, 300 ms in), not 60.
     const gatedFps = result.gatedSent / 3.7;
-    expect(gatedFps).toBeGreaterThanOrEqual(9);
-    expect(gatedFps).toBeLessThanOrEqual(11);
+    expect(gatedFps).toBeGreaterThanOrEqual(6);
+    expect(gatedFps).toBeLessThanOrEqual(7.5);
   });
 
-  it('on a link that carries 10 frames a second, uses it fully but never lets a frame age past 3 on the wire', async () => {
+  it('on a link that carries 10 frames a second, uses it fully but never lets a frame age past 2 on the wire', async () => {
     const transmitMs = 100;
     const rttMs = 40;
     const result = await simulate(h, serialLink(transmitMs, rttMs), 4000);
@@ -196,7 +202,8 @@ describe('Session flow control', () => {
     await flush();
     expect(h.transport().sendFrame).toHaveBeenCalledTimes(2 + MAX_FRAMES_IN_FLIGHT);
     h.sensors.tick?.();
-    expect(linkMessages(h).at(-1)).toMatchObject({ captured: 7, sent: 5, acked: 1, skipped_flow: 2 });
+    const sent = 2 + MAX_FRAMES_IN_FLIGHT;
+    expect(linkMessages(h).at(-1)).toMatchObject({ captured: 7, sent, acked: 1, skipped_flow: 7 - sent });
   });
 
   it('with a service that never acks, streams every frame under the send budget alone', async () => {
@@ -272,12 +279,12 @@ describe('Session flow control', () => {
   });
 
   it('on a healthy link with a slow encoder, sends every frame: encoding frames hold no ack slot', async () => {
-    // 25 ms to encode plus 40 ms to the ack is 65 ms per frame, more than 3 frame
-    // intervals, but only 2 frames are ever actually waiting for their ack.
-    await simulate(h, delayedAcks(40), 4000, { encodeMs: 25 });
+    // At the driving rate, 25 ms to encode plus 40 ms to the ack is 65 ms per
+    // frame, more than one frame interval, but only 1 frame is ever waiting for its ack.
+    await simulate(h, delayedAcks(40), 4000, { encodeMs: 25, fps: DRIVING_FPS });
     const last = lastLink(h);
     expect(last).toMatchObject({ skipped_flow: 0, skipped_encoder: 0, skipped_socket: 0, jpeg_quality: 0.7 });
-    expect(h.session.live.link?.sentFps).toBeGreaterThanOrEqual(58);
+    expect(h.session.live.link?.sentFps).toBeGreaterThanOrEqual(DRIVING_FPS - 1);
   });
 
   it('brings JPEG quality back to the setting once a weak link recovers', async () => {
@@ -307,16 +314,21 @@ describe('Session flow control', () => {
     expect(h.session.live.link).toMatchObject({ ackStatus: 'waiting' });
   });
 
-  // Contract rule as written (skip share > 30% steps down): on a 60 ms link the
-  // 3-frame window, not bandwidth, holds back 40% of a 60 fps camera, so quality
-  // drops to the floor although 36 fps of ~75 ms old frames arrive (the model
-  // needs 20). Kept visible on purpose; raised for a contract change. If the rule
-  // changes, this expectation should flip to staying at the setting.
-  it('keeps full quality on a 60 ms link that carries 30+ fresh frames a second', async () => {
-    await simulate(h, delayedAcks(60), 6000, { encodeMs: 15 });
-    expect(h.session.live.link?.sentFps).toBeGreaterThanOrEqual(30);
+  // At the driving rate a frame leaves every 50 ms, so a 60 ms round trip never
+  // fills the 2-frame window: every frame goes, at the configured quality.
+  it('at the driving rate, sends every frame at full quality on a 60 ms link', async () => {
+    await simulate(h, delayedAcks(60), 6000, { encodeMs: 15, fps: DRIVING_FPS });
+    expect(lastLink(h)).toMatchObject({ skipped_flow: 0, skipped_encoder: 0, skipped_socket: 0 });
+    expect(h.session.live.link?.sentFps).toBeGreaterThanOrEqual(DRIVING_FPS - 1);
     expect(lastLink(h).ack_rtt_ms).toBeCloseTo(60, 0);
     expect(lastLink(h).jpeg_quality).toBe(DEFAULT_SETTINGS.jpegQuality);
+  });
+
+  it('at the driving rate, lowers quality on a link too slow to carry 20 fps', async () => {
+    // Two frames per 140 ms round trip is about 14 fps: under the model's 20.
+    await simulate(h, delayedAcks(140), 6000, { fps: DRIVING_FPS });
+    expect(h.session.live.link?.sentFps).toBeLessThan(DRIVING_FPS * 0.9);
+    expect(lastLink(h).jpeg_quality).toBeLessThan(DEFAULT_SETTINGS.jpegQuality);
   });
 
   it('lowers quality while acks take longer than 150 ms', async () => {

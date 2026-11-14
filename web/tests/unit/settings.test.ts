@@ -13,9 +13,13 @@ import {
 const saved = (values: Record<string, unknown>): string => JSON.stringify({ version: SETTINGS_VERSION, ...values });
 
 describe('DEFAULT_SETTINGS', () => {
-  it('runs at 60 fps by default: the top normal video rate, three frames per 20 Hz model step', () => {
+  it('sends 20 fps by default: the driving model’s rate, so the link carries nothing the model drops', () => {
     expect(DEFAULT_SETTINGS.fps).toBe(DEFAULT_CAPTURE_FPS);
-    expect(DEFAULT_CAPTURE_FPS).toBe(60);
+    expect(DEFAULT_CAPTURE_FPS).toBe(20);
+  });
+
+  it('sends 480 px on the long side by default: above every model’s input (384 px at most)', () => {
+    expect(DEFAULT_SETTINGS.maxWidth).toBe(480);
   });
 
   it('allows opting into faster (slow-motion) camera rates up to what the service accepts', () => {
@@ -50,8 +54,17 @@ describe('parseSettings', () => {
 
   it('drops fps saved by version 2, so the current default applies', () => {
     const v2 = JSON.stringify({ version: 2, mountHeightM: 0.9, fps: 60 });
-    expect(SETTINGS_VERSION).toBe(3);
     expect(parseSettings(v2)).toEqual({ ...DEFAULT_SETTINGS, mountHeightM: 0.9 });
+  });
+
+  it('drops the 60 fps and 640 px saved by version 3, so phones switch to the driving defaults', () => {
+    const v3 = JSON.stringify({ version: 3, mountHeightM: 0.9, fps: 60, maxWidth: 640, jpegQuality: 0.6 });
+    expect(SETTINGS_VERSION).toBe(4);
+    expect(parseSettings(v3)).toEqual({ ...DEFAULT_SETTINGS, mountHeightM: 0.9, jpegQuality: 0.6 });
+  });
+
+  it('keeps 60 fps and 640 px chosen under the current version (for collecting training data)', () => {
+    expect(parseSettings(saved({ fps: 60, maxWidth: 640 }))).toMatchObject({ fps: 60, maxWidth: 640 });
   });
 
   it('replaces out-of-range or wrongly typed values with defaults, field by field', () => {
@@ -59,13 +72,13 @@ describe('parseSettings', () => {
     expect(parseSettings(raw)).toEqual({ ...DEFAULT_SETTINGS, maxWidth: 480 });
   });
 
-  it('drops the old 10 fps from settings saved before versioning, keeping the mount', () => {
-    const old = JSON.stringify({ mountHeightM: 0.9, mountPitchDeg: -15, fps: 10, maxWidth: 480, jpegQuality: 0.6 });
+  it('drops the old 10 fps and width from settings saved before versioning, keeping the mount', () => {
+    const old = JSON.stringify({ mountHeightM: 0.9, mountPitchDeg: -15, fps: 10, maxWidth: 1280, jpegQuality: 0.6 });
     expect(parseSettings(old)).toEqual({
       mountHeightM: 0.9,
       mountPitchDeg: -15,
       fps: DEFAULT_SETTINGS.fps,
-      maxWidth: 480,
+      maxWidth: DEFAULT_SETTINGS.maxWidth,
       jpegQuality: 0.6,
       rotateDeg: AUTO_ROTATION,
     });

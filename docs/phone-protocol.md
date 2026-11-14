@@ -115,8 +115,8 @@ Header: `{"seq": int, "t": ms, "w": px, "h": px, "rot": 0|90|180|270}` (`rot` is
 
 - `seq` counts every frame the camera produced, including ones the phone skipped. Gaps show up as `missed` in the stats.
 - `t` is the capture time when the browser exposes it (`requestVideoFrameCallback`), otherwise the time the frame was grabbed. It is on the same wall clock (`Date.now()`) as every other `t`: the phone takes only the short delay since capture from the monotonic clock (`performance.now()`) and subtracts it from `Date.now()`. It never uses `performance.timeOrigin + captureTime`, because the monotonic clock stops while an iPhone sleeps and would stamp every frame after a screen lock in the past. Without `requestVideoFrameCallback` the phone skips a grab while the video is paused, has no current frame, or the camera track is muted or ended.
-- Default 640 px on the long side, JPEG quality 0.7, 60 fps (the top rate of the iPhone's normal video formats; a setting allows up to 240). The driving model picks 20 fps by capture time; see [model data guide](model-data-guide.md).
-- **Latest wins.** The phone skips a frame if two are already encoding, if sending it would leave more than about 100 ms of data (at most 100 KB, at the measured uplink rate) queued on the socket, or, once the service acks frames, if 3 frames are already in flight (see [Flow control](#flow-control-acks)). Old frames are never queued up behind a slow link.
+- Default 480 px on the long side, JPEG quality 0.7, 20 fps: what the driving model uses (its largest input is FlowPilot's 384 px), so a weak link carries nothing the model would drop. Every frame crosses Wi-Fi before the model or the iPad sees it; both get their frames from the service. For training data, set 60 fps (the top rate of the iPhone's normal video formats; a setting allows up to 240) and 640 px; see [model data guide](model-data-guide.md). Saved settings from before this default (settings version 3) drop their fps and width.
+- **Latest wins.** The phone skips a frame if two are already encoding, if sending it would leave more than about 100 ms of data (at most 100 KB, at the measured uplink rate) queued on the socket, or, once the service acks frames, if 2 frames are already in flight (see [Flow control](#flow-control-acks)). Old frames are never queued up behind a slow link.
 
 ## Flow control: acks
 
@@ -132,14 +132,14 @@ frame, in order.
 The phone's rule:
 
 - A frame is **in flight** from the moment it is sent until the ack with its `seq`, or any higher `seq`, arrives.
-- While acks flow, a new frame is sent only if fewer than `MAX_FRAMES_IN_FLIGHT = 3` are in flight. Otherwise it is skipped (counted as `skipped_flow`), never queued: the next frame is newer anyway.
+- While acks flow, a new frame is sent only if fewer than `MAX_FRAMES_IN_FLIGHT = 2` are in flight. At 20 fps a frame leaves every 50 ms, so two keep the full rate on round trips up to about 100 ms. Otherwise it is skipped (counted as `skipped_flow`), never queued: the next frame is newer anyway.
 - An in-flight frame with no ack after `ACK_TIMEOUT_MS = 1000` stops counting, so a lost ack can never stall the stream.
 - Until the **first** ack on a connection, only the `bufferedAmount` send budget applies, so a page still works against a service without acks. After it, both checks apply.
 - All of this, and the link counters, reset on every reconnect.
 - The phone measures the ack round trip (send to ack, monotonic clock) and keeps a smoothed value (`ack_rtt_ms`).
-- **Adaptive quality.** Once a second, while the service acks: JPEG quality drops by 0.1 (not below 0.4) when the smoothed ack round trip is over 150 ms or fewer than 20 frames a second got through (when the camera delivered at least 20); it rises by 0.05, up to the configured quality, when acks take under 100 ms and 20+ frames a second got through; otherwise it holds. The share of frames skipped is not the signal: at 60 fps with 3 frames in flight, any round trip above ~50 ms skips most frames while 20+ fresh ones still arrive. Without acks (an older service) it falls back to the share skipped by the send budget: over 30 % steps down, under 5 % steps up. Resolution never changes.
+- **Adaptive quality.** Once a second, while the service acks: JPEG quality drops by 0.1 (not below 0.4) when the smoothed ack round trip is over 150 ms or fewer than 18 frames a second got through (90 % of 20, when the camera delivered at least 18: a camera thinned to 20 fps delivers 19–21 a second by timing alone); it rises by 0.05, up to the configured quality, when acks take under 75 ms (well inside the ~100 ms at which 2 frames in flight still carry 20 fps, so a link near that limit does not bounce) and 18+ frames a second got through; otherwise it holds. The share of frames skipped is not the signal: at 60 fps with 2 frames in flight, any round trip above ~33 ms skips most frames while 20+ fresh ones still arrive. Without acks (an older service) it falls back to the share skipped by the send budget: over 30 % steps down, under 5 % steps up. Resolution never changes.
 
-With 3 frames in flight a frame can wait behind at most two others, so on a
+With 2 frames in flight a frame can wait behind at most one other, so on a
 slow link the phone sends fewer frames, at lower quality, instead of older
 ones. The driving model only needs 20 fps, and needs them at most about
 100–150 ms old.
