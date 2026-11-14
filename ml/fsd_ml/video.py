@@ -22,6 +22,9 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from PIL import Image
+
 FPS = 20
 WIDTH, HEIGHT = 640, 360
 ASPECT = WIDTH / HEIGHT
@@ -94,6 +97,16 @@ def probe(video: Path) -> tuple[int, int, float, float]:
         fps = 0.0
     duration = stream.get("duration") or described.get("format", {}).get("duration") or 0.0
     return width, height, fps, float(duration)
+
+
+def standardize_frame(image: np.ndarray) -> np.ndarray:
+    """One RGB frame in the same standard form: middle cut to 16:9, then 640 x 360."""
+    height, width = image.shape[:2]
+    keep_w = min(width, round(height * ASPECT))
+    keep_h = min(height, round(width / ASPECT))
+    left, top = (width - keep_w) // 2, (height - keep_h) // 2
+    cut = Image.fromarray(image[top : top + keep_h, left : left + keep_w])
+    return np.asarray(cut.resize((WIDTH, HEIGHT), Image.Resampling.BILINEAR))
 
 
 def standardize(video: Path, out_dir: Path) -> Conversion:
