@@ -5,7 +5,8 @@ Mac/AI -> UDP "x y mode" (stick %, already past the deadband) -> this daemon -> 
 into the MCU's RAM command box (SWD via local openocd) -> fake MLX90393 -> chair.
 
 Packet: "x y mode arm session seq". Gaps in UDP (bad Wi-Fi):
-  <= HOLD_S keep the last command (no stutter), then ease to zero over RAMP_S,
+  <= HOLD_S keep the last command (no stutter), then ease to zero over RAMP_S (0.6 s total),
+  starts ramp up at SLEW_UP %/tick (stops are instant),
   after HANDBACK_S fall back to JOYSTICK mode and LATCH it: FSD stays off until the sender
   re-arms (arm counter changes = user clicked FSD again). Late/out-of-order packets are dropped
   (seq per session), so a delayed old command can never restart motion.
@@ -14,10 +15,20 @@ Listens only on the Tailscale address (and localhost), so only tailnet devices c
 Each received packet is answered with a stats line.
 """
 import socket, subprocess, time
+now = time.monotonic                              # never jumps (wall-clock steps can't freeze a command)
 
 PORT, RATE_HZ = 5005, 50
-HOLD_S, RAMP_S, HANDBACK_S = 0.6, 0.3, 2.0
+HOLD_S, RAMP_S, HANDBACK_S = 0.3, 0.3, 2.0
+SLEW_UP = 5                                       # max stick % increase per 20 ms tick (smooth starts); decreases are instant
 MAGIC = "0xc0ffee01"
+
+
+def slew(out, target):
+    """Next output: slowing down / stopping is instant, speeding up is limited to SLEW_UP per tick,
+    a reversal stops first (then ramps the other way)."""
+    if out * target < 0: return 0
+    if abs(target) <= abs(out): return target
+    return out + max(-SLEW_UP, min(SLEW_UP, target - out))
 
 
 def ocd_connect():
@@ -49,6 +60,7 @@ def find_box(ocd):
 
 def listen():
     ts_ip = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True).stdout.split()
+    if not ts_ip: raise RuntimeError("no Tailscale IP yet")       # outer loop retries until Tailscale is up
     socks = []
     for ip in ["127.0.0.1"] + ts_ip[:1]:
         u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.bind((ip, PORT)); u.setblocking(False)
@@ -62,9 +74,11 @@ def main():
             s, ocd = ocd_connect(); box = find_box(ocd); socks = listen()
             print(f"wheelchaird: box {box:#x}, listening on {[u.getsockname() for u in socks]}", flush=True)
             x = y = mode = 0; last_rx = 0.0; seq = 0
-            session = last_seq = None; latched = False; dead_arm = None
+            session = last_seq = None; latched = False; dead_arm = None; ox = oy = 0; tick = 0
             while True:
-                t0 = time.time()
+                t0 = now(); tick += 1
+                if tick % 50 == 0 and ocd(f"read_memory {box:#x} 32 1") != MAGIC:
+                    raise RuntimeError("command box gone (MCU reset/reflashed)")
                 for u in socks:
                     while True:
                         try: data, addr = u.recvfrom(64)
@@ -81,9 +95,11 @@ def main():
                 if gap > HANDBACK_S and mode == 1 and not latched: latched, dead_arm = True, arm
                 k = 1.0 if gap <= HOLD_S else max(0.0, 1 - (gap - HOLD_S) / RAMP_S)
                 m = 0 if latched or gap > HANDBACK_S else mode
+                tx, ty = int(x * k), int(y * k)
+                ox, oy = slew(ox, tx), slew(oy, ty)
                 seq = (seq + 1) & 0xFFFFFFFF
-                ocd(f"write_memory {box + 4:#x} 32 {{{int(x * k) & 0xFFFFFFFF} {int(y * k) & 0xFFFFFFFF} {m} 0 0 {seq}}}")
-                time.sleep(max(0, 1 / RATE_HZ - (time.time() - t0)))
+                ocd(f"write_memory {box + 4:#x} 32 {{{ox & 0xFFFFFFFF} {oy & 0xFFFFFFFF} {m} 0 0 {seq}}}")
+                time.sleep(max(0, 1 / RATE_HZ - (now() - t0)))
         except Exception as e:                    # MCU watchdog covers us while we restart
             print("wheelchaird: restarting after", repr(e), flush=True)
             for u in locals().get("socks", []): u.close()
@@ -91,4 +107,8 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys
+    if sys.argv[1:] == ["test"]:          # self-check, no hardware
+        assert [slew(0, 70), slew(70, 0), slew(70, -70), slew(0, -70), slew(40, 20), slew(68, 70)] == [5, 0, 0, -5, 20, 70]
+        print("ok"); sys.exit()
     main()

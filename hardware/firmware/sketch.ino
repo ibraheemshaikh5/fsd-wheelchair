@@ -1,3 +1,5 @@
+// v11: no Linux dependency (no Monitor/Bridge): build with wait_linux_boot=no so the fake sensor
+//      answers within ~1 s of power, before Linux boots. No stick reads while the chair is silent.
 // v10: + takeover: in FSD, 3 reads of the real stick past ~25% -> real stick drives until FSD is re-selected.
 // v9: + real stick on Grove D2 (software master, built-in pull-ups), mode 0 stick / 1 FSD.
 // v8: v1 timing; commands written into cmdBox over SWD by the Mac (no messages handled).
@@ -8,7 +10,6 @@
 // MLX90393 ignores it and keeps shifting bytes out; the STM32's hardware I2C target ends
 // the transfer, so the chair received FF FF for X/Y. This target only ends a READ on a
 // master NACK or when SCL_PIN stays idle, and ignores mid-transfer "STOPs".
-#include <Arduino_RouterBridge.h>
 
 #define GPIOB_BASE 0x42020400UL
 #define GREG(o) (*(volatile uint32_t *)(GPIOB_BASE + (o)))
@@ -223,14 +224,12 @@ void transaction() {                   // entered right after a START (SDA_PIN f
 
 void setup() {
   loadRealMemory();
-  Monitor.begin(); delay(1500);
   DEMCR |= (1UL << 24); DWT_CYC = 0; DWT_CTRL |= 1UL;
   BSRR = SDA_PIN;                                        // released (high-Z with open drain)
   OTYPER |= SDA_PIN;                                     // PB11 open-drain
   PUPDR &= ~((3UL << 20) | (3UL << 22));             // no internal pulls (chair has pull-ups)
   MODER = (MODER & ~((3UL << 20) | (3UL << 22))) | (1UL << 22);  // PB10 input, PB11 output (open drain)
   stickInitPins();
-  Monitor.print("software MLX90393 ready. CMDBOX 0x"); Monitor.println((uint32_t)&cmdBox, HEX);
 }
 
 void loop() {
@@ -251,6 +250,6 @@ void loop() {
     if (DWT_CYC - idleStart > 200000UL * CYC_US) break;
   }
   __asm volatile ("cpsie i");
-  stickStep();                                   // chair silent: keep the stick fresh (bench use)
+  stickAge = 0xFFFF;                             // chair silent: never go deaf for a stick read (startup beep risk)
   // ponytail: no runtime prints (a jammed Monitor once froze us mid-chair); the Mac reads cmdBox over SWD.
 }
