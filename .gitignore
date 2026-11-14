@@ -23,3 +23,7 @@ app/coverage/
 recordings/
 
 .DS_Store
+
+# Model work (large downloads and generated output)
+ml/weights/
+ml/runs/

@@ -1,0 +1,36 @@
+[project]
+name = "fsd-ml"
+version = "0.1.0"
+description = "FSD wheelchair offline model work: bake-off, post-training, evaluation."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=2.0",
+    "pillow>=10",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+# Downloading checkpoints. Each model's own runtime (ONNX Runtime, PyTorch) is
+# added with the model's driver, not here.
+weights = [
+    "huggingface-hub>=0.25",
+]
+
+# Not installed as a package, for the same reason as service/: the code is
+# imported straight from this directory.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+src = [".", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
