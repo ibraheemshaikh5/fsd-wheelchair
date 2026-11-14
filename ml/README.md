@@ -102,7 +102,9 @@ The viewer can also show the phone's stream as it arrives. It connects to the dr
 1. Start the viewer and choose **Live from chair**.
 2. Enter the driving service's address and press Connect: `http://127.0.0.1:8000` if the service runs on this machine, or its Tailscale `https://…ts.net` address if it runs on another.
 
-Set **Goal given as** to **From the iPad** to drive the model with whatever the rider chose on the iPad: an indoor instruction is passed as words, and an outdoor trip becomes a point 10 m further along the route Google planned, worked out from the chair's GPS and heading. The line under the address shows which it is.
+A banner at the top of the live view shows what the rider asked for on the iPad, in their words or as a map destination, and whether the model is following it.
+
+Set **Goal given as** to **From the iPad** (or press the banner's button) to drive the model with whatever the rider chose on the iPad: an indoor instruction is passed as words, and an outdoor trip becomes a point 10 m further along the route Google planned, worked out from the chair's GPS and heading. The line under the address shows which it is.
 
 The same overlays appear on the live picture, plus **Camera delay** (phone to service) and how many decisions a second the model is managing. Frames go through the same conversion as uploaded videos. The feed is 10 frames a second, so a model that wants a 20-per-second history gets the nearest frames instead.
 

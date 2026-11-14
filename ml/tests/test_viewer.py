@@ -346,3 +346,18 @@ def test_ipad_trip_becomes_a_goal_for_the_model(monkeypatch: pytest.MonkeyPatch)
     assert note == "iPad route: 37 m left"
     reader.read(routed)
     assert fetched == ["https://chair.example/api/goal"]  # the route is fetched once per version
+
+
+def test_ipad_message_reads_as_a_sentence() -> None:
+    from fsd_ml.live import ipad_message
+
+    assert ipad_message({}) == {"kind": None, "text": "Nothing set on the iPad"}
+    said = {"goal": {"kind": "instruction", "instruction": "go to the kitchen"}}
+    assert ipad_message(said) == {"kind": "instruction", "text": "“go to the kitchen”"}
+    routed = {"goal": {"kind": "route"}, "destination": {"distance_m": 143.4}}
+    assert ipad_message(routed)["text"] == "Map destination, 143 m away, by a planned route"
+    bare = {"destination": {"distance_m": None}}
+    assert ipad_message(bare) == {
+        "kind": "destination",
+        "text": "Map destination, distance unknown without GPS, no route",
+    }

@@ -29,7 +29,7 @@ from PIL import Image
 
 from fsd_ml.drivers import Driver, Goal, Motion, make_driver
 from fsd_ml.flowpilot import ONNX_PATH as FLOWPILOT_WEIGHTS
-from fsd_ml.live import ChairGoal, LiveFeed
+from fsd_ml.live import ChairGoal, LiveFeed, ipad_message
 from fsd_ml.pipeline.control import ControlConfig, follow
 from fsd_ml.pipeline.footprint import FootprintConfig, choose
 from fsd_ml.s2e import ONNX_PATH as S2E_WEIGHTS
@@ -358,6 +358,8 @@ class Session:
             # Phone to service, as the service measures it.
             "frame_age_ms": frame.get("age_ms") if frame else None,
         }
+        # Shown at the top of the page whatever goal the model is being given.
+        ipad = ipad_message(status) if status else None
         waiting = self.live.problem
         if waiting is None and sample.silent_s > 3.0:
             waiting = "the service has gone quiet"
@@ -366,14 +368,14 @@ class Session:
         if waiting is None and sample.frame is None:
             waiting = "waiting for the first camera frame"
         if waiting is not None:
-            return {"waiting": waiting, "link": link}
+            return {"waiting": waiting, "link": link, "ipad": ipad}
 
         note = None
         if kind == FROM_IPAD:
             # Whatever the rider set on the iPad: a route, a bare destination or an instruction.
             goal, note = self._chair_goal.read(status)
             if goal is None:
-                return {"waiting": note, "link": link}
+                return {"waiting": note, "link": link, "ipad": ipad}
         else:
             goal = self._goal(kind, goal_xy, instruction, self.live_photo)
         with self._lock:
@@ -392,6 +394,7 @@ class Session:
             "link": link,
             "goal_note": note,
             "goal_xy": goal.point_xy,
+            "ipad": ipad,
         }
 
     def decide(

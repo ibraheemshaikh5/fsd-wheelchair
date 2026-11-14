@@ -63,6 +63,15 @@
   input[type=range] { accent-color: var(--chosen); width: 100%; }
   select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
     padding: 4px 6px; font: inherit; }
+  .ipad { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 12px 16px 0;
+    padding: 12px 16px; background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--chosen); border-radius: 8px; }
+  .ipad.empty { border-left-color: var(--line); }
+  .ipadLabel { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+    font-weight: 600; }
+  .ipadText { font-size: 20px; font-weight: 600; flex: 1; min-width: 200px; }
+  .ipad.empty .ipadText { color: var(--muted); font-weight: 400; font-size: 15px; }
+  .ipad .note { margin: 0; }
   .livebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px 0;
     color: var(--muted); }
   .livebar input { width: 280px; max-width: 60vw; background: var(--bg); color: var(--text);
@@ -95,6 +104,12 @@
   <button id="liveToggle">Live from chair</button>
   <label class="file">Open video<input type="file" id="file" accept="video/*"></label>
 </header>
+<div class="ipad" id="ipad" hidden>
+  <span class="ipadLabel">From the iPad</span>
+  <span class="ipadText" id="ipadText"></span>
+  <span class="note" id="ipadUse"></span>
+  <button id="ipadFollow" hidden>Give this to the model</button>
+</div>
 <div class="livebar" id="livebar" hidden>
   <label>Chair's driving service <input type="text" id="service" value="http://127.0.0.1:8000" aria-label="Driving service address"></label>
   <button id="liveConnect">Connect</button>
@@ -556,8 +571,21 @@ $("hostedUrl").addEventListener("keydown", (event) => { if (event.key === "Enter
 // In live mode the loop below picks up any change on its next decision.
 const redecide = () => { if (!state.live && state.info && state.info.frames) decide(state.i).then(draw); };
 
+// The rider's request on the iPad, and whether the model is being given it.
+function showIpad(ipad) {
+  const box = $("ipad");
+  box.hidden = !state.live || !ipad;
+  if (!ipad) return;
+  const set = ipad.kind !== null, following = $("kind").value === "ipad";
+  box.classList.toggle("empty", !set);
+  $("ipadText").textContent = ipad.text;
+  $("ipadUse").textContent = !set ? "" : following ? "The model is following this" : "The model is not following this";
+  $("ipadFollow").hidden = !set || following;
+}
+
 function setLive(on) {
   state.live = on;
+  if (!on) $("ipad").hidden = true;
   setPlaying(false);
   $("livebar").hidden = !on;
   document.querySelector(".transport").hidden = on;
@@ -597,6 +625,7 @@ async function liveLoop() {
     }
     if (!state.live || run !== state.liveRun) break;
     const link = d.link || {};
+    showIpad(d.ipad);
     const feed = link.fps != null ? ` · camera ${Number(link.fps).toFixed(0)} fps` : "";
     const from = d.goal_note ? ` · ${d.goal_note}` : "";
     $("liveNote").textContent = d.waiting ? `Waiting: ${d.waiting}` : `Connected${feed}${link.sensors_ok ? "" : " · sensors not all fresh"}${from}`;
@@ -623,6 +652,7 @@ async function liveLoop() {
   }
 }
 
+$("ipadFollow").addEventListener("click", () => { $("kind").value = "ipad"; $("ipadFollow").hidden = true; });
 $("liveToggle").addEventListener("click", () => setLive(true));
 $("liveStop").addEventListener("click", () => setLive(false));
 async function connectLive() {

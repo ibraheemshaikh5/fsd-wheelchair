@@ -165,6 +165,20 @@ class LiveFeed:
         return picked[::-1]
 
 
+def ipad_message(status: dict[str, Any]) -> dict[str, Any]:
+    """What the rider has asked for on the iPad, in words for a person to read."""
+    goal, destination = status.get("goal"), status.get("destination")
+    if goal and goal.get("kind") == "instruction":
+        return {"kind": "instruction", "text": f"“{goal['instruction']}”"}
+    if not goal and not destination:
+        return {"kind": None, "text": "Nothing set on the iPad"}
+    away = (destination or {}).get("distance_m")
+    where = f"{away:.0f} m away" if away is not None else "distance unknown without GPS"
+    if goal and goal.get("kind") == "route":
+        return {"kind": "route", "text": f"Map destination, {where}, by a planned route"}
+    return {"kind": "destination", "text": f"Map destination, {where}, no route"}
+
+
 def to_sensors(sample: LiveSample, now_ms: float) -> Sensors:
     """A live sample as the pipeline's input. Ages come from the service's own status."""
     status = sample.status
