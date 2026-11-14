@@ -40,7 +40,7 @@ Rules:
 - **The chair caps speed** on its own, whatever the service sends.
 - **The chair turns the two numbers into whatever its controller takes**, such as a joystick signal. That mapping lives on the chair.
 
-The chair reports back so the service knows it is being obeyed:
+The chair reports back through `Wheelchair.stats()` ([`hardware/wheelchair.py`](../hardware/wheelchair.py)), about 20 times a second: `takeover` (the rider pushed the real stick), `dropout_latched` (Wi-Fi dropped for over 2 s; self-driving stays off until re-armed), `stick` (the real stick's reading), `sent`, `reads`, `resets` and `age` (seconds since the board last answered). There is no e-stop flag: the e-stop is the chair's power button. The pipeline's own `chair` message below predates the hardware and is what the simulator uses:
 
 ```json
 {
@@ -56,7 +56,7 @@ The chair reports back so the service knows it is being obeyed:
 
 `mode` is `auto` or `manual`. Touching the joystick switches to `manual` on the chair first, then reports it.
 
-The transport is a WebSocket from the service to the Arduino over Tailscale, and the model's live view can now feed it: see [chair-link.md](chair-link.md#from-the-model-to-the-chair). How the Arduino turns the two numbers into the chair's input is still being worked out on the board.
+The transport is `Wheelchair().set(x, y)`: UDP over Tailscale to the daemon on the UNO Q. [`ml/fsd_ml/chair_out.py`](../ml/fsd_ml/chair_out.py) turns the two numbers into stick percent (`y = 100·v / 1.5`, `x = −100·w / 1.5`, capped at 30%; the full-scale values are placeholders until measured on the ground).
 
 ## 2. Drive state (to the iPad)
 

@@ -63,8 +63,8 @@ iPad: destination ("coffee shop", or "go to the elevator")
 - One process on one machine for now. Moves onto the chair later.
 
 ### Chair interface
-- A small microcontroller on the chair that takes velocity commands and drives the chair.
-- How it connects to the WOLF's controller is not yet known. See [open questions](open-questions.md).
+- An Arduino UNO Q pretends to be the WOLF joystick's MLX90393 magnet sensor, so the chair's own controller stays stock. See [hardware/README.md](../hardware/README.md).
+- Any Tailscale device calls `Wheelchair().set(x, y)` ([`hardware/wheelchair.py`](../hardware/wheelchair.py)), stick percent, sent as UDP to a daemon on the board. The model's live view does this through [`ml/fsd_ml/chair_out.py`](../ml/fsd_ml/chair_out.py).
 
 ### iPad web app
 - Tesla-FSD-style view: live rendering of the chair, path ahead, obstacles, speed, map with route.
@@ -74,9 +74,9 @@ iPad: destination ("coffee shop", or "go to the elevator")
 
 These live on the chair, not on the remote computer:
 
-- **Watchdog**: no fresh command within a short timeout → stop.
-- **Physical e-stop**: cuts drive power, reachable by the rider.
-- **Speed cap**: hard limit enforced by the chair interface.
-- **Manual override**: touching the joystick takes control immediately.
+- **Watchdogs**: `Wheelchair` sends zeros 0.3 s after the last `set`; the board daemon holds through Wi-Fi gaps up to 0.6 s, eases to a stop, and after 2 s latches self-driving off until re-armed; the MCU hands control to the real stick if the daemon stops feeding it for ~0.25 s.
+- **E-stop**: the chair's own power button.
+- **Speed cap**: the chair's own speed setting, plus a stick cap (30%) on model commands in `chair_out.py`.
+- **Takeover**: pushing the real joystick in self-driving hands control back (`stats()["takeover"]`).
 
 A network drop must always result in a stopped chair.

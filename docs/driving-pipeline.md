@@ -30,7 +30,7 @@ One pass runs 20 times a second. Any stage can end the pass with **stop**.
 Stops unless all of these hold:
 
 - Phone connected, clock synced, camera frame and position fresh. The service already computes this as `sensors_ok` ([phone protocol](phone-protocol.md)).
-- Chair reports it is in self-driving mode, joystick untouched, e-stop not pressed.
+- Chair reports self-driving is on and not taken back: `Wheelchair.stats()` has `takeover` and `dropout_latched` false. The e-stop is the chair's power button, so a pressed one shows as the board going quiet.
 - The model's last result is recent enough (stage 5).
 
 Indoors there is no GPS, so the freshness rule there uses motion tracking in place of a GPS fix.
@@ -128,7 +128,7 @@ The loop only produces motion in `driving`. In every other state it still runs s
 | Trip state machine, engage and disengage | Built | |
 | Simulated chair and scenarios | Built: nine scenarios | |
 | Connection to the driving service | Not started | The service side settling |
-| Chair link | Blocked | Opening up the chair |
+| Chair link | Built: the live view drives `Wheelchair.set(x, y)` (`ml/fsd_ml/chair_out.py`). Full-scale speed and turn rate are placeholders | Measuring on the ground |
 | Replay: run the whole pipeline on a recording | To build | Recordings |
 
 The simulator came first. It lets every stage be developed and tested before the chair can be commanded at all. See [`ml/README.md`](../ml/README.md) to run it.

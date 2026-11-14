@@ -94,4 +94,4 @@ Code layout under `app/src`:
 
 - **Sensors (2):** phone camera, GPS, compass and IMU stream to the service, with a live viewer and recording. Tested with a fake phone, in Chromium, and once by hand on the iPhone over Tailscale; not yet mounted on the chair.
 - **Display (5):** iPad app connected to the service: shows the phone's position, heading, speed and camera live, and sends the destination. Self-driving is not wired yet. Tested with the fake phone; not yet on the iPad.
-- No model or chair interface yet.
+- **Chair interface:** an Arduino UNO Q fakes the joystick's magnet sensor, driven from code with `Wheelchair().set(x, y)` over Tailscale. See [hardware/README.md](hardware/README.md). The model's live view can drive it (**Send to chair** in the viewer).
