@@ -10,6 +10,7 @@
 // MLX90393 ignores it and keeps shifting bytes out; the STM32's hardware I2C target ends
 // the transfer, so the chair received FF FF for X/Y. This target only ends a READ on a
 // master NACK or when SCL_PIN stays idle, and ignores mid-transfer "STOPs".
+#include <Arduino_RouterBridge.h>   // only to satisfy the core's stub check; never started (no Linux dependency)
 
 #define GPIOB_BASE 0x42020400UL
 #define GREG(o) (*(volatile uint32_t *)(GPIOB_BASE + (o)))
