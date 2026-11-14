@@ -18,7 +18,7 @@ import os, socket, subprocess, threading, time
 
 ADB = os.path.expanduser("~/Library/Arduino15/packages/arduino/tools/adb/32.0.0/adb")
 HOST = os.environ.get("WHEELCHAIR_HOST", "wheelchair-unoq")
-START_OCD = "pgrep -f bin/openocd >/dev/null || (setsid -f /opt/openocd/bin/arduino-debug.sh > /tmp/ocd.log 2>&1 < /dev/null; sleep 3)"
+START_OCD = "pgrep -x openocd >/dev/null || (setsid -f /opt/openocd/bin/arduino-debug.sh > /tmp/ocd.log 2>&1 < /dev/null; sleep 3)"
 MAGIC = "0xc0ffee01"
 FRESH_S, RATE_HZ, PORT = 0.3, 20, 6666
 
