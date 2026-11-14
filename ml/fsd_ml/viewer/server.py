@@ -13,6 +13,7 @@ obstacle model yet, so the footprint check has nothing to reject.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import threading
 import time
@@ -28,6 +29,7 @@ from PIL import Image
 
 from fsd_ml.drivers import Driver, Goal, Motion, make_driver
 from fsd_ml.flowpilot import ONNX_PATH as FLOWPILOT_WEIGHTS
+from fsd_ml.live import LiveFeed
 from fsd_ml.pipeline.control import ControlConfig, follow
 from fsd_ml.pipeline.footprint import FootprintConfig, choose
 from fsd_ml.s2e import ONNX_PATH as S2E_WEIGHTS
@@ -42,6 +44,22 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 
 class ViewerError(Exception):
     """Something the page should show to the person using it."""
+
+
+class DrivingServiceGiven(ViewerError):
+    """A driving service's address was given where a model's was expected."""
+
+    def __init__(self, service: str) -> None:
+        super().__init__("that address is the driving service, not a model")
+        self.service = service
+
+
+def is_driving_service(url: str) -> bool:
+    try:
+        answer = httpx.get(f"{url.rstrip('/')}/api/status", timeout=5.0)
+        return answer.status_code == 200 and "phone_connected" in answer.text
+    except httpx.HTTPError:
+        return False
 
 
 # Models that run on this computer, and the file each needs.
@@ -90,10 +108,14 @@ class Session:
         # Models already loaded, so switching back to one is instant.
         self._loaded: dict[str, Driver] = {self.driver_id: driver}
         self._hosted_file = work_dir / "hosted.json"
+        self._service_file = work_dir / "service.json"
         self.footprint = FootprintConfig()
         self.control = ControlConfig()
         self.video_name: str | None = None
         self.conversion: Conversion | None = None
+        self.live: LiveFeed | None = None
+        self.live_photo: np.ndarray | None = None
+        self._live_jpeg: bytes | None = None
         self.frame_count = 0
         self.size = (0, 0)
         self._frames_dir = work_dir / "frames"
@@ -164,7 +186,14 @@ class Session:
                 except FileNotFoundError as error:
                     raise ViewerError(str(error)) from error
                 except (httpx.HTTPError, KeyError, ValueError) as error:
-                    raise ViewerError(f"could not reach that model: {error}") from error
+                    if url is not None and is_driving_service(url):
+                        raise DrivingServiceGiven(url.rstrip("/")) from error
+                    if isinstance(error, httpx.HTTPStatusError):
+                        code = error.response.status_code
+                        reason = f"that address answered, but is not a model server ({code})"
+                    else:
+                        reason = f"could not reach that address: {error}"
+                    raise ViewerError(reason) from error
             self.driver, self.driver_id = self._loaded[driver_id], driver_id
             self._cache.clear()
             if url is not None and url.rstrip("/") not in self.hosted():
@@ -189,6 +218,7 @@ class Session:
         shape = self.footprint.shape
         return {
             "video": self.video_name,
+            "live_service": self.last_service(),
             # What the upload was, and how it was put into the models' form.
             "conversion": self.conversion.as_dict() if self.conversion else None,
             "frames": self.frame_count,
@@ -216,7 +246,11 @@ class Session:
         return frames
 
     def _goal(
-        self, kind: str, goal_xy: tuple[float, float], instruction: str, photo_index: int | None
+        self,
+        kind: str,
+        goal_xy: tuple[float, float],
+        instruction: str,
+        photo: np.ndarray | None,
     ) -> Goal:
         """The goal for one of GOAL_KINDS. Models that only read points ignore the rest."""
         if kind not in GOAL_KINDS:
@@ -224,17 +258,120 @@ class Session:
         point, wants = "point" in kind, kind.split("+")[0]
         if wants == "say" and not instruction.strip():
             raise ViewerError("type an instruction first")
-        photo = None
-        if wants == "photo":
-            if photo_index is None or not 0 <= photo_index < self.frame_count:
-                raise ViewerError("choose a frame as the goal photo first")
-            with Image.open(self.frame_path(photo_index)) as image:
-                photo = np.asarray(image.convert("RGB"))
+        if wants == "photo" and photo is None:
+            raise ViewerError("choose a frame as the goal photo first")
         return Goal(
             point_xy=goal_xy if point else None,
             instruction=instruction.strip() if wants == "say" else None,
-            image=photo,
+            image=photo if wants == "photo" else None,
         )
+
+    def _decision(self, frames: list[np.ndarray], goal: Goal, speed_mps: float) -> dict[str, Any]:
+        """Ask the model, then choose a path and a command as the pipeline would."""
+        started = time.perf_counter()
+        candidates = self.driver.propose(frames, goal, Motion(speed_mps, 0.0))
+        inference_ms = (time.perf_counter() - started) * 1000.0
+
+        choice = choose(candidates, [], self.footprint)
+        v, w = follow(
+            choice.path_xy,
+            choice.speed_factor,
+            speed_mps,
+            1.0 / FPS,
+            self.control,
+            choice.speed_limit_mps,
+        )
+        return {
+            "inference_ms": round(inference_ms, 1),
+            "candidates": [
+                {
+                    "score": round(float(c.score), 4),
+                    "speed_mps": None if c.speed_mps is None else round(c.speed_mps, 2),
+                    "path": np.round(c.path_xy, 3).tolist(),
+                }
+                for c in candidates
+            ],
+            "chosen": choice.index,
+            "status": choice.status,
+            "reason": choice.reason,
+            "v_mps": round(v, 3),
+            "w_radps": round(w, 3),
+        }
+
+    # Live: the chair's phone, by way of the driving service.
+
+    def connect_live(self, service: str) -> None:
+        try:
+            feed = LiveFeed(service)
+        except ValueError as error:
+            raise ViewerError(str(error)) from error
+        self.disconnect_live()
+        self.live, self.live_photo = feed, None
+        feed.start()
+        self._service_file.write_text(json.dumps(service))
+
+    def last_service(self) -> str | None:
+        """The driving service last connected to, remembered between runs."""
+        try:
+            return str(json.loads(self._service_file.read_text()))
+        except (OSError, ValueError):
+            return None
+
+    def disconnect_live(self) -> None:
+        if self.live is not None:
+            self.live.stop()
+        self.live = self._live_jpeg = None
+
+    def keep_live_photo(self) -> None:
+        """Use what the camera sees now as the goal photo."""
+        sample = self.live.latest() if self.live else None
+        if sample is None or sample.frame is None:
+            raise ViewerError("no live frame yet")
+        self.live_photo = sample.frame.image
+
+    def live_frame(self) -> bytes:
+        if self._live_jpeg is None:
+            raise ViewerError("no live frame yet")
+        return self._live_jpeg
+
+    def live_decide(
+        self, goal_xy: tuple[float, float], speed_mps: float, kind: str, instruction: str
+    ) -> dict[str, Any]:
+        """Decide on the newest live frame. ``waiting`` says why there is nothing to decide on."""
+        if self.live is None:
+            raise ViewerError("not connected to a driving service")
+        sample = self.live.latest()
+        status = sample.status
+        stats, gps, frame = status.get("stats") or {}, status.get("gps") or {}, status.get("frame")
+        link = {
+            "service": self.live.service,
+            "phone": bool(status.get("phone_connected")),
+            "sensors_ok": bool(status.get("sensors_ok")),
+            "fps": stats.get("fps"),
+            "gps_accuracy_m": gps.get("accuracy_m") if gps.get("fresh") else None,
+            # Phone to service, as the service measures it.
+            "frame_age_ms": frame.get("age_ms") if frame else None,
+        }
+        waiting = self.live.problem
+        if waiting is None and sample.silent_s > 3.0:
+            waiting = "the service has gone quiet"
+        if waiting is None and not link["phone"]:
+            waiting = "the service is up, but no phone is streaming to it"
+        if waiting is None and sample.frame is None:
+            waiting = "waiting for the first camera frame"
+        if waiting is not None:
+            return {"waiting": waiting, "link": link}
+
+        goal = self._goal(kind, goal_xy, instruction, self.live_photo)
+        with self._lock:
+            frames = self.live.window(self.driver.context_frames, self.driver.frame_hz)
+            shown = frames[-1]
+            decision = self._decision(frames, goal, speed_mps)
+            buffer = io.BytesIO()
+            Image.fromarray(shown).save(buffer, format="JPEG", quality=85)
+            self._live_jpeg = buffer.getvalue()
+        height, width = shown.shape[:2]
+        return {**decision, "seq": sample.frame.n, "width": width, "height": height, "link": link}
 
     def decide(
         self,
@@ -247,7 +384,13 @@ class Session:
     ) -> dict[str, Any]:
         if not 0 <= index < self.frame_count:
             raise ViewerError(f"frame {index} is outside the video")
-        goal = self._goal(kind, goal_xy, instruction, photo_index)
+        photo = None
+        if kind.startswith("photo") and photo_index is not None:
+            if not 0 <= photo_index < self.frame_count:
+                raise ViewerError("choose a frame as the goal photo first")
+            with Image.open(self.frame_path(photo_index)) as image:
+                photo = np.asarray(image.convert("RGB"))
+        goal = self._goal(kind, goal_xy, instruction, photo)
         key = (
             index, round(goal_xy[0], 2), round(goal_xy[1], 2), round(speed_mps, 2),
             kind, goal.instruction, photo_index if goal.image is not None else None,
@@ -255,37 +398,10 @@ class Session:
         with self._lock:
             if key in self._cache:
                 return {**self._cache[key], "cached": True}
-            frames = self._window(index)
-            started = time.perf_counter()
-            candidates = self.driver.propose(frames, goal, Motion(speed_mps, 0.0))
-            inference_ms = (time.perf_counter() - started) * 1000.0
-
-            choice = choose(candidates, [], self.footprint)
-            v, w = follow(
-                choice.path_xy,
-                choice.speed_factor,
-                speed_mps,
-                1.0 / FPS,
-                self.control,
-                choice.speed_limit_mps,
-            )
             decision = {
                 "index": index,
                 "t_s": round(index / FPS, 2),
-                "inference_ms": round(inference_ms, 1),
-                "candidates": [
-                    {
-                        "score": round(float(c.score), 4),
-                        "speed_mps": None if c.speed_mps is None else round(c.speed_mps, 2),
-                        "path": np.round(c.path_xy, 3).tolist(),
-                    }
-                    for c in candidates
-                ],
-                "chosen": choice.index,
-                "status": choice.status,
-                "reason": choice.reason,
-                "v_mps": round(v, 3),
-                "w_radps": round(w, 3),
+                **self._decision(self._window(index), goal, speed_mps),
             }
             self._cache[key] = decision
             return {**decision, "cached": False}
@@ -316,6 +432,18 @@ def make_server(session: Session, host: str = "127.0.0.1", port: int = 8200) -> 
                     self._json(session.info())
                 elif url.path == "/api/models":
                     self._json(session.models())
+                elif url.path == "/api/live/decide":
+                    goal = (float(query["gx"][0]), float(query["gy"][0]))
+                    self._json(
+                        session.live_decide(
+                            goal,
+                            float(query["speed"][0]),
+                            query.get("kind", ["point"])[0],
+                            query.get("say", [""])[0],
+                        )
+                    )
+                elif url.path == "/live/frame.jpg":
+                    self._send(200, session.live_frame(), "image/jpeg")
                 elif url.path == "/api/decide":
                     goal = (float(query["gx"][0]), float(query["gy"][0]))
                     photo = query.get("photo", [""])[0]
@@ -351,6 +479,24 @@ def make_server(session: Session, host: str = "127.0.0.1", port: int = 8200) -> 
                 try:
                     session.switch(parse_qs(url.query).get("id", [""])[0])
                     self._json({**session.info(), "models": session.models()})
+                except DrivingServiceGiven as given:
+                    self._json({"error": str(given), "driving_service": given.service}, 400)
+                except ViewerError as error:
+                    self._json({"error": str(error)}, 400)
+                return
+            if url.path.startswith("/api/live"):
+                self.rfile.read(length)
+                try:
+                    if url.path == "/api/live":
+                        session.connect_live(parse_qs(url.query).get("service", [""])[0])
+                    elif url.path == "/api/live/stop":
+                        session.disconnect_live()
+                    elif url.path == "/api/live/photo":
+                        session.keep_live_photo()
+                    else:
+                        self._json({"error": "not found"}, 404)
+                        return
+                    self._json({"ok": True})
                 except ViewerError as error:
                     self._json({"error": str(error)}, 400)
                 return

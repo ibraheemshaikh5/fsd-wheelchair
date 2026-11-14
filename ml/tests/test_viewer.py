@@ -173,7 +173,7 @@ def test_switching_explains_what_went_wrong(tmp_path: Path) -> None:
         session.switch("nope")
     with pytest.raises(ViewerError, match="https://"):
         session.switch("remote:http://example.com")
-    with pytest.raises(ViewerError, match="could not reach"):
+    with pytest.raises(ViewerError, match="could not reach that address"):
         session.switch("remote:http://127.0.0.1:9")
     assert session.models()["current"] == "fan"
     assert session.hosted() == []
@@ -221,3 +221,75 @@ def test_portrait_and_slow_videos_are_flagged(tmp_path: Path) -> None:
     (tmp_path / "notes.mp4").write_text("not a video")
     with pytest.raises(VideoError, match="not a video"):
         standardize(tmp_path / "notes.mp4", tmp_path / "bad")
+
+
+def test_live_frames_are_put_into_the_standard_form() -> None:
+    import numpy as np
+
+    from fsd_ml.video import standardize_frame
+
+    portrait = np.zeros((640, 360, 3), dtype=np.uint8)
+    portrait[300:340] = 255  # a band across the middle survives the cut
+    out = standardize_frame(portrait)
+    assert out.shape == (360, 640, 3)
+    assert out.mean() > 40
+
+    assert standardize_frame(np.zeros((1080, 1920, 3), dtype=np.uint8)).shape == (360, 640, 3)
+
+
+def test_live_status_becomes_pipeline_input() -> None:
+    import numpy as np
+
+    from fsd_ml.live import LiveFrame, LiveSample, feed_address, to_sensors
+
+    assert feed_address("http://127.0.0.1:8000") == "ws://127.0.0.1:8000/ws/viewer"
+    assert feed_address("https://mac.tail1234.ts.net/") == "wss://mac.tail1234.ts.net/ws/viewer"
+    with pytest.raises(ValueError):
+        feed_address("ftp://nope")
+
+    status = {
+        "frame": {"age_ms": 60.0, "fresh": True},
+        "gps": {"lat": 38.99, "lon": -76.94, "speed_mps": 0.8, "age_ms": 900.0, "fresh": True},
+        "heading": {"deg": 90.0, "reference": "true"},
+    }
+    frame = LiveFrame(7, 0.0, np.zeros((360, 640, 3), dtype=np.uint8))
+    sensors = to_sensors(LiveSample(status, frame, 0.1), now_ms=10_000.0)
+    assert (sensors.frame_t_ms, sensors.fix_t_ms) == (9_940.0, 9_100.0)
+    assert (sensors.lat, sensors.heading_deg, sensors.speed_mps) == (38.99, 90.0, 0.8)
+
+    # A stale fix has no time, and a magnetic heading cannot be used with a map.
+    status["gps"]["fresh"] = False
+    status["heading"]["reference"] = "magnetic"
+    stale = to_sensors(LiveSample(status, frame, 0.1), now_ms=10_000.0)
+    assert (stale.fix_t_ms, stale.heading_deg) == (None, None)
+
+
+def test_live_decide_explains_why_it_is_waiting(tmp_path: Path) -> None:
+    session = Session(FanDriver(), tmp_path, "fan")
+    with pytest.raises(ViewerError, match="not connected"):
+        session.live_decide((10.0, 0.0), 1.0, "point", "")
+    with pytest.raises(ViewerError, match="should look like"):
+        session.connect_live("ftp://nope")
+
+    session.connect_live("http://127.0.0.1:9")  # nothing listens there
+    waiting = session.live_decide((10.0, 0.0), 1.0, "point", "")
+    assert "waiting" in waiting
+    session.disconnect_live()
+
+
+def test_a_driving_service_address_in_the_model_box_is_recognised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fsd_ml.viewer import server
+
+    session = Session(FanDriver(), tmp_path, "fan")
+    monkeypatch.setattr(server, "is_driving_service", lambda url: True)
+    with pytest.raises(server.DrivingServiceGiven) as given:
+        session.switch("remote:http://127.0.0.1:9/")
+    assert given.value.service == "http://127.0.0.1:9"
+
+    # And the service last used for live is remembered for the next run.
+    assert session.last_service() is None
+    session.connect_live("http://127.0.0.1:9")
+    session.disconnect_live()
+    assert Session(FanDriver(), tmp_path).info()["live_service"] == "http://127.0.0.1:9"

@@ -63,6 +63,11 @@
   input[type=range] { accent-color: var(--chosen); width: 100%; }
   select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
     padding: 4px 6px; font: inherit; }
+  .livebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px 0;
+    color: var(--muted); }
+  .livebar input { width: 280px; max-width: 60vw; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; }
+  .livebar .note { margin: 0; }
   .goal { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--muted); }
   .goal input[type=text] { flex: 1; min-width: 220px; background: var(--bg); color: var(--text);
     border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; }
@@ -80,15 +85,22 @@
   <h1>Model viewer</h1>
   <label class="pick">Model <select id="models" aria-label="Model in use"></select></label>
   <span class="hosted" id="hosted" hidden>
-    <input type="text" id="hostedUrl" placeholder="https://…modal.run" aria-label="Hosted model address">
+    <input type="text" id="hostedUrl" placeholder="Model address, e.g. https://…modal.run" aria-label="Hosted model address">
     <button id="connect">Connect</button>
     <button id="cancel">Cancel</button>
   </span>
   <span class="note" id="modelNote"></span>
   <span class="tag" id="video">no video</span>
   <span class="spacer"></span>
+  <button id="liveToggle">Live from chair</button>
   <label class="file">Open video<input type="file" id="file" accept="video/*"></label>
 </header>
+<div class="livebar" id="livebar" hidden>
+  <label>Chair's driving service <input type="text" id="service" value="http://127.0.0.1:8000" aria-label="Driving service address"></label>
+  <button id="liveConnect">Connect</button>
+  <button id="liveStop">Back to video</button>
+  <span class="note" id="liveNote"></span>
+</div>
 <div class="error" id="error" role="alert" hidden></div>
 <div class="notice" id="notice" hidden></div>
 <main>
@@ -101,7 +113,9 @@
       <h2>From above</h2>
       <canvas id="top" width="296" height="296"></canvas>
       <p class="note"><span style="color:var(--chosen)">Chosen path</span> with the chair's width ·
-        <span style="color:var(--other)">other proposals</span> · ◎ goal</p>
+        <span style="color:var(--other)">other proposals</span> · ◎ goal. A dashed ribbon is the
+        chosen speed and turn held for the next 5 m, shown when the model's own path is too
+        short to see.</p>
     </div>
     <div class="panel">
       <h2>Decision</h2>
@@ -115,6 +129,8 @@
         <dt>Model's own speed</dt><dd id="own">–</dd>
         <dt>Paths proposed</dt><dd id="count">–</dd>
         <dt>Model time</dt><dd id="ms">–</dd>
+        <dt class="liveonly" hidden>Camera delay</dt><dd class="liveonly" id="camDelay" hidden>–</dd>
+        <dt class="liveonly" hidden>Decisions</dt><dd class="liveonly" id="rate" hidden>–</dd>
       </dl>
       <div class="steer" title="Turn rate: left to right"><i id="steer"></i></div>
     </div>
@@ -162,7 +178,7 @@ const view = $("view"), vctx = view.getContext("2d");
 const topc = $("top"), tctx = topc.getContext("2d");
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-const state = { info: null, i: 0, playing: false, decision: null, images: new Map(), ask: 0, photo: null };
+const state = { info: null, i: 0, playing: false, decision: null, images: new Map(), ask: 0, photo: null, live: false, liveRun: 0 };
 const ADD = "__add";
 const UNITS = { gd: " m", gy: " m", sp: " m/s", ch: " m", ct: "°", cf: "°" };
 const CAMERA_KEYS = ["ch", "ct", "cf", "lens"];
@@ -175,7 +191,7 @@ function showError(message) {
 async function api(path, options) {
   const response = await fetch(path, options);
   const body = await response.json();
-  if (!response.ok) throw new Error(body.error || "request failed");
+  if (!response.ok) throw Object.assign(new Error(body.error || "request failed"), { body });
   return body;
 }
 
@@ -236,6 +252,33 @@ function trace(ctx, points, map, joined = false) {
   }
 }
 
+const SHORT_PATH_M = 1.5, ARC_M = 5;
+
+const pathLength = (path) => path.reduce((sum, p, k) => sum + (k ? Math.hypot(p[0] - path[k - 1][0], p[1] - path[k - 1][1]) : Math.hypot(p[0], p[1])), 0);
+
+// Where holding the chosen speed and turn rate takes the chair: the next 5 m of
+// travel, or a quarter turn if that comes first. Far enough to be in the camera's view.
+function commandArc(v, w) {
+  if (v < 0.05) return [];
+  const bend = w / v, points = [];
+  for (let along = 0.2; along <= ARC_M + 1e-9; along += 0.2) {
+    if (Math.abs(bend * along) > Math.PI / 2) break;
+    points.push(Math.abs(bend) < 1e-3
+      ? [along, 0]
+      : [Math.sin(bend * along) / bend, (1 - Math.cos(bend * along)) / bend]);
+  }
+  return points;
+}
+
+// The path the chair's ribbon follows: the model's own when it is long enough to
+// see, otherwise the command played forward. Some models only plan a step ahead.
+function ribbonPath(decision) {
+  const chosen = decision.candidates[decision.chosen];
+  if (!chosen) return { path: [], projected: false };
+  if (pathLength(chosen.path) >= SHORT_PATH_M) return { path: chosen.path, projected: false };
+  return { path: commandArc(decision.v_mps, decision.w_radps), projected: true };
+}
+
 function drawPaths(ctx, map, lineWidth) {
   const decision = state.decision;
   if (!decision) return;
@@ -251,15 +294,27 @@ function drawPaths(ctx, map, lineWidth) {
   });
   const chosen = decision.candidates[decision.chosen];
   if (!chosen) return;
-  const [leftEdge, rightEdge] = edges(chosen.path, half);
-  ctx.beginPath(); trace(ctx, leftEdge, map); trace(ctx, rightEdge.reverse(), map, true); ctx.closePath();
-  ctx.fillStyle = "rgba(61, 219, 217, 0.28)"; ctx.fill();
+  const ribbon = ribbonPath(decision);
+  if (ribbon.path.length > 1) {
+    const [leftEdge, rightEdge] = edges(ribbon.path, half);
+    ctx.beginPath(); trace(ctx, leftEdge, map); trace(ctx, rightEdge.reverse(), map, true); ctx.closePath();
+    ctx.fillStyle = "rgba(61, 219, 217, 0.28)"; ctx.fill();
+    if (ribbon.projected) {
+      // Dashed: this is the command played forward, not a path the model drew.
+      ctx.beginPath(); trace(ctx, ribbon.path, map);
+      ctx.setLineDash([8, 6]); ctx.strokeStyle = css("--chosen"); ctx.lineWidth = lineWidth; ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
   ctx.beginPath(); trace(ctx, chosen.path, map);
   ctx.strokeStyle = css("--chosen"); ctx.lineWidth = lineWidth * 1.6; ctx.stroke();
 }
 
 function drawTop() {
-  const size = topc.width, reach = 9, scale = size / reach;
+  // Zoom in when everything worth seeing is close to the chair.
+  const ribbon = state.decision ? ribbonPath(state.decision).path : [];
+  const furthest = Math.max(0, ...ribbon.map((p) => Math.hypot(p[0], p[1])));
+  const size = topc.width, reach = state.decision && furthest < 3.2 ? 4.5 : 9, scale = size / reach;
   const map = (ahead, left) => [size / 2 - left * scale, size - 24 - ahead * scale];
   tctx.fillStyle = "#0d1014"; tctx.fillRect(0, 0, size, size);
   tctx.strokeStyle = css("--line"); tctx.lineWidth = 1;
@@ -284,6 +339,7 @@ function drawTop() {
 }
 
 async function draw() {
+  if (state.live) return;
   if (!state.info || !state.info.frames) { drawTop(); return; }
   const index = state.i, image = await frameImage(index);
   if (index !== state.i) return;
@@ -389,10 +445,26 @@ async function switchModel(id) {
     showModels(info.models);
     showError("");
     showHostedBox(false);
-    applyInfo(info, state.i);
+    if (state.live) {
+      state.info = info;
+      $("model").textContent = info.driver.title;
+      $("where").textContent = info.driver.runs_on;
+    } else {
+      applyInfo(info, state.i);
+    }
   } catch (error) {
-    showError(error.message);
     api("/api/models").then(showModels).catch(() => {});
+    const service = error.body && error.body.driving_service;
+    if (service) {
+      // The chair's address was put in the model box: it belongs to the live view.
+      showHostedBox(false);
+      showError("");
+      setLive(true);
+      $("service").value = service;
+      connectLive();
+    } else {
+      showError(error.message);
+    }
   }
   $("modelNote").textContent = "";
   for (const control of ["models", "connect", "cancel"]) $(control).disabled = false;
@@ -478,18 +550,106 @@ $("cancel").addEventListener("click", () => showHostedBox(false));
 const connect = () => { const url = $("hostedUrl").value.trim(); if (url) switchModel(`remote:${url}`); };
 $("connect").addEventListener("click", connect);
 $("hostedUrl").addEventListener("keydown", (event) => { if (event.key === "Enter") connect(); });
-const redecide = () => { if (state.info && state.info.frames) decide(state.i).then(draw); };
+// In live mode the loop below picks up any change on its next decision.
+const redecide = () => { if (!state.live && state.info && state.info.frames) decide(state.i).then(draw); };
+
+function setLive(on) {
+  state.live = on;
+  setPlaying(false);
+  $("livebar").hidden = !on;
+  document.querySelector(".transport").hidden = on;
+  for (const element of document.querySelectorAll(".liveonly")) element.hidden = !on;
+  $("liveToggle").hidden = on;
+  $("photo").textContent = on ? "Use what the camera sees now as the goal photo" : "Use this frame as the goal photo";
+  $("photoNote").textContent = "No goal photo chosen";
+  $("notice").hidden = true;
+  state.photo = null;
+  state.decision = null;
+  if (on) {
+    $("video").textContent = "live";
+    $("empty").hidden = false;
+    $("empty").textContent = "Connect to the driving service to see the chair's camera.";
+    if (state.info && state.info.live_service) $("service").value = state.info.live_service;
+  } else {
+    api("/api/live/stop", { method: "POST" }).catch(() => {});
+    $("empty").textContent = "Drop a forward-facing video here, or choose Open video.";
+    api("/api/info").then((info) => applyInfo(info));
+  }
+}
+
+async function liveLoop() {
+  const run = ++state.liveRun;
+  let last = performance.now();
+  while (state.live && run === state.liveRun) {
+    const g = goal();
+    const query = new URLSearchParams({ gx: g.x, gy: g.y, speed: $("sp").value, kind: $("kind").value, say: $("say").value });
+    let d;
+    try {
+      d = await api(`/api/live/decide?${query}`);
+      showError("");
+    } catch (error) {
+      showError(error.message);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      continue;
+    }
+    if (!state.live || run !== state.liveRun) break;
+    const link = d.link || {};
+    const feed = link.fps != null ? ` · camera ${Number(link.fps).toFixed(0)} fps` : "";
+    $("liveNote").textContent = d.waiting ? `Waiting: ${d.waiting}` : `Connected${feed}${link.sensors_ok ? "" : " · sensors not all fresh"}`;
+    if (d.waiting) {
+      $("empty").hidden = false;
+      $("empty").textContent = `Waiting: ${d.waiting}`;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      continue;
+    }
+    const image = new Image();
+    await new Promise((resolve) => { image.onload = image.onerror = resolve; image.src = `/live/frame.jpg?n=${d.seq}`; });
+    if (!state.live || run !== state.liveRun) break;
+    $("empty").hidden = true;
+    view.width = d.width; view.height = d.height;
+    state.decision = { ...d, cached: false };
+    if (image.naturalWidth) vctx.drawImage(image, 0, 0, view.width, view.height);
+    drawPaths(vctx, project, 2);
+    drawTop();
+    showDecision();
+    const now = performance.now();
+    $("camDelay").textContent = link.frame_age_ms != null ? `${Math.round(link.frame_age_ms)} ms` : "–";
+    $("rate").textContent = `${(1000 / (now - last)).toFixed(1)} per second`;
+    last = now;
+  }
+}
+
+$("liveToggle").addEventListener("click", () => setLive(true));
+$("liveStop").addEventListener("click", () => setLive(false));
+async function connectLive() {
+  const service = $("service").value.trim();
+  try {
+    await api(`/api/live?service=${encodeURIComponent(service)}`, { method: "POST" });
+    showError("");
+    liveLoop();
+  } catch (error) {
+    showError(error.message);
+  }
+}
+$("liveConnect").addEventListener("click", connectLive);
+$("service").addEventListener("keydown", (event) => { if (event.key === "Enter") connectLive(); });
 $("kind").addEventListener("change", redecide);
 $("apply").addEventListener("click", redecide);
 $("say").addEventListener("keydown", (event) => { if (event.key === "Enter") redecide(); });
 $("photo").addEventListener("click", () => {
+  if (state.live) {
+    api("/api/live/photo", { method: "POST" })
+      .then(() => { $("photoNote").textContent = "Goal photo: taken from the live camera"; showError(""); })
+      .catch((error) => showError(error.message));
+    return;
+  }
   if (!state.info || !state.info.frames) return;
   state.photo = state.i;
   $("photoNote").textContent = `Goal photo: frame ${state.i + 1} (${(state.i / state.info.fps).toFixed(2)} s)`;
   redecide();
 });
 document.addEventListener("keydown", (event) => {
-  if (!state.info || !state.info.frames || ["INPUT", "SELECT"].includes(event.target.tagName)) return;
+  if (state.live || !state.info || !state.info.frames || ["INPUT", "SELECT"].includes(event.target.tagName)) return;
   if (event.key === " ") { event.preventDefault(); $("play").click(); }
   if (event.key === "ArrowLeft") $("back").click();
   if (event.key === "ArrowRight") $("forward").click();
