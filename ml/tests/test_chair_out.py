@@ -101,3 +101,16 @@ def test_takeover_or_dropout_halts_sending(flag):
     assert result.halted and not result.sent and result.problem
     assert len(chair.sets) == count
     sender.close()
+
+
+def test_send_stick_caps_never_reverses_and_halts_on_takeover():
+    chair = FakeChair()
+    sender = ChairSender(chair, clock=Clock())
+    result = sender.send_stick(-100, 12.4)
+    assert result.sent and (result.x, result.y) == (-MAX_PCT, 12)
+    assert sender.send_stick(5, -20).y == 0
+    assert chair.sets[:2] == [(-MAX_PCT, 12), (5, 0)]
+    chair.board["takeover"] = True
+    result = sender.send_stick(10, 10)
+    assert result.halted and not result.sent and (10, 10) not in chair.sets
+    sender.close()
