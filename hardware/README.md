@@ -12,6 +12,14 @@ Mac / AI --set(x,y)--> wheelchair.py --UDP over Tailscale--> wheelchaird (UNO Q 
 Wi-Fi gaps up to 0.3 s are bridged on the board (no stutter); longer gaps ease to a stop by 0.6 s, and after 2 s the
 real stick drives again.
 
+## Chair dimensions (Culver WOLF, measured)
+| | inches | cm |
+|---|---|---|
+| Overall length | 40 | 101.6 |
+| Overall width | 25 | 63.5 |
+| Rear (drive) wheel diameter | 12 | 30.5 |
+| Front (caster) wheel diameter | 7 | 17.8 |
+
 ## Wiring (see `img/final_wiring.png`)
 - Chair's stick cable, sensor-end 4-hole plug -> shield: **red -> SDA, white -> SCL, black -> GND, yellow empty.**
 - Real joystick sensor -> Grove cable -> shield port **D2** (not an I2C port).
