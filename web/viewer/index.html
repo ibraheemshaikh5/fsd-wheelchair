@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sensor Viewer</title>
+    <link rel="stylesheet" href="../shared/style.css" />
+    <style>
+      .layout {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: 1fr;
+      }
+      @media (min-width: 900px) {
+        .layout {
+          grid-template-columns: 3fr 2fr;
+        }
+      }
+      #map {
+        height: 320px;
+        border-radius: var(--radius);
+      }
+      .frame-wrap {
+        position: relative;
+      }
+      .frame-wrap .badge {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        background: rgba(0, 0, 0, 0.65);
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 13px;
+      }
+      img.frame.stale {
+        opacity: 0.4;
+      }
+      .rows.stale dd {
+        opacity: 0.6;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Sensor viewer</h1>
+      <p id="connection" class="level-warn">Connecting to the service…</p>
+      <div class="layout">
+        <section>
+          <div class="frame-wrap">
+            <img id="frame" class="frame" alt="Latest camera frame from the chair" />
+            <span id="frame-badge" class="badge">No frames yet</span>
+          </div>
+          <h2>Map</h2>
+          <div id="map"></div>
+        </section>
+        <section>
+          <div class="panel">
+            <dl class="rows" id="status" aria-live="polite"></dl>
+          </div>
+          <div class="actions">
+            <button id="record" class="primary" type="button" disabled>Start recording</button>
+          </div>
+          <p id="error" class="error" role="alert"></p>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

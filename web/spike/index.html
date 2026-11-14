@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Device Check</title>
+    <link rel="stylesheet" href="../shared/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Device check</h1>
+      <p>
+        Mount the phone on the chair exactly as it will ride, then tap Run. It checks what this
+        browser can do and samples the sensors for 20 seconds. Point the chair at a known compass
+        direction (use a map) and, if you can, roll it a few metres during the run.
+      </p>
+      <div class="actions">
+        <button id="run" class="primary" type="button">Run check</button>
+        <button id="copy" type="button" disabled>Copy results</button>
+      </div>
+      <p id="progress"></p>
+      <p id="error" class="error" role="alert"></p>
+      <video id="video" playsinline muted autoplay hidden></video>
+      <section class="panel"><pre id="report">Not run yet.</pre></section>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
