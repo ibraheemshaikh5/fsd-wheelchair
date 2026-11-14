@@ -29,7 +29,7 @@ from PIL import Image
 
 from fsd_ml.drivers import Driver, Goal, Motion, make_driver
 from fsd_ml.flowpilot import ONNX_PATH as FLOWPILOT_WEIGHTS
-from fsd_ml.live import LiveFeed
+from fsd_ml.live import ChairGoal, LiveFeed
 from fsd_ml.pipeline.control import ControlConfig, follow
 from fsd_ml.pipeline.footprint import FootprintConfig, choose
 from fsd_ml.s2e import ONNX_PATH as S2E_WEIGHTS
@@ -39,6 +39,8 @@ PAGE = Path(__file__).with_name("page.html")
 MAX_UPLOAD_BYTES = 2 * 1024**3
 # How the goal is given: a point, an instruction, a photo, or one of those with a point.
 GOAL_KINDS = ("point", "say", "photo", "say+point", "photo+point")
+# In the live view only: take the goal the rider set on the iPad.
+FROM_IPAD = "ipad"
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 
 
@@ -116,6 +118,7 @@ class Session:
         self.live: LiveFeed | None = None
         self.live_photo: np.ndarray | None = None
         self._live_jpeg: bytes | None = None
+        self._chair_goal: ChairGoal | None = None
         self.frame_count = 0
         self.size = (0, 0)
         self._frames_dir = work_dir / "frames"
@@ -253,6 +256,8 @@ class Session:
         photo: np.ndarray | None,
     ) -> Goal:
         """The goal for one of GOAL_KINDS. Models that only read points ignore the rest."""
+        if kind == FROM_IPAD:
+            raise ViewerError("the iPad's goal is only available in the live view")
         if kind not in GOAL_KINDS:
             raise ViewerError(f"goal type must be one of {', '.join(GOAL_KINDS)}")
         point, wants = "point" in kind, kind.split("+")[0]
@@ -307,6 +312,7 @@ class Session:
             raise ViewerError(str(error)) from error
         self.disconnect_live()
         self.live, self.live_photo = feed, None
+        self._chair_goal = ChairGoal(service)
         feed.start()
         self._service_file.write_text(json.dumps(service))
 
@@ -362,7 +368,14 @@ class Session:
         if waiting is not None:
             return {"waiting": waiting, "link": link}
 
-        goal = self._goal(kind, goal_xy, instruction, self.live_photo)
+        note = None
+        if kind == FROM_IPAD:
+            # Whatever the rider set on the iPad: a route, a bare destination or an instruction.
+            goal, note = self._chair_goal.read(status)
+            if goal is None:
+                return {"waiting": note, "link": link}
+        else:
+            goal = self._goal(kind, goal_xy, instruction, self.live_photo)
         with self._lock:
             frames = self.live.window(self.driver.context_frames, self.driver.frame_hz)
             shown = frames[-1]
@@ -371,7 +384,15 @@ class Session:
             Image.fromarray(shown).save(buffer, format="JPEG", quality=85)
             self._live_jpeg = buffer.getvalue()
         height, width = shown.shape[:2]
-        return {**decision, "seq": sample.frame.n, "width": width, "height": height, "link": link}
+        return {
+            **decision,
+            "seq": sample.frame.n,
+            "width": width,
+            "height": height,
+            "link": link,
+            "goal_note": note,
+            "goal_xy": goal.point_xy,
+        }
 
     def decide(
         self,

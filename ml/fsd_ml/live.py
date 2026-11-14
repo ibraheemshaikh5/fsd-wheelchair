@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import threading
 import time
 from collections import deque
@@ -21,9 +22,13 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 import numpy as np
 from PIL import Image
 
+from fsd_ml.drivers import Goal
+from fsd_ml.geo import to_local, world_to_chair
+from fsd_ml.pipeline.route import Route
 from fsd_ml.pipeline.types import Sensors
 from fsd_ml.video import standardize_frame
 
@@ -183,3 +188,70 @@ def to_sensors(sample: LiveSample, now_ms: float) -> Sensors:
         heading_deg=true_heading,
         speed_mps=gps.get("speed_mps") if gps else None,
     )
+
+
+# How far along the route the model is aimed.
+ROUTE_LOOKAHEAD_M = 10.0
+
+
+class ChairGoal:
+    """The trip the rider set on the iPad, as a goal for a model.
+
+    The service's status says what kind of goal there is and gives each change a
+    new version number; the route itself is fetched once per version.
+    """
+
+    def __init__(self, service: str) -> None:
+        self._service = service.rstrip("/")
+        self._version: int | None = None
+        self._route: Route | None = None
+        self._progress_m = 0.0
+
+    def _route_for(self, version: int) -> Route | None:
+        if version != self._version:
+            answer = httpx.get(f"{self._service}/api/goal", timeout=5.0).raise_for_status().json()
+            points = (answer.get("data") or {}).get("route") or []
+            self._route = (
+                Route([(p["lat"], p["lon"]) for p in points]) if len(points) >= 2 else None
+            )
+            self._version, self._progress_m = version, 0.0
+        return self._route
+
+    def read(self, status: dict[str, Any]) -> tuple[Goal | None, str]:
+        """The goal, and a line saying what it is; or None and why there is none yet."""
+        goal, gps, heading = status.get("goal"), status.get("gps"), status.get("heading") or {}
+        if goal and goal.get("kind") == "instruction":
+            return Goal(instruction=goal["instruction"]), f"iPad: “{goal['instruction']}”"
+
+        destination = status.get("destination")
+        if not goal and not destination:
+            return None, "no destination set on the iPad yet"
+
+        # Everything from here needs to know where the chair is and which way it faces.
+        placed = gps and gps.get("fresh") and heading.get("reference") == "true"
+        if not placed or heading.get("deg") is None:
+            return None, "the iPad has a destination, but the chair has no fresh GPS and heading"
+        facing = float(heading["deg"])
+
+        if goal and goal.get("kind") == "route":
+            try:
+                route = self._route_for(int(goal["version"]))
+            except (httpx.HTTPError, KeyError, ValueError) as error:
+                return None, f"could not fetch the route from the service: {error}"
+            if route is not None:
+                east, north = to_local(gps["lat"], gps["lon"], route.origin)
+                self._progress_m = route.project(east, north, self._progress_m)
+                left_m = route.length_m - self._progress_m
+                target = route.point_at(self._progress_m + ROUTE_LOOKAHEAD_M)
+                ahead, left = world_to_chair(target, east, north, facing)[0]
+                return Goal(
+                    point_xy=(float(ahead), float(left))
+                ), f"iPad route: {left_m:.0f} m left"
+
+        # A bare destination: aim straight at it.
+        distance, bearing = destination.get("distance_m"), destination.get("bearing_deg")
+        if distance is None or bearing is None:
+            return None, "the iPad has a destination, but the chair has no fresh GPS"
+        off = math.radians(float(bearing) - facing)
+        point = (float(distance) * math.cos(off), -float(distance) * math.sin(off))
+        return Goal(point_xy=point), f"iPad destination: {float(distance):.0f} m away, no route"

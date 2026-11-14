@@ -293,3 +293,56 @@ def test_a_driving_service_address_in_the_model_box_is_recognised(
     session.connect_live("http://127.0.0.1:9")
     session.disconnect_live()
     assert Session(FanDriver(), tmp_path).info()["live_service"] == "http://127.0.0.1:9"
+
+
+def test_ipad_trip_becomes_a_goal_for_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fsd_ml import live
+    from fsd_ml.geo import to_latlon
+
+    origin = (38.99, -76.94)
+    chair = to_latlon(0.0, 5.0, origin)  # 5 m up a route that runs north, then east
+    here = {"lat": chair[0], "lon": chair[1], "fresh": True}
+    north = {"deg": 0.0, "reference": "true"}
+    reader = live.ChairGoal("https://chair.example")
+
+    assert reader.read({})[0] is None
+    said = {"goal": {"kind": "instruction", "version": 1, "instruction": "go to the kitchen"}}
+    goal, note = reader.read(said)
+    assert (goal.instruction, goal.point_xy) == ("go to the kitchen", None)
+    assert "go to the kitchen" in note
+
+    # A bare destination 20 m due east of a chair facing north is 20 m to its right.
+    bare = {"destination": {"distance_m": 20.0, "bearing_deg": 90.0}, "gps": here, "heading": north}
+    goal, note = reader.read(bare)
+    assert goal.point_xy == pytest.approx((0.0, -20.0), abs=1e-6)
+    assert "no route" in note
+    # Without knowing which way the chair faces there is nothing to aim at.
+    assert reader.read({**bare, "heading": {"deg": 0.0, "reference": "magnetic"}})[0] is None
+
+    points = [to_latlon(e, n, origin) for e, n in ((0, 0), (0, 12), (30, 12))]
+    fetched = []
+
+    class Answer:
+        def raise_for_status(self):
+            return self
+
+        def json(self):
+            return {"data": {"route": [{"lat": lat, "lon": lon} for lat, lon in points]}}
+
+    def get(url: str, timeout: float) -> Answer:
+        fetched.append(url)
+        return Answer()
+
+    monkeypatch.setattr(live.httpx, "get", get)
+    routed = {
+        "goal": {"kind": "route", "version": 2, "instruction": None, "route_points": 3},
+        "destination": {"distance_m": 30.0, "bearing_deg": 80.0},
+        "gps": here,
+        "heading": north,
+    }
+    goal, note = reader.read(routed)
+    # 10 m further along: 7 m north to the corner, then 3 m east, so ahead and to the right.
+    assert goal.point_xy == pytest.approx((7.0, -3.0), abs=0.05)
+    assert note == "iPad route: 37 m left"
+    reader.read(routed)
+    assert fetched == ["https://chair.example/api/goal"]  # the route is fetched once per version

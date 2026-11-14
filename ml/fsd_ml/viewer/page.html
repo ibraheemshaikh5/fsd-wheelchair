@@ -161,6 +161,7 @@
         <option value="photo">Photo</option>
         <option value="say+point">Instruction + point</option>
         <option value="photo+point">Photo + point</option>
+        <option value="ipad">From the iPad (live only)</option>
       </select>
     </label>
     <input type="text" id="say" placeholder="e.g. go through the door on the left" aria-label="Instruction">
@@ -330,7 +331,9 @@ function drawTop() {
   const corner = map(chair.length_m / 2, chair.width_m / 2);
   tctx.fillStyle = "#e6edf3";
   tctx.fillRect(corner[0], corner[1], chair.width_m * scale, chair.length_m * scale);
-  const g = goal(), far = Math.hypot(g.x, g.y) > reach - 1;
+  // A goal that came from the iPad is drawn where the service put it, not where the sliders are.
+  const given = state.decision && state.decision.goal_xy;
+  const g = given ? { x: given[0], y: given[1] } : goal(), far = Math.hypot(g.x, g.y) > reach - 1;
   const shown = far ? [g.x * (reach - 1) / Math.hypot(g.x, g.y), g.y * (reach - 1) / Math.hypot(g.x, g.y)] : [g.x, g.y];
   const p = map(shown[0], shown[1]);
   tctx.strokeStyle = far ? css("--muted") : css("--text"); tctx.lineWidth = 2;
@@ -595,7 +598,8 @@ async function liveLoop() {
     if (!state.live || run !== state.liveRun) break;
     const link = d.link || {};
     const feed = link.fps != null ? ` · camera ${Number(link.fps).toFixed(0)} fps` : "";
-    $("liveNote").textContent = d.waiting ? `Waiting: ${d.waiting}` : `Connected${feed}${link.sensors_ok ? "" : " · sensors not all fresh"}`;
+    const from = d.goal_note ? ` · ${d.goal_note}` : "";
+    $("liveNote").textContent = d.waiting ? `Waiting: ${d.waiting}` : `Connected${feed}${link.sensors_ok ? "" : " · sensors not all fresh"}${from}`;
     if (d.waiting) {
       $("empty").hidden = false;
       $("empty").textContent = `Waiting: ${d.waiting}`;
