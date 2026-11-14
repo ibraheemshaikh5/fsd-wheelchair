@@ -1,0 +1,13 @@
+[Unit]
+Description=Wheelchair joystick feeder (UDP over Tailscale -> openocd -> fake MLX90393)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=arduino
+ExecStart=/usr/bin/python3 /home/arduino/wheelchaird.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
