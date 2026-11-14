@@ -11,7 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from drive_service.app import create_app
 from drive_service.config import Settings
-from helpers import TINY_JPEG, as_json, frame_bytes, gps_dict, hello_dict, ping_dict
+from helpers import TINY_JPEG, as_json, frame_bytes, gps_dict, hello_dict, imu_dict, ping_dict
 
 HOST = "testserver"
 TEST_HOSTS = (HOST,)
@@ -63,7 +63,11 @@ def test_phone_stream_reaches_status(client):
         phone.send_text(as_json(gps_dict(lat=38.5)))
         phone.send_bytes(frame_bytes(seq=4))
         phone.send_text(as_json(ping_dict(t=77.0)))
+        ack = json.loads(phone.receive_text())
         pong = json.loads(phone.receive_text())
+
+        assert ack["type"] == "ack"
+        assert ack["seq"] == 4
 
         assert pong["type"] == "pong"
         assert pong["t"] == 77.0
@@ -513,3 +517,42 @@ def test_built_web_pages_are_served(tmp_path):
     with TestClient(create_app(settings)) as client:
         assert "chair" in client.get("/").text
         assert _status(client)["phone_connected"] is False
+
+
+def _recorded_meta(client: TestClient, settings: Settings, hello: dict) -> dict:
+    with client.websocket_connect("/ws/phone", headers=SAME_ORIGIN) as phone:
+        phone.send_text(as_json(hello))
+        phone.send_text(as_json(ping_dict()))
+        phone.receive_text()
+        session = client.post("/api/recording/start", headers=SAME_ORIGIN).json()["data"]["session"]
+    client.post("/api/recording/stop", headers=SAME_ORIGIN)
+    return json.loads((settings.record_dir / session / "meta.json").read_text())
+
+
+def test_meta_records_the_phone_imu_axes(client, settings):
+    meta = _recorded_meta(client, settings, hello_dict(imu_axes="device_xyz"))
+    assert meta["imu_axes"] == "device_xyz"
+
+
+def test_meta_imu_axes_is_null_for_an_older_phone(client, settings):
+    assert _recorded_meta(client, settings, hello_dict())["imu_axes"] is None
+
+
+def test_imu_reaches_the_motion_status(client):
+    with client.websocket_connect("/ws/phone", headers=SAME_ORIGIN) as phone:
+        phone.send_text(as_json(hello_dict(imu_axes="device_xyz")))
+        phone.send_text(as_json(imu_dict()))
+        phone.send_text(as_json(ping_dict()))
+        phone.receive_text()
+        motion = _status(client)["motion"]
+    assert motion is not None
+    assert motion["fresh"] is False  # the clock is not synced yet
+    assert set(motion) == {
+        "speed_mps",
+        "speed_source",
+        "yaw_rate_dps",
+        "accel_fwd_mps2",
+        "accel_lat_mps2",
+        "age_ms",
+        "fresh",
+    }

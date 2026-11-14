@@ -1,15 +1,12 @@
 import type { FrameStatus, HeadingStatus, Level, RecordingStatus, ServiceStatus, StatusRow } from '../shared/status';
+import { motionRows } from './motion';
+import { formatAge } from './units';
+
+export { formatAge };
 
 /** Above this, the stream is too slow to drive on at walking pace. */
 const LATENCY_BAD_MS = 500;
 const LATENCY_WARN_MS = 250;
-const MS_PER_S = 1000;
-
-export function formatAge(ms: number | null): string {
-  if (ms === null) return '—';
-  return ms < MS_PER_S ? `${Math.round(ms)} ms` : `${(ms / MS_PER_S).toFixed(1)} s`;
-}
-
 const ms = (value: number): string => `${Math.round(value)} ms`;
 
 const FULL_TURN_DEG = 360;
@@ -140,6 +137,7 @@ export function statusRows(status: ServiceStatus): readonly StatusRow[] {
     phoneRow(status),
     cameraRow(status),
     gpsRow(status),
+    ...motionRows(status.motion, status.motion_invalid === true),
     headingRow(status),
     latencyRow(status),
     framesRow(status),
@@ -151,11 +149,12 @@ export function statusRows(status: ServiceStatus): readonly StatusRow[] {
  * Text over the camera frame. Once the viewer has lost the service, the last
  * age it heard is frozen, so it is not shown as if it were current.
  */
-export function frameBadge(frame: FrameStatus | null, connected: boolean): string {
+export function frameBadge(frame: FrameStatus | null, connected: boolean, undecodable = 0): string {
   const lost = connected ? '' : ' · DISCONNECTED';
-  if (frame === null) return `No frames yet${lost}`;
-  if (!connected) return `#${frame.seq}${lost}`;
-  return `#${frame.seq} · ${formatAge(frame.age_ms)} old${frame.fresh ? '' : ' · STALE'}`;
+  const bad = undecodable > 0 ? ` · ${undecodable} undecodable` : '';
+  if (frame === null) return `No frames yet${lost}${bad}`;
+  if (!connected) return `#${frame.seq}${lost}${bad}`;
+  return `#${frame.seq} · ${formatAge(frame.age_ms)} old${frame.fresh ? '' : ' · STALE'}${bad}`;
 }
 
 interface RecordButtonState {

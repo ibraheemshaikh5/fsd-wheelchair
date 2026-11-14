@@ -2,6 +2,7 @@
 
 import type { Level } from '../shared/status';
 import type { ClockSample } from './clock';
+import type { LinkView } from './link-stats';
 import { describeConnection } from './status';
 import type { TransportState } from './transport';
 
@@ -22,6 +23,8 @@ export interface LiveState {
   readonly motion: MotionAccess | null;
   readonly wakeLock: boolean | null;
   readonly clock: ClockSample | null;
+  /** How the frame stream copes with the link, refreshed once a second; null until then. */
+  readonly link: LinkView | null;
 }
 
 export const INITIAL_LIVE: LiveState = Object.freeze({
@@ -33,6 +36,7 @@ export const INITIAL_LIVE: LiveState = Object.freeze({
   motion: null,
   wakeLock: null,
   clock: null,
+  link: null,
 });
 
 /**
@@ -65,6 +69,47 @@ function wakeLockRow(held: boolean | null): StatusRow {
     : { label: 'Screen lock', value: 'Not held: set Auto-Lock to Never', level: 'warn' };
 }
 
+/** Sent below this share of the captured rate, the link is the bottleneck. */
+const WEAK_SEND_SHARE = 0.7;
+/** Frames acked slower than this are too old by arrival for driving. */
+const SLOW_ACK_MS = 150;
+
+const fps = (value: number): string => `${Math.round(value)}`;
+
+const ACK_STATUS_TEXT = { waiting: 'Waiting for first ack', none: 'No acks (older service)' } as const;
+
+function ackText(link: LinkView): string {
+  if (link.ackStatus !== 'acking') return ACK_STATUS_TEXT[link.ackStatus];
+  return link.ackRttMs === null ? '—' : `${Math.round(link.ackRttMs)} ms`;
+}
+
+/** Sent vs captured rate, flow-control skips, JPEG quality and ack round trip, so a weak link shows. */
+export function linkStatusRows(link: LinkView | null): readonly StatusRow[] {
+  if (link === null) {
+    return ['Send rate', 'Held back', 'JPEG quality', 'Frame ack'].map((label) => ({
+      label,
+      value: '—',
+      level: 'none' as const,
+    }));
+  }
+  const weak = link.sentFps < WEAK_SEND_SHARE * link.capturedFps;
+  const slowAck = link.ackRttMs !== null && link.ackRttMs > SLOW_ACK_MS;
+  return [
+    { label: 'Send rate', value: `${fps(link.sentFps)} of ${fps(link.capturedFps)} fps`, level: weak ? 'warn' : 'ok' },
+    {
+      label: 'Held back',
+      value: `${fps(link.flowSkipsPerS)}/s by slow link (${link.flowSkips} total)`,
+      level: link.flowSkipsPerS > 0 ? 'warn' : 'none',
+    },
+    { label: 'JPEG quality', value: link.jpegQuality.toFixed(2), level: 'none' },
+    {
+      label: 'Frame ack',
+      value: ackText(link),
+      level: slowAck ? 'warn' : 'none',
+    },
+  ];
+}
+
 export function captureStatusRows(live: LiveState): readonly StatusRow[] {
   const connection = describeConnection(live.connection);
   const { captured, sent, skipped } = live.counters;
@@ -82,5 +127,6 @@ export function captureStatusRows(live: LiveState): readonly StatusRow[] {
     },
     wakeLockRow(live.wakeLock),
     { label: 'Round trip', value: live.clock === null ? '—' : `${Math.round(live.clock.rtt_ms)} ms`, level: 'none' },
+    ...linkStatusRows(live.link),
   ];
 }

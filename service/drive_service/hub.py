@@ -6,17 +6,28 @@ It is only touched from the event loop thread.
 The snapshot is latest-wins: every validated message replaces the previous
 reading, so a burst can never leave an older reading in place of a newer one.
 The flood limits only decide what is written to a recording.
+
+Every IMU batch and GPS fix also feeds the motion estimator (speed, turn rate,
+acceleration). Its latest estimate is kept in the snapshot, stamped with the
+newest IMU sample it used, and each recorded IMU batch is followed by a derived
+"motion" line with one row per sample.
+
+Every handled frame gets an ``Ack`` back (the socket sends it), so the phone
+can keep only a few frames in flight. The phone's own link report is kept,
+stamped with its receive time, and recorded like any other sensor message.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import replace
-from typing import Protocol
+from typing import Any, Protocol
 
 from drive_service.clock import ClockSample, add_sample, estimate, is_synced, to_server_ms
 from drive_service.config import Settings
-from drive_service.protocol import Frame, Gps, Heading, Hello, Imu, Ping, Pong
+from drive_service.motion import MotionState, motion_record, update_gps, update_imu
+from drive_service.protocol import Ack, Frame, Gps, Heading, Hello, Imu, Link, Ping, Pong
 from drive_service.ratelimit import RateWindow, admit
 from drive_service.state import MS_PER_S, SensorSnapshot, Stamped
 from drive_service.stats import StreamStats, record_frame
@@ -29,8 +40,10 @@ class RecorderSink(Protocol):
     def write_frame(self, frame: Frame, received_wall_ms: float) -> None: ...
 
     def write_sensor(
-        self, message: Hello | Gps | Heading | Imu, received_wall_ms: float
+        self, message: Hello | Gps | Heading | Imu | Link, received_wall_ms: float
     ) -> None: ...
+
+    def write_derived(self, record: Mapping[str, Any], received_wall_ms: float) -> None: ...
 
 
 class Hub:
@@ -41,6 +54,7 @@ class Hub:
         self._snapshot = SensorSnapshot()
         self._stats = StreamStats()
         self._clock_samples: tuple[ClockSample, ...] = ()
+        self._motion = MotionState()
         self._frame_window = RateWindow()
         self._text_window = RateWindow()
         self._rejected = 0
@@ -68,13 +82,17 @@ class Hub:
         """Give the phone slot to a new connection and return its lease.
 
         The newest connection always wins; an older one loses its lease. A new
-        connection may be a different device, so its hello and clock estimate
-        start empty. Stats and last readings stay; readings age out on their own.
+        connection may be a different device, so its hello, clock estimate,
+        motion estimate and link stats start empty. Stats and last readings stay; readings age
+        out on their own.
         """
         self._lease_seq += 1
         self._phone_lease = self._lease_seq
         self._clock_samples = ()
-        self._snapshot = replace(self._snapshot, phone_connected=True, hello=None, clock=None)
+        self._motion = MotionState()
+        self._snapshot = replace(
+            self._snapshot, phone_connected=True, hello=None, clock=None, motion=None, link=None
+        )
         return self._lease_seq
 
     def holds_phone(self, lease: int) -> bool:
@@ -91,8 +109,15 @@ class Hub:
     def note_rejected(self) -> None:
         self._rejected += 1
 
-    def handle_frame(self, frame: Frame) -> None:
-        """Store a validated frame, and record it unless the frame flood limit is hit."""
+    def ack_frame(self, seq: int) -> Ack:
+        """The ack for frame ``seq``, stamped now. Also used for frames that were refused."""
+        return Ack(seq=seq, t=self._time.wall_ms())
+
+    def handle_frame(self, frame: Frame) -> Ack:
+        """Store a validated frame, and record it unless the frame flood limit is hit.
+
+        Returns the ack to send, whether or not the frame was recorded.
+        """
         now = self._time.mono()
         wall_ms = self._time.wall_ms()
         captured = self._captured_mono(frame.header.t, now, wall_ms)
@@ -107,32 +132,63 @@ class Hub:
         )
         if allowed:
             self._recorder.write_frame(frame, wall_ms)
+        return Ack(seq=frame.header.seq, t=wall_ms)
 
-    def handle_message(self, message: Hello | Gps | Heading | Imu | Ping) -> Pong | None:
+    def handle_message(self, message: Hello | Gps | Heading | Imu | Ping | Link) -> Pong | None:
         """Apply a validated text message. Returns a reply to send, if any."""
         now = self._time.mono()
         wall_ms = self._time.wall_ms()
         if isinstance(message, Ping):
             return self._handle_ping(message, wall_ms)
-        self._store(message, now, wall_ms)
+        derived = self._store(message, now, wall_ms)
         allowed, self._text_window = self._admit(
             self._text_window, now, self._settings.max_text_rate_hz
         )
         if allowed:
             self._recorder.write_sensor(message, wall_ms)
+            # Only beside a recorded batch, so motion lines match imu lines 1:1.
+            if derived is not None:
+                self._recorder.write_derived(derived, wall_ms)
         return None
 
-    def _store(self, message: Hello | Gps | Heading | Imu, now: float, wall_ms: float) -> None:
+    def _store(
+        self, message: Hello | Gps | Heading | Imu | Link, now: float, wall_ms: float
+    ) -> dict[str, Any] | None:
+        """Update the snapshot. Returns a derived line to record, if any."""
+        if isinstance(message, Imu):
+            return self._store_imu(message, now, wall_ms)
         if isinstance(message, Hello):
             self._snapshot = replace(self._snapshot, hello=message)
         elif isinstance(message, Gps):
             # A resent or cached fix is as old as the fix itself.
             captured = self._captured_mono(min(message.fix_t, message.t), now, wall_ms)
             self._snapshot = replace(self._snapshot, gps=Stamped(message, now, captured))
+            self._store_gps_speed(message)
         elif isinstance(message, Heading):
             captured = self._captured_mono(message.t, now, wall_ms)
             self._snapshot = replace(self._snapshot, heading=Stamped(message, now, captured))
-        # IMU batches are only recorded, not kept in the snapshot.
+        elif isinstance(message, Link):
+            self._snapshot = replace(self._snapshot, link=Stamped(message, now))
+        return None
+
+    def _store_imu(self, batch: Imu, now: float, wall_ms: float) -> dict[str, Any]:
+        hello = self._snapshot.hello
+        # Without the marker the page is older and wrote rotation as [y, z, x].
+        legacy_axes = hello is None or hello.imu_axes != "device_xyz"
+        self._motion, result = update_imu(self._motion, batch, legacy_axes)
+        if result.newest_t_ms is not None:
+            captured = self._captured_mono(result.newest_t_ms, now, wall_ms)
+            motion = Stamped(self._motion.estimate, now, captured)
+            self._snapshot = replace(self._snapshot, motion=motion)
+        return motion_record(batch, self._motion, result)
+
+    def _store_gps_speed(self, fix: Gps) -> None:
+        """Blend the fix into the motion estimate; its age stays the IMU sample's."""
+        self._motion = update_gps(self._motion, fix)
+        current = self._snapshot.motion
+        if current is not None:
+            motion = replace(current, value=self._motion.estimate)
+            self._snapshot = replace(self._snapshot, motion=motion)
 
     def _admit(self, window: RateWindow, now: float, limit: int) -> tuple[bool, RateWindow]:
         allowed, updated = admit(window, now, limit)

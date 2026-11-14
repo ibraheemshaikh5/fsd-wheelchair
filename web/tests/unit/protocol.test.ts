@@ -32,7 +32,16 @@ describe('parseServerMessage', () => {
     expect(parseServerMessage(raw)).toEqual({ v: 1, type: 'error', message: 'lat: too big' });
   });
 
+  it('reads an ack', () => {
+    const raw = JSON.stringify({ v: 1, type: 'ack', seq: 42, t: 1_700_000_000_000.5 });
+    expect(parseServerMessage(raw)).toEqual({ v: 1, type: 'ack', seq: 42, t: 1_700_000_000_000.5 });
+  });
+
   it.each([
+    ['ack without seq', JSON.stringify({ v: 1, type: 'ack', t: 1 })],
+    ['ack with a fractional seq', JSON.stringify({ v: 1, type: 'ack', seq: 1.5, t: 1 })],
+    ['ack with a negative seq', JSON.stringify({ v: 1, type: 'ack', seq: -1, t: 1 })],
+    ['ack without a time', JSON.stringify({ v: 1, type: 'ack', seq: 1 })],
     ['not json', '{nope'],
     ['wrong version', JSON.stringify({ v: 2, type: 'pong', t: 1, server_t: 2 })],
     ['unknown type', JSON.stringify({ v: 1, type: 'hug' })],

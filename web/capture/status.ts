@@ -1,5 +1,12 @@
 import type { Level } from '../shared/status';
-import { CLOSE_IDLE, CLOSE_NO_REPLY, CLOSE_POLICY_VIOLATION, CLOSE_REPLACED, type TransportState } from './transport';
+import {
+  CLOSE_BUSY,
+  CLOSE_IDLE,
+  CLOSE_NO_REPLY,
+  CLOSE_POLICY_VIOLATION,
+  CLOSE_REPLACED,
+  type TransportState,
+} from './transport';
 
 export interface Described {
   readonly text: string;
@@ -7,6 +14,18 @@ export interface Described {
 }
 
 export const TAKEOVER_TEXT = 'Another phone or tab took over the stream. Tap Start to resume.';
+export const BUSY_TEXT = 'Another phone has priority and is streaming. Tap Start to try again once it stops.';
+
+function describeStopped(state: TransportState): Described {
+  switch (state.lastClose?.code) {
+    case CLOSE_REPLACED:
+      return { text: TAKEOVER_TEXT, level: 'bad' };
+    case CLOSE_BUSY:
+      return { text: BUSY_TEXT, level: 'bad' };
+    default:
+      return { text: 'Stopped', level: 'none' };
+  }
+}
 
 function describeWaiting(state: TransportState): Described {
   const retrying = `retrying (attempt ${state.attempt})`;
@@ -31,9 +50,7 @@ export function describeConnection(state: TransportState): Described {
     case 'connecting':
       return { text: 'Connecting…', level: 'warn' };
     case 'stopped':
-      return state.lastClose?.code === CLOSE_REPLACED
-        ? { text: TAKEOVER_TEXT, level: 'bad' }
-        : { text: 'Stopped', level: 'none' };
+      return describeStopped(state);
     case 'waiting':
       return describeWaiting(state);
   }

@@ -7,6 +7,8 @@ import { createPositionMap } from '../shared/map';
 import type { ServiceStatus } from '../shared/status';
 import { connectViewer, type ViewerConnection, viewerSocketUrl } from '../shared/viewer-socket';
 import { frameBadge, recordButtonState, statusRows } from './format';
+import { createFramePlayer } from './frame-player';
+import { ROWS_REDRAW_MS, createChangeGate, createRowsGate, mapUpdateKey } from './render-gate';
 
 const byId = <T extends HTMLElement>(id: string): T => pageElement<T>('viewer', id);
 
@@ -20,7 +22,11 @@ const ui = {
 };
 
 const map = createPositionMap(byId('map'));
-let frameUrl: string | null = null;
+// Redraw the list and the map only when what they show changes (statuses come ~30 a second).
+// The list's ages and fps change on every status, so its text redraws a few times a second.
+const newRowsGate = () => createRowsGate(ROWS_REDRAW_MS, () => performance.now());
+let rowsChanged = newRowsGate();
+let mapChanged = createChangeGate();
 let lastStatus: ServiceStatus | null = null;
 let connected = false;
 let busy = false;
@@ -32,34 +38,59 @@ function showRecordButton(): void {
   ui.record.disabled = state.disabled;
 }
 
+/** Decodes a frame off screen, so swapping it into the page never shows a half-loaded image. */
+async function decodeFrame(jpeg: ArrayBuffer): Promise<string> {
+  const url = URL.createObjectURL(new Blob([jpeg], { type: 'image/jpeg' }));
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    return url;
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  }
+}
+
+const showBadge = (): void => {
+  ui.badge.textContent = frameBadge(lastStatus?.frame ?? null, connected, player.stats().failed);
+};
+
+const player = createFramePlayer<string>({
+  decode: decodeFrame,
+  show: (url) => {
+    ui.frame.src = url;
+  },
+  release: (url) => URL.revokeObjectURL(url),
+  // The bad frame is skipped and counted on the badge; the next one replaces it.
+  onError: showBadge,
+});
+
 function render(status: ServiceStatus): void {
   lastStatus = status;
   ui.status.classList.remove('stale');
-  renderRows(ui.status, statusRows(status));
+  const rows = statusRows(status);
+  if (rowsChanged(rows)) renderRows(ui.status, rows);
   ui.frame.classList.toggle('stale', !(status.frame?.fresh ?? false));
-  ui.badge.textContent = frameBadge(status.frame, true);
-  map.update(status.gps, status.heading);
+  showBadge();
+  if (mapChanged(mapUpdateKey(status.gps, status.heading))) map.update(status.gps, status.heading);
   showRecordButton();
 }
 
 /** The service is gone: nothing on screen is live any more, so say so everywhere. */
 function markDisconnected(): void {
   connected = false;
+  // Everything below is dimmed now, so the next status must redraw it even if unchanged.
+  rowsChanged = newRowsGate();
+  mapChanged = createChangeGate();
   ui.frame.classList.add('stale');
-  ui.badge.textContent = frameBadge(lastStatus?.frame ?? null, false);
+  showBadge();
   ui.status.classList.add('stale');
   ui.status.querySelectorAll('dd').forEach((dd) => {
     dd.className = 'level-none';
   });
   map.markStale();
   showRecordButton();
-}
-
-function showFrame(data: ArrayBuffer): void {
-  const next = URL.createObjectURL(new Blob([data], { type: 'image/jpeg' }));
-  ui.frame.src = next;
-  if (frameUrl !== null) URL.revokeObjectURL(frameUrl);
-  frameUrl = next;
 }
 
 function showConnection(state: ViewerConnection): void {
@@ -100,5 +131,5 @@ connectViewer({
   clearTimer: (id) => window.clearTimeout(id),
   onConnection: showConnection,
   onStatus: render,
-  onFrame: showFrame,
+  onFrame: (jpeg) => player.push(jpeg),
 });

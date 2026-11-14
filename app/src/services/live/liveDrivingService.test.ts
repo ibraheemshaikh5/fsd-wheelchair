@@ -2,8 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { LatLng } from '../../types'
 import type { CameraFrame } from '../drivingService'
 import { ServiceRefusedError } from '../errors'
-import { LiveDrivingService, type LiveOptions } from './liveDrivingService'
-import { FakeSocket, ManualTimers, lRoute } from './testing'
+import {
+  DISPLAY_FRAME_FRESH_MS,
+  DISPLAY_FRAME_MAX_AGE_MS,
+  FRAME_URLS_KEPT,
+  LiveDrivingService,
+  type LiveOptions,
+} from './liveDrivingService'
+import { FakeSocket, ManualTimers, lRoute, status } from './testing'
 
 const ok = () => new Response(JSON.stringify({ success: true, data: null, error: null }))
 
@@ -18,8 +24,10 @@ function setup(options: Partial<LiveOptions> = {}) {
   let urls = 0
   const revoked: string[] = []
   let ipadListener: ((p: LatLng) => void) | null = null
+  const clock = { ms: 1_000_000 }
   const { route, place } = lRoute()
   const service = new LiveDrivingService({
+    now: () => clock.ms,
     socketUrl: 'ws://test/ws/viewer',
     createSocket: (url) => {
       const socket = new FakeSocket(url)
@@ -52,6 +60,7 @@ function setup(options: Partial<LiveOptions> = {}) {
     calls,
     fetchFn,
     revoked,
+    clock,
     place,
     route,
     ipad: (p: LatLng) => ipadListener?.(p),
@@ -211,23 +220,106 @@ describe('LiveDrivingService', () => {
     if (feed.kind !== 'frames') return
     const frames: CameraFrame[] = []
     const stop = feed.subscribe((f) => frames.push(f))
-    t.socket().receive(new ArrayBuffer(8))
-    t.socket().receive(new ArrayBuffer(8))
-    t.socket().receive(new ArrayBuffer(8))
-    // First: no picture yet, but a live one is coming.
-    expect(frames.map((f) => f.url)).toEqual([null, 'blob:1', 'blob:2', 'blob:3'])
+    const count = FRAME_URLS_KEPT + 3
+    for (let i = 0; i < count; i++) t.socket().receive(new ArrayBuffer(8))
+    // First: no picture yet, but one has just arrived, so a live one is coming.
+    expect(frames.map((f) => f.url)).toEqual([null, ...Array.from({ length: count }, (_, i) => `blob:${i + 1}`)])
     expect(frames.every((f) => f.fresh)).toBe(true)
-    expect(t.revoked).toEqual(['blob:1'])
+    // At 30 fps React may skip rendering some frames, so a few recent URLs stay
+    // valid while the image swaps; anything older is revoked.
+    expect(t.revoked).toEqual(['blob:1', 'blob:2', 'blob:3'])
     // A late subscriber gets the current frame straight away.
     const late: CameraFrame[] = []
     const stopLate = feed.subscribe((f) => late.push(f))
-    expect(late.map((f) => f.url)).toEqual(['blob:3'])
+    expect(late.map((f) => f.url)).toEqual([`blob:${count}`])
     stopLate()
     stop()
-    expect(t.revoked).toEqual(['blob:1', 'blob:2', 'blob:3'])
+    expect(t.revoked).toHaveLength(count)
   })
 
-  it('marks the picture stale when frames stop or the service is lost, without a new frame', async () => {
+  it('re-renders only when a status changes what the rider sees', () => {
+    // Statuses arrive about 30 times a second; most repeat the last one.
+    const t = setup()
+    t.online()
+    const listener = vi.fn()
+    t.service.subscribe(listener)
+    const before = t.service.getState()
+    t.socket().sendStatus({ frame: { seq: 8, fresh: true } })
+    t.socket().sendStatus({ frame: { seq: 9, fresh: true } })
+    expect(listener).not.toHaveBeenCalled()
+    expect(t.service.getState()).toBe(before)
+    const motion = { speed_mps: 0.8, speed_source: 'imu', yaw_rate_dps: 0, accel_fwd_mps2: 0, accel_lat_mps2: 0, age_ms: 10, fresh: true }
+    t.socket().sendStatus({ motion })
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(t.service.getState().speedMps).toBeCloseTo(0.8, 1)
+  })
+
+  it('does not re-render for the frame-rate, speed and compass jitter of a streaming phone', () => {
+    // The service's fps is a float over a sliding window and IMU speed moves a
+    // little with every batch, so nearly every real status differs from the last.
+    const t = setup()
+    t.online()
+    const motion = (speed_mps: number) => ({ ...(status().motion as object), speed_mps, speed_source: 'imu' })
+    const reading = (fps: number, speed: number, deg: number) => ({
+      stats: { fps, frames: 100, missed: 0, rejected: 0, rate_limited: 0 },
+      motion: motion(speed),
+      heading: { deg, source: 'compass', reference: 'true' },
+    })
+    t.socket().sendStatus(reading(30, 0.8, 90))
+    const listener = vi.fn()
+    t.service.subscribe(listener)
+    t.socket().sendStatus(reading(29.7, 0.81, 90.3))
+    t.socket().sendStatus(reading(30.1, 0.79, 89.8))
+    t.socket().sendStatus(reading(30.4, 0.8, 90.1))
+    expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('marks the picture stale on the next status once frames stop arriving, without a new frame', async () => {
+    const t = setup()
+    t.online()
+    t.socket().receive(new ArrayBuffer(8)) // frames already flowing, not yet watched
+    const feed = await t.service.openCamera()
+    if (feed.kind !== 'frames') return
+    const frames: CameraFrame[] = []
+    feed.subscribe((f) => frames.push(f))
+    t.socket().receive(new ArrayBuffer(8))
+    t.clock.ms += DISPLAY_FRAME_FRESH_MS
+    t.socket().sendStatus()
+    expect(frames.at(-1)).toEqual({ url: 'blob:1', fresh: true, delayed: false })
+    // The service still calls its frame fresh, but nothing has reached the iPad for over a second.
+    t.clock.ms += 1
+    t.socket().sendStatus()
+    t.socket().sendStatus()
+    expect(frames.at(-1)).toEqual({ url: 'blob:1', fresh: false, delayed: false })
+    // Pushed once per change, not on every status.
+    expect(frames.filter((f) => !f.fresh)).toHaveLength(1)
+    t.socket().receive(new ArrayBuffer(8))
+    expect(frames.at(-1)).toEqual({ url: 'blob:2', fresh: true, delayed: false })
+    t.socket().drop()
+    expect(frames.at(-1)).toEqual({ url: 'blob:2', fresh: false, delayed: false })
+  })
+
+  it('keeps showing a live picture while frames arrive, even when the service calls them stale', async () => {
+    // The service's freshness is the strict drive-safety one (500 ms from capture,
+    // needs clock sync): a network hiccup or clock re-sync must not blank the view.
+    const t = setup()
+    t.online()
+    t.socket().receive(new ArrayBuffer(8)) // frames already flowing, not yet watched
+    const feed = await t.service.openCamera()
+    if (feed.kind !== 'frames') return
+    const frames: CameraFrame[] = []
+    feed.subscribe((f) => frames.push(f))
+    t.socket().receive(new ArrayBuffer(8))
+    t.socket().sendStatus({ clock_synced: false, sensors_ok: false, frame: { seq: 8, fresh: false } })
+    t.clock.ms += 400
+    t.socket().receive(new ArrayBuffer(8))
+    t.socket().sendStatus({ clock_synced: false, sensors_ok: false, frame: { seq: 9, fresh: false } })
+    expect(frames.every((f) => f.fresh)).toBe(true)
+    // Driving-related readings still follow the strict status.
+    expect(t.service.getState().link.phone).toBe('waiting')
+  })
+
+  it('says the picture is delayed when frames keep arriving but were captured long ago', async () => {
     const t = setup()
     t.online()
     const feed = await t.service.openCamera()
@@ -235,15 +327,91 @@ describe('LiveDrivingService', () => {
     const frames: CameraFrame[] = []
     feed.subscribe((f) => frames.push(f))
     t.socket().receive(new ArrayBuffer(8))
-    t.socket().sendStatus({ frame: { seq: 7, fresh: false } })
-    t.socket().sendStatus({ frame: { seq: 7, fresh: false } })
-    expect(frames.at(-1)).toEqual({ url: 'blob:1', fresh: false })
-    // Pushed once per change, not on every status.
-    expect(frames.filter((f) => !f.fresh)).toHaveLength(1)
-    t.socket().sendStatus()
-    expect(frames.at(-1)).toEqual({ url: 'blob:1', fresh: true })
+    expect(frames.at(-1)).toEqual({ url: 'blob:1', fresh: true, delayed: false })
+    // A backlog or slow link: frames reach the iPad, but seconds after capture.
+    t.socket().sendStatus({ frame: { seq: 8, age_ms: 3000, fresh: false } })
+    expect(frames.at(-1)).toEqual({ url: 'blob:1', fresh: true, delayed: true })
+    t.socket().receive(new ArrayBuffer(8))
+    expect(frames.at(-1)).toEqual({ url: 'blob:2', fresh: true, delayed: true })
+    t.socket().sendStatus({ frame: { seq: 9, age_ms: DISPLAY_FRAME_MAX_AGE_MS, fresh: false } })
+    expect(frames.at(-1)).toEqual({ url: 'blob:2', fresh: true, delayed: false })
+  })
+
+  it('cannot tell a delay before the phone clock is synced, or when the age is unknown', async () => {
+    const t = setup()
+    t.online()
+    const feed = await t.service.openCamera()
+    if (feed.kind !== 'frames') return
+    const frames: CameraFrame[] = []
+    feed.subscribe((f) => frames.push(f))
+    t.socket().receive(new ArrayBuffer(8))
+    t.socket().sendStatus({ clock_synced: false, sensors_ok: false, frame: { seq: 8, age_ms: 3000, fresh: false } })
+    t.socket().sendStatus({ frame: { seq: 9, age_ms: null, fresh: false } })
+    expect(frames.every((f) => !f.delayed)).toBe(true)
+  })
+
+  it('does not count frames from before a lost connection as live after reconnecting', async () => {
+    const t = setup()
+    t.online()
+    t.socket().receive(new ArrayBuffer(8))
     t.socket().drop()
-    expect(frames.at(-1)).toEqual({ url: 'blob:1', fresh: false })
+    t.timers.fire(500)
+    t.online()
+    const feed = await t.service.openCamera()
+    if (feed.kind !== 'frames') return
+    const frames: CameraFrame[] = []
+    feed.subscribe((f) => frames.push(f))
+    expect(frames).toEqual([{ url: null, fresh: false, delayed: false }])
+  })
+
+  it('does not show the old frame the service replays on connect as live once the phone has gone', async () => {
+    // The service keeps the phone's last frame after it disconnects and sends it to
+    // every viewer that connects, however old it is.
+    const t = setup()
+    t.socket().open()
+    t.socket().sendStatus({ phone_connected: false, clock_synced: false, sensors_ok: false, frame: { seq: 7, age_ms: 600_000, fresh: false } })
+    const feed = await t.service.openCamera()
+    if (feed.kind !== 'frames') return
+    const frames: CameraFrame[] = []
+    feed.subscribe((f) => frames.push(f))
+    t.socket().receive(new ArrayBuffer(8))
+    expect(frames.at(-1)).toEqual({ url: 'blob:1', fresh: false, delayed: false })
+  })
+
+  it('waits for a second frame before trusting a replayed one while the phone’s camera may have stopped', async () => {
+    const t = setup()
+    t.socket().open()
+    t.socket().sendStatus({ frame: { seq: 7, age_ms: 600_000, fresh: false } })
+    const feed = await t.service.openCamera()
+    if (feed.kind !== 'frames') return
+    const frames: CameraFrame[] = []
+    feed.subscribe((f) => frames.push(f))
+    t.socket().receive(new ArrayBuffer(8)) // the replay
+    expect(frames.at(-1)).toEqual({ url: 'blob:1', fresh: false, delayed: false })
+    // A new frame proves pictures are flowing, even if the strict status still says stale.
+    t.socket().sendStatus({ clock_synced: false, sensors_ok: false, frame: { seq: 8, age_ms: null, fresh: false } })
+    t.socket().receive(new ArrayBuffer(8))
+    expect(frames.at(-1)).toEqual({ url: 'blob:2', fresh: true, delayed: false })
+  })
+
+  it('never says delayed on the way to no live picture when frames stop', async () => {
+    // age_ms counts from capture and keeps growing once frames stop; the iPad's own
+    // freshness counts from receipt. Only a frame that was old on arrival is delayed.
+    const t = setup()
+    t.online()
+    const feed = await t.service.openCamera()
+    if (feed.kind !== 'frames') return
+    const frames: CameraFrame[] = []
+    feed.subscribe((f) => frames.push(f))
+    const transitMs = 150
+    t.socket().sendStatus({ frame: { seq: 8, age_ms: transitMs, fresh: true } })
+    t.socket().receive(new ArrayBuffer(8))
+    for (let elapsed = 33; elapsed <= DISPLAY_FRAME_FRESH_MS + 100; elapsed += 33) {
+      t.clock.ms += 33
+      t.socket().sendStatus({ frame: { seq: 8, age_ms: transitMs + elapsed, fresh: transitMs + elapsed <= 500 } })
+    }
+    expect(frames.some((f) => f.delayed)).toBe(false)
+    expect(frames.at(-1)?.fresh).toBe(false)
   })
 
   it('says straight away when no live picture is coming', async () => {
@@ -254,7 +422,7 @@ describe('LiveDrivingService', () => {
     if (feed.kind !== 'frames') return
     const frames: CameraFrame[] = []
     feed.subscribe((f) => frames.push(f))
-    expect(frames).toEqual([{ url: null, fresh: false }])
+    expect(frames).toEqual([{ url: null, fresh: false, delayed: false }])
   })
 
   it('keeps the connection lost through retries until a status arrives, with the reason', () => {

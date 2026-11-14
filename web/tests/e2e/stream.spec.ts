@@ -11,6 +11,7 @@ interface StatusEnvelope {
     camera: { label: string } | null;
     clock: { rtt_ms: number } | null;
     stats: { frames: number; rejected: number };
+    link: { sent: number; acked: number; in_flight: number; jpeg_quality: number; fresh: boolean } | null;
   };
 }
 
@@ -83,6 +84,18 @@ test('the capture page streams camera and location to the service and the viewer
     expect(live.gps?.lat).toBeCloseTo(START_LAT, 4);
     expect(live.camera).not.toBeNull();
     expect(live.stats.rejected).toBe(0);
+
+    // The service acks frames, so the page paces itself and reports its link once a second.
+    await expect
+      .poll(async () => (await status(request)).link?.fresh ?? false, { timeout: SYNC_TIMEOUT_MS })
+      .toBe(true);
+    const link = (await status(request)).link;
+    expect(link?.acked).toBeGreaterThan(0);
+    expect(link?.in_flight).toBeLessThanOrEqual(3);
+    expect(link?.jpeg_quality).toBeGreaterThan(0);
+    await expect(page.locator('#status')).toContainText(/Frame ack\s*\d+ ms/);
+    await expect(page.locator('#status')).toContainText(/Send rate\s*\d+ of \d+ fps/);
+    expect((await status(request)).stats.rejected).toBe(0);
 
     // Viewer in a second tab, as on the laptop.
     const viewer = await browser.newPage();

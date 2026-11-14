@@ -421,3 +421,28 @@ def test_limits_come_from_settings(tmp_path):
     assert limits.min_free_bytes == 2_000_000_000
     assert limits.max_frames == settings.recorder_max_frames
     assert limits.queue_size == settings.recorder_queue_size
+
+
+@pytest.mark.anyio
+async def test_service_derived_lines_go_to_sensors_jsonl(tmp_path):
+    recorder = _recorder(tmp_path)
+    recorder.start({})
+    recorder.write_sensor(Imu.model_validate(imu_dict()), 1060.0)
+    recorder.write_derived({"v": 1, "type": "motion", "t": 5.0, "samples": [[0.0, None]]}, 1061.0)
+    stopped = await recorder.stop()
+    assert stopped.sensors == 2
+    lines = _lines(tmp_path / SESSION / "sensors.jsonl")
+    assert lines[1] == {
+        "recv_ms": 1061.0,
+        "v": 1,
+        "type": "motion",
+        "t": 5.0,
+        "samples": [[0.0, None]],
+    }
+    assert list(lines[1])[0] == "recv_ms"
+
+
+def test_derived_lines_are_dropped_when_not_recording(tmp_path):
+    recorder = _recorder(tmp_path)
+    recorder.write_derived({"type": "motion"}, 1.0)
+    assert recorder.info.sensors == 0

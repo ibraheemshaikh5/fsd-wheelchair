@@ -28,17 +28,17 @@ import queue
 import shutil
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import IO, Any
 
-from drive_service.protocol import Frame, Gps, Heading, Hello, Imu
+from drive_service.protocol import Frame, Gps, Heading, Hello, Imu, Link
 
 log = logging.getLogger(__name__)
 
-SensorMessage = Hello | Gps | Heading | Imu
+SensorMessage = Hello | Gps | Heading | Imu | Link
 
 QUEUE_POLL_S = 0.1
 # Room for a frame's line in frames.jsonl, counted against the byte budgets.
@@ -81,6 +81,12 @@ def sensor_item(message: SensorMessage, received_wall_ms: float) -> SensorItem:
     return SensorItem(line, len(line.encode()))
 
 
+def derived_item(record: Mapping[str, Any], received_wall_ms: float) -> SensorItem:
+    """A line the service computed itself (e.g. motion), stored beside the phone's."""
+    line = json.dumps({"recv_ms": received_wall_ms, **record}) + "\n"
+    return SensorItem(line, len(line.encode()))
+
+
 def free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
 
@@ -99,6 +105,8 @@ def write_frame_file(session_dir: Path, number: int, item: FrameItem) -> str:
         "h": header.h,
         "recv_ms": item.received_wall_ms,
     }
+    if header.rot is not None:
+        line["rot"] = header.rot
     return json.dumps(line) + "\n"
 
 

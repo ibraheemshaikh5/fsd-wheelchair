@@ -23,7 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from drive_service.clock import ClockEstimate
-from drive_service.protocol import Frame, Gps, Heading, Hello
+from drive_service.motion import MotionEstimate
+from drive_service.protocol import Frame, Gps, Heading, Hello, Link
 
 MS_PER_S = 1000.0
 
@@ -43,7 +44,11 @@ class SensorSnapshot:
     frame: Stamped[Frame] | None = None
     gps: Stamped[Gps] | None = None
     heading: Stamped[Heading] | None = None
+    # Derived from IMU and GPS; aged by the newest IMU sample it used.
+    motion: Stamped[MotionEstimate] | None = None
     clock: ClockEstimate | None = None
+    # The phone's own uplink report; aged by receive time only (captured_mono None).
+    link: Stamped[Link] | None = None
     phone_connected: bool = False
 
 

@@ -2,6 +2,7 @@
 // page becoming visible again), and undone by stop(). Browser APIs come in as
 // dependencies so the start/stop sequencing can be unit tested with fakes.
 
+import { type FrameOrientation, OrientationTracker, type Rotation } from './orientation';
 import {
   encodeFrame as encodeFrameMessage,
   type GpsMessage,
@@ -11,12 +12,25 @@ import {
 } from '../shared/protocol';
 import { type CaptureSize, type FrameMetadataLike, frameTimeMs } from './camera';
 import { sampleFromPong } from './clock';
+import { achievedFps, frameIntervalMs } from './frame-rate';
 import { type OrientationLike, toHeadingMessage } from './heading';
+import { LinkControl } from './link-control';
+import type { SkipReason } from './link-stats';
 import { INITIAL_LIVE, type LiveState, type MotionAccess } from './live';
 import { type PositionLike, recentFix, toGpsMessage } from './location';
-import { addMotion, EMPTY_BATCH, type ImuBatch, type MotionLike, takeBatch } from './motion';
+import {
+  addMotion,
+  drainBatch,
+  EMPTY_BATCH,
+  IMU_AXES,
+  type ImuBatch,
+  type MotionLike,
+  motionTimeMs,
+  takeBatch,
+} from './motion';
 import type { CaptureSettings } from './settings';
-import { CLOSE_REPLACED, type TransportState } from './transport';
+import { describeConnection } from './status';
+import { type TransportState, isFinalClose } from './transport';
 
 export type Unsubscribe = () => void;
 export type CameraChange = 'muted' | 'unmuted' | 'ended';
@@ -41,12 +55,16 @@ export interface CameraLike<S extends StreamLike> {
 export interface PreviewSize {
   readonly width: number;
   readonly height: number;
+  /** The rate the camera track reports it runs at (MediaTrackSettings.frameRate), if it says. */
+  readonly frameRate?: number;
 }
 
 export interface EncodedFrameLike {
   readonly bytes: Uint8Array<ArrayBuffer>;
   readonly w: number;
   readonly h: number;
+  /** The clockwise turn the encoder applied. */
+  readonly rot: Rotation;
 }
 
 export interface TransportHandlers {
@@ -72,8 +90,12 @@ export interface SessionDeps<S extends StreamLike> {
   readonly clearPreview: (stream: S) => void;
   readonly resumePreview: () => Promise<void>;
   readonly createTransport: (handlers: TransportHandlers) => TransportLike;
-  readonly startFrameLoop: (fps: number, onFrame: (metadata: FrameMetadataLike | undefined) => void) => Unsubscribe;
-  readonly encodeFrame: (maxSide: number, quality: number) => Promise<EncodedFrameLike | null>;
+  /** Call onFrame for camera frames at least intervalMs apart, or for every frame when null. */
+  readonly startFrameLoop: (
+    intervalMs: number | null,
+    onFrame: (metadata: FrameMetadataLike | undefined) => void,
+  ) => Unsubscribe;
+  readonly encodeFrame: (maxSide: number, quality: number, orientation: FrameOrientation) => Promise<EncodedFrameLike | null>;
   readonly watchLocation: (onPosition: (position: PositionLike) => void, onError: (message: string) => void) => Unsubscribe;
   readonly keepScreenOn: (onChange: (held: boolean) => void) => Unsubscribe;
   readonly listenOrientation: (onReading: (event: OrientationLike) => void) => Unsubscribe;
@@ -89,8 +111,8 @@ export interface SessionDeps<S extends StreamLike> {
 
 export interface SessionCallbacks {
   readonly onCamera: (change: CameraChange) => void;
-  /** A newer phone connection replaced this one; the session must not reconnect. */
-  readonly onTakenOver: () => void;
+  /** The service closed this phone for good (replaced, or a priority phone holds the slot). */
+  readonly onTakenOver: (message: string) => void;
   readonly onError: (message: string) => void;
 }
 
@@ -103,12 +125,23 @@ export class SessionCancelled extends Error {
 }
 
 const CAMERA_REQUEST = { width: 1280, height: 720 } as const;
-const PING_INTERVAL_MS = 1000;
+/** Pings, link reports and quality adaptation all run on this one-second tick. */
+const TICK_INTERVAL_MS = 1000;
 /** About five missed pongs: the link is dead even if the socket still looks open. */
 export const LIVENESS_TIMEOUT_MS = 5000;
-const HEADING_INTERVAL_MS = 100;
-const IMU_FLUSH_MS = 100;
+// Up to 30 headings a second: just under 1000/30 ms, so a 60 Hz sensor reliably
+// gets every second reading through despite event jitter.
+const HEADING_MIN_GAP_MS = 30;
+// Short batches keep the service's motion estimate fresh (it ages readings by
+// their newest sample) while still sending ~3 samples per message at 60 Hz.
+const IMU_FLUSH_MS = 50;
 const IMU_MAX_SAMPLES = 200;
+/**
+ * Frames encoding at once. Two lets the next frame start while the last one's
+ * JPEG finishes, so an encode slower than one camera frame does not halve the
+ * rate; more would only queue stale frames.
+ */
+const MAX_ENCODES_IN_FLIGHT = 2;
 // The service ages GPS by its fix_t, so a resent fix is honest by construction.
 // This only avoids resending a fix the service would already treat as stale
 // (its gps_stale_ms is 3 s).
@@ -119,27 +152,35 @@ const TRACK_EVENTS: readonly [TrackEventName, CameraChange][] = [
   ['ended', 'ended'],
 ];
 
+type FrameOutcome = 'sent' | SkipReason;
+
 const stopTracks = (stream: StreamLike): void => stream.getTracks().forEach((track) => track.stop());
 
 export class Session<S extends StreamLike> {
   private cleanups: readonly Unsubscribe[] = [];
   private readonly transport: TransportLike;
+  /** Ack flow control, per-connection frame counters and adaptive JPEG quality. */
+  private readonly link: LinkControl;
   private readonly abort = new AbortController();
   private stream: S | null = null;
   private stopped = false;
   private state: LiveState = INITIAL_LIVE;
   private seq = 0;
-  private encoding = false;
+  private encodesInFlight = 0;
+  /** Newest frame sent; an older one that finishes encoding later is dropped. */
+  private lastSentSeq = -1;
   private imu: ImuBatch = EMPTY_BATCH;
+  private readonly orientation = new OrientationTracker();
   private lastHeadingAt = 0;
   private lastFix: GpsMessage | null = null;
-  private cameraInfo = { label: 'camera', width: 0, height: 0 };
+  private cameraInfo = { label: 'camera', width: 0, height: 0, fps: 0 };
 
   constructor(
     private readonly config: CaptureSettings,
     private readonly deps: SessionDeps<S>,
     private readonly callbacks: SessionCallbacks,
   ) {
+    this.link = new LinkControl(config.jpegQuality, deps.monotonicNow());
     this.transport = deps.createTransport({
       onState: (state) => this.onConnection(state),
       onMessage: (message) => this.onServerMessage(message),
@@ -157,13 +198,16 @@ export class Session<S extends StreamLike> {
     this.stream = camera.stream;
     const preview = await this.settle(this.deps.playPreview(camera.stream));
     this.watchTrack(camera.stream);
+    const cameraFps = achievedFps(preview.frameRate, this.config.fps);
     this.cameraInfo = {
       label: camera.label,
       width: preview.width > 0 ? preview.width : CAMERA_REQUEST.width,
       height: preview.height > 0 ? preview.height : CAMERA_REQUEST.height,
+      // The rate frames are sent at: the camera's, unless thinned to a lower setting.
+      fps: Math.min(cameraFps, this.config.fps),
     };
     this.update({ cameraLabel: camera.label });
-    this.startStreaming();
+    this.startStreaming(frameIntervalMs(this.config.fps, cameraFps));
 
     const motion = await this.settle(motionAccess);
     this.update({ motion });
@@ -181,6 +225,7 @@ export class Session<S extends StreamLike> {
     const cleanups = this.cleanups;
     this.cleanups = [];
     cleanups.forEach((cleanup) => cleanup());
+    this.flushImu();
     this.transport.stop();
     if (this.stream !== null) {
       stopTracks(this.stream);
@@ -224,13 +269,13 @@ export class Session<S extends StreamLike> {
     }
   }
 
-  private startStreaming(): void {
+  private startStreaming(frameInterval: number | null): void {
     this.transport.start();
-    this.addCleanup(this.deps.startFrameLoop(this.config.fps, (metadata) => this.onFrame(metadata)));
+    this.addCleanup(this.deps.startFrameLoop(frameInterval, (metadata) => this.onFrame(metadata)));
     this.addCleanup(this.deps.watchLocation((position) => this.onPosition(position), this.callbacks.onError));
     this.addCleanup(this.deps.keepScreenOn((held) => this.update({ wakeLock: held })));
-    const ping = this.deps.setInterval(() => this.ping(), PING_INTERVAL_MS);
-    this.addCleanup(() => this.deps.clearInterval(ping));
+    const tick = this.deps.setInterval(() => this.tick(), TICK_INTERVAL_MS);
+    this.addCleanup(() => this.deps.clearInterval(tick));
   }
 
   private update(changes: Partial<LiveState>): void {
@@ -248,12 +293,14 @@ export class Session<S extends StreamLike> {
 
   private onConnection(state: TransportState): void {
     if (this.stopped) return;
-    this.update({ connection: state });
-    if (state.status === 'stopped' && state.lastClose?.code === CLOSE_REPLACED) {
-      this.callbacks.onTakenOver();
+    // A new or lost connection: the last one's link figures no longer describe anything.
+    this.update({ connection: state, link: null });
+    if (state.status === 'stopped' && state.lastClose !== null && isFinalClose(state.lastClose.code)) {
+      this.callbacks.onTakenOver(describeConnection(state).text);
       return;
     }
     if (state.status !== 'open') return;
+    this.link.reset(this.deps.monotonicNow());
     // The service forgets the phone and its clock offset when the socket drops,
     // so introduce it and resync the clock on every connect.
     this.sendHello();
@@ -268,8 +315,9 @@ export class Session<S extends StreamLike> {
       type: 'hello',
       t: this.deps.now(),
       user_agent: this.deps.userAgent,
-      camera: { ...this.cameraInfo, fps: this.config.fps },
+      camera: this.cameraInfo,
       mount: { height_m: this.config.mountHeightM, pitch_deg: this.config.mountPitchDeg },
+      imu_axes: IMU_AXES,
     });
   }
 
@@ -278,9 +326,20 @@ export class Session<S extends StreamLike> {
     if (message.type === 'pong') {
       const sample = sampleFromPong(message, this.deps.now());
       if (sample !== null) this.update({ clock: sample });
+    } else if (message.type === 'ack') {
+      this.link.ack(message.seq, this.deps.monotonicNow());
     } else {
       this.callbacks.onError(`Service rejected a message: ${message.message}`);
     }
+  }
+
+  private tick(): void {
+    this.ping();
+    if (this.state.connection.status !== 'open') return;
+    const { message, view } = this.link.tick(this.deps.monotonicNow(), this.deps.now());
+    this.update({ link: view });
+    // Never droppable: it is how the service sees a weak link.
+    if (message !== null) this.send(message);
   }
 
   private ping(): void {
@@ -300,25 +359,67 @@ export class Session<S extends StreamLike> {
     const seq = this.seq;
     this.seq += 1;
     this.count('captured');
-    // Latest-wins: if the last frame is still encoding, or the link is down, drop this one.
-    if (this.encoding || this.state.connection.status !== 'open') {
+    if (this.state.connection.status !== 'open') {
       this.count('skipped');
       return;
     }
+    this.link.captured();
+    // Latest-wins: if the link or the encoder is full, drop this one rather than queue it.
+    const blocked = this.encodeBlocker();
+    if (blocked !== null) {
+      this.settleFrame(blocked, this.link.connection);
+      return;
+    }
     const t = frameTimeMs(metadata, this.deps.now(), this.deps.monotonicNow());
-    this.encoding = true;
+    const connection = this.link.connection;
+    this.encodesInFlight += 1;
     this.deps
-      .encodeFrame(this.config.maxWidth, this.config.jpegQuality)
-      .then((encoded) => {
-        const sent =
-          encoded !== null &&
-          this.transport.sendFrame(encodeFrameMessage({ seq, t, w: encoded.w, h: encoded.h }, encoded.bytes));
-        this.count(sent ? 'sent' : 'skipped');
+      .encodeFrame(this.config.maxWidth, this.link.jpegQuality, {
+        physical: this.orientation.physical,
+        setting: this.config.rotateDeg,
       })
-      .catch(() => this.count('skipped'))
+      .then((encoded) => this.sendEncoded(seq, t, encoded, connection))
+      .catch((): FrameOutcome => 'encoder')
+      .then((outcome) => this.settleFrame(outcome, connection))
       .finally(() => {
-        this.encoding = false;
+        this.encodesInFlight -= 1;
       });
+  }
+
+  /**
+   * Why a new frame should not start encoding, or null if it may. Frames still
+   * encoding hold no ack slot (a frame is in flight from send to ack), so flow
+   * counts only frames sent; sendEncoded checks again before sending.
+   */
+  private encodeBlocker(): SkipReason | null {
+    if (this.encodesInFlight >= MAX_ENCODES_IN_FLIGHT) return 'encoder';
+    return this.link.maySend(this.deps.monotonicNow()) ? null : 'flow';
+  }
+
+  /**
+   * Send an encoded frame unless it failed, a newer frame already went out, its
+   * connection has gone, too many frames await their ack, or the socket is backed up.
+   */
+  private sendEncoded(seq: number, t: number, encoded: EncodedFrameLike | null, connection: number): FrameOutcome {
+    if (encoded === null || seq < this.lastSentSeq || connection !== this.link.connection) return 'encoder';
+    const now = this.deps.monotonicNow();
+    if (!this.link.maySend(now)) return 'flow';
+    if (!this.transport.sendFrame(encodeFrameMessage({ seq, t, w: encoded.w, h: encoded.h, rot: encoded.rot }, encoded.bytes))) {
+      return 'socket';
+    }
+    this.lastSentSeq = seq;
+    this.link.sent(seq, now);
+    return 'sent';
+  }
+
+  /** Count a frame's fate; the link's counters only for the connection it was captured on. */
+  private settleFrame(outcome: FrameOutcome, connection: number): void {
+    if (outcome === 'sent') {
+      this.count('sent');
+      return;
+    }
+    this.count('skipped');
+    if (connection === this.link.connection) this.link.skipped(outcome);
   }
 
   private onPosition(position: PositionLike): void {
@@ -331,19 +432,28 @@ export class Session<S extends StreamLike> {
 
   private onOrientation(event: OrientationLike): void {
     const now = this.deps.now();
-    if (this.stopped || now - this.lastHeadingAt < HEADING_INTERVAL_MS) return;
+    if (this.stopped || now - this.lastHeadingAt < HEADING_MIN_GAP_MS) return;
     const message = toHeadingMessage(event, now);
     if (message === null) return;
     this.lastHeadingAt = now;
     this.update({ headingDeg: message.magnetic_deg });
-    // Headings come ten times a second; under backpressure a newer one is coming anyway.
+    // Headings come up to 30 times a second; under backpressure a newer one is coming anyway.
     this.send(message, true);
   }
 
   private onMotion(event: MotionLike): void {
     if (this.stopped) return;
     const now = this.deps.now();
-    const result = takeBatch(addMotion(this.imu, event, now), now, IMU_FLUSH_MS, IMU_MAX_SAMPLES);
+    this.orientation.observe(event.accelerationIncludingGravity, this.deps.monotonicNow());
+    const sampleMs = motionTimeMs(event, now, this.deps.monotonicNow());
+    const result = takeBatch(addMotion(this.imu, event, sampleMs), now, IMU_FLUSH_MS, IMU_MAX_SAMPLES);
+    this.imu = result.batch;
+    if (result.message !== null) this.send(result.message);
+  }
+
+  /** Send the samples still waiting for their batch interval. */
+  private flushImu(): void {
+    const result = drainBatch(this.imu);
     this.imu = result.batch;
     if (result.message !== null) this.send(result.message);
   }

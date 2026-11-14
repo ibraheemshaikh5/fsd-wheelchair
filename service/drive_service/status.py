@@ -12,7 +12,7 @@ from drive_service.destination import Destination, DestinationStore, destination
 from drive_service.heading import best_heading
 from drive_service.hub import Hub
 from drive_service.recorder import Recorder, RecordingInfo
-from drive_service.state import SensorSnapshot, age_ms, is_fresh
+from drive_service.state import MS_PER_S, SensorSnapshot, age_ms, is_fresh
 from drive_service.stats import StreamStats, summarize
 
 
@@ -42,6 +42,38 @@ def _gps(snapshot: SensorSnapshot, now_mono: float, fresh: bool) -> dict[str, An
         "course_deg": fix.course_deg,
         "age_ms": age_ms(snapshot.gps, now_mono),
         "fresh": fresh,
+    }
+
+
+def _motion(snapshot: SensorSnapshot, now_mono: float, settings: Settings) -> dict[str, Any] | None:
+    """Speed, turn rate (positive = left) and acceleration, judged by the newest IMU sample."""
+    if snapshot.motion is None:
+        return None
+    estimate = snapshot.motion.value
+    return {
+        "speed_mps": estimate.speed_mps,
+        "speed_source": estimate.speed_source,
+        "yaw_rate_dps": estimate.yaw_rate_dps,
+        "accel_fwd_mps2": estimate.accel_fwd_mps2,
+        "accel_lat_mps2": estimate.accel_lat_mps2,
+        "age_ms": age_ms(snapshot.motion, now_mono),
+        "fresh": is_fresh(snapshot.motion, settings.motion_stale_ms, now_mono),
+    }
+
+
+# Wire fields of the link message that the status leaves out.
+_LINK_ENVELOPE = frozenset({"v", "type", "t"})
+
+
+def _link(snapshot: SensorSnapshot, now_mono: float, settings: Settings) -> dict[str, Any] | None:
+    """The phone's latest uplink report, aged by when the service received it."""
+    if snapshot.link is None:
+        return None
+    age = (now_mono - snapshot.link.received_mono) * MS_PER_S
+    return {
+        **snapshot.link.value.model_dump(exclude=_LINK_ENVELOPE),
+        "age_ms": age,
+        "fresh": age <= settings.link_stale_ms,
     }
 
 
@@ -102,6 +134,7 @@ def build_status(
         "frame": _frame(snapshot, now_mono, frame_fresh),
         "gps": _gps(snapshot, now_mono, gps_fresh),
         "heading": _heading(snapshot, now_mono, gps_fresh, compass_fresh, settings),
+        "motion": _motion(snapshot, now_mono, settings),
         "clock": asdict(snapshot.clock) if snapshot.clock else None,
         "stats": {
             **asdict(summarize(stats, now_mono, settings.fps_window_s)),
@@ -114,6 +147,7 @@ def build_status(
         "destination": destination_status(
             destination, snapshot.gps.value if snapshot.gps and gps_fresh else None
         ),
+        "link": _link(snapshot, now_mono, settings),
     }
 
 

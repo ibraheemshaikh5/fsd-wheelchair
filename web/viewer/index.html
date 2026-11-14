@@ -43,7 +43,7 @@
   <body>
     <main>
       <h1>Sensor viewer</h1>
-      <p id="connection" class="level-warn">Connecting to the service…</p>
+      <p id="connection" class="level-warn" role="status">Connecting to the service…</p>
       <div class="layout">
         <section>
           <div class="frame-wrap">
@@ -55,7 +55,8 @@
         </section>
         <section>
           <div class="panel">
-            <dl class="rows" id="status" aria-live="polite"></dl>
+            <!-- Not a live region: it redraws several times a second; #connection and #error announce. -->
+            <dl class="rows" id="status"></dl>
           </div>
           <div class="actions">
             <button id="record" class="primary" type="button" disabled>Start recording</button>

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { INITIAL_LIVE, type LiveState, captureStatusRows, stoppedLive } from '../../capture/live';
+import type { LinkView } from '../../capture/link-stats';
+import { INITIAL_LIVE, type LiveState, captureStatusRows, linkStatusRows, stoppedLive } from '../../capture/live';
 import { describeConnection, describeStartError } from '../../capture/status';
-import { CLOSE_IDLE, CLOSE_NO_REPLY, CLOSE_REPLACED, NO_REPLY_REASON } from '../../capture/transport';
+import { CLOSE_BUSY, CLOSE_IDLE, CLOSE_NO_REPLY, CLOSE_REPLACED, NO_REPLY_REASON } from '../../capture/transport';
 
 describe('describeConnection', () => {
   it('describes each state in plain words', () => {
@@ -36,6 +37,17 @@ describe('describeConnection', () => {
     expect(taken.text).toContain('Tap Start');
     expect(taken.text).not.toContain('retrying');
     expect(taken.level).toBe('bad');
+  });
+
+  it('says another phone has priority, without retrying', () => {
+    const busy = describeConnection({
+      status: 'stopped',
+      attempt: 0,
+      lastClose: { code: CLOSE_BUSY, reason: 'another phone has priority' },
+    });
+    expect(busy.text).toContain('priority');
+    expect(busy.text).not.toContain('retrying');
+    expect(busy.level).toBe('bad');
   });
 
   it('explains an idle timeout from the service and keeps retrying', () => {
@@ -86,6 +98,7 @@ describe('captureStatusRows', () => {
     motion: 'denied',
     wakeLock: false,
     clock: { rtt_ms: 41.4, offset_ms: 3 },
+    link: null,
   };
 
   it('shows every live reading', () => {
@@ -98,6 +111,10 @@ describe('captureStatusRows', () => {
       { label: 'Motion', value: 'Denied: no compass or IMU', level: 'bad' },
       { label: 'Screen lock', value: 'Not held: set Auto-Lock to Never', level: 'warn' },
       { label: 'Round trip', value: '41 ms', level: 'none' },
+      { label: 'Send rate', value: '—', level: 'none' },
+      { label: 'Held back', value: '—', level: 'none' },
+      { label: 'JPEG quality', value: '—', level: 'none' },
+      { label: 'Frame ack', value: '—', level: 'none' },
     ]);
     expect(valueOf({ ...busy, motion: 'granted', wakeLock: true }, 'Motion')).toBe('Allowed');
     expect(valueOf({ ...busy, motion: 'not-needed' }, 'Motion')).toBe('Available');
@@ -117,5 +134,52 @@ describe('captureStatusRows', () => {
     expect(valueOf(after, 'Round trip')).toBe('—');
     expect(valueOf(after, 'Service')).toContain('took over');
     expect(stoppedLive(busy).connection).toEqual({ status: 'stopped', attempt: 0, lastClose: null });
+  });
+});
+
+describe('linkStatusRows', () => {
+  const healthy: LinkView = {
+    capturedFps: 59.6,
+    sentFps: 59.6,
+    flowSkipsPerS: 0,
+    flowSkips: 3,
+    jpegQuality: 0.7,
+    ackRttMs: 36.4,
+    ackStatus: 'acking',
+  };
+
+  it('shows a healthy link without warnings', () => {
+    expect(linkStatusRows(healthy)).toEqual([
+      { label: 'Send rate', value: '60 of 60 fps', level: 'ok' },
+      { label: 'Held back', value: '0/s by slow link (3 total)', level: 'none' },
+      { label: 'JPEG quality', value: '0.70', level: 'none' },
+      { label: 'Frame ack', value: '36 ms', level: 'none' },
+    ]);
+  });
+
+  it('warns about a weak link: few frames sent, many held back, slow acks', () => {
+    const weak = { ...healthy, sentFps: 9.8, flowSkipsPerS: 48, flowSkips: 500, jpegQuality: 0.4, ackRttMs: 310 };
+    expect(linkStatusRows(weak)).toEqual([
+      { label: 'Send rate', value: '10 of 60 fps', level: 'warn' },
+      { label: 'Held back', value: '48/s by slow link (500 total)', level: 'warn' },
+      { label: 'JPEG quality', value: '0.40', level: 'none' },
+      { label: 'Frame ack', value: '310 ms', level: 'warn' },
+    ]);
+  });
+
+  it('says when the service does not ack frames, or no round trip is known yet', () => {
+    const value = (link: LinkView): string | undefined => linkStatusRows(link).find((r) => r.label === 'Frame ack')?.value;
+    expect(value({ ...healthy, ackStatus: 'none', ackRttMs: null })).toBe('No acks (older service)');
+    expect(value({ ...healthy, ackRttMs: null })).toBe('—');
+  });
+
+  it('does not blame the service while the first ack on a connection is still coming', () => {
+    const waiting = linkStatusRows({ ...healthy, ackStatus: 'waiting', ackRttMs: null }).find((r) => r.label === 'Frame ack');
+    expect(waiting).toEqual({ label: 'Frame ack', value: 'Waiting for first ack', level: 'none' });
+  });
+
+  it('is part of the capture status panel', () => {
+    const rows = captureStatusRows({ ...INITIAL_LIVE, link: healthy });
+    expect(rows.find((row) => row.label === 'Send rate')?.value).toBe('60 of 60 fps');
   });
 });

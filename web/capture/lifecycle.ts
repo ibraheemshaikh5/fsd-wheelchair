@@ -23,7 +23,8 @@ export type LifecycleEvent =
   | { readonly type: 'CAMERA_UNMUTED' }
   | { readonly type: 'CAMERA_ENDED' }
   | { readonly type: 'PAGEHIDE' }
-  | { readonly type: 'TAKEN_OVER' };
+  /** The service closed this phone for good; message says why (default: a takeover). */
+  | { readonly type: 'TAKEN_OVER'; readonly message?: string };
 
 /**
  * beginSession: create and start a new session.
@@ -83,7 +84,7 @@ function fromActive(state: Lifecycle, event: LifecycleEvent): Step {
     case 'CAMERA_ENDED':
       return to('idle', ['stopSession'], CAMERA_ENDED_MESSAGE);
     case 'TAKEN_OVER':
-      return to('idle', ['stopSession'], TAKEOVER_TEXT);
+      return to('idle', ['stopSession'], event.message ?? TAKEOVER_TEXT);
     case 'CAMERA_MUTED':
       return to(state.kind, [], CAMERA_INTERRUPTED_MESSAGE);
     case 'CAMERA_UNMUTED':

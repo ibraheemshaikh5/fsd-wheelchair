@@ -168,3 +168,17 @@ def test_rejects_frame_that_is_not_jpeg():
 def test_pong_serialises_to_wire_json():
     wire = json.loads(Pong(t=5.0, server_t=9.0).to_wire())
     assert wire == {"v": 1, "type": "pong", "t": 5.0, "server_t": 9.0}
+
+
+def test_hello_imu_axes_is_optional():
+    assert parse_text(as_json(hello_dict()), MAX_TEXT).imu_axes is None
+
+
+def test_hello_may_declare_device_xyz_imu_axes():
+    hello = parse_text(as_json(hello_dict(imu_axes="device_xyz")), MAX_TEXT)
+    assert hello.imu_axes == "device_xyz"
+
+
+def test_hello_rejects_unknown_imu_axes():
+    with pytest.raises(ProtocolError):
+        parse_text(as_json(hello_dict(imu_axes="beta_gamma_alpha")), MAX_TEXT)

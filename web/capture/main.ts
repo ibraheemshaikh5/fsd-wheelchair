@@ -23,15 +23,21 @@ import {
   uiFor,
 } from './lifecycle';
 import { captureStatusRows, INITIAL_LIVE, type LiveState, type MotionAccess, stoppedLive } from './live';
+import { SEND_BUDGET } from './send-budget';
 import { Session, SessionCancelled, type SessionDeps } from './session';
-import { type CaptureSettings, DEFAULT_SETTINGS, parseSettings, phoneSocketUrl } from './settings';
+import {
+  type CaptureSettings,
+  DEFAULT_SETTINGS,
+  parseSettings,
+  phoneSocketUrl,
+  serializeSettings,
+  validSettings,
+} from './settings';
 import { describeStartError } from './status';
 import { Transport } from './transport';
 
 const SETTINGS_KEY = 'fsd-capture-settings';
 const STATUS_INTERVAL_MS = 500;
-// About two frames at 640 px; more than this queued means the link is behind.
-const MAX_BUFFERED_BYTES = 150_000;
 const PREVIEW_RESUME_FAILED = 'The camera preview did not resume. Tap Stop, then Start.';
 
 const byId = <T extends HTMLElement>(id: string): T => {
@@ -69,7 +75,7 @@ function loadSettings(): CaptureSettings {
 
 function saveSettings(next: CaptureSettings): void {
   try {
-    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+    window.localStorage.setItem(SETTINGS_KEY, serializeSettings(next));
   } catch {
     // Private browsing or storage blocked: settings just won't persist.
   }
@@ -84,10 +90,12 @@ const browserDeps: SessionDeps<MediaStream> = {
   playPreview: async (stream) => {
     ui.preview.srcObject = stream;
     await ui.preview.play();
+    // Read once playing: the rate the camera actually runs at, which iOS may set below the request.
     const track = stream.getVideoTracks()[0]?.getSettings();
     return {
       width: ui.preview.videoWidth || (track?.width ?? 0),
       height: ui.preview.videoHeight || (track?.height ?? 0),
+      frameRate: track?.frameRate,
     };
   },
   clearPreview: (stream) => {
@@ -101,11 +109,11 @@ const browserDeps: SessionDeps<MediaStream> = {
       clearTimer: (id) => window.clearTimeout(id),
       onState: handlers.onState,
       onMessage: handlers.onMessage,
-      maxBufferedBytes: MAX_BUFFERED_BYTES,
+      sendBudget: SEND_BUDGET,
       now: Date.now,
     }),
-  startFrameLoop: (fps, onFrame) => startFrameLoop(ui.preview, fps, onFrame),
-  encodeFrame: (maxSide, quality) => encodeJpeg(ui.preview, ui.encoder, maxSide, quality),
+  startFrameLoop: (intervalMs, onFrame) => startFrameLoop(ui.preview, intervalMs, onFrame),
+  encodeFrame: (maxSide, quality, orientation) => encodeJpeg(ui.preview, ui.encoder, maxSide, quality, orientation),
   watchLocation,
   keepScreenOn,
   listenOrientation,
@@ -124,8 +132,8 @@ function beginSession(): void {
     onCamera: (change) => {
       if (session === created) dispatch({ type: CAMERA_EVENTS[change] });
     },
-    onTakenOver: () => {
-      if (session === created) dispatch({ type: 'TAKEN_OVER' });
+    onTakenOver: (message) => {
+      if (session === created) dispatch({ type: 'TAKEN_OVER', message });
     },
     onError: (message) => {
       if (session === created) showError(message);
@@ -169,7 +177,9 @@ function applyUi(view: LifecycleUi, showMessage: boolean): void {
   ui.start.disabled = !view.startEnabled;
   ui.stop.disabled = !view.stopEnabled;
   for (const element of Array.from(ui.settings.elements)) {
-    if (element instanceof HTMLInputElement) element.disabled = !view.settingsEnabled;
+    if (element instanceof HTMLInputElement || element instanceof HTMLSelectElement) {
+      element.disabled = !view.settingsEnabled;
+    }
   }
   // Only on a real change, so an ignored event does not wipe a sensor error.
   if (showMessage) showError(view.message);
@@ -203,7 +213,7 @@ function renderStatus(): void {
 function fillSettingsForm(values: CaptureSettings): void {
   for (const [key, value] of Object.entries(values)) {
     const input = ui.settings.elements.namedItem(key);
-    if (input instanceof HTMLInputElement) input.value = String(value);
+    if (input instanceof HTMLInputElement || input instanceof HTMLSelectElement) input.value = String(value);
   }
 }
 
@@ -211,10 +221,11 @@ function readSettingsForm(): CaptureSettings {
   const raw = Object.fromEntries(
     Object.keys(DEFAULT_SETTINGS).map((key) => {
       const input = ui.settings.elements.namedItem(key);
-      return [key, input instanceof HTMLInputElement ? Number(input.value) : Number.NaN];
+      const field = input instanceof HTMLInputElement || input instanceof HTMLSelectElement ? input : null;
+      return [key, field === null ? Number.NaN : Number(field.value)];
     }),
   );
-  return parseSettings(JSON.stringify(raw));
+  return validSettings(raw);
 }
 
 function onStart(): void {

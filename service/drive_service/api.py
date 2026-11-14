@@ -77,6 +77,8 @@ def build_router(
             "camera": hello.camera.model_dump(),
             "mount": hello.mount.model_dump() if hello.mount else None,
             "user_agent": hello.user_agent,
+            # Null for older pages, whose imu rotation columns are [about y, z, x].
+            "imu_axes": hello.imu_axes,
             "clock": asdict(snapshot.clock) if snapshot.clock else None,
         }
         try:

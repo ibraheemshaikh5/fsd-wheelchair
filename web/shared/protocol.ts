@@ -10,6 +10,8 @@ export interface FrameHeader {
   readonly t: number;
   readonly w: number;
   readonly h: number;
+  /** Clockwise degrees the page turned the image (upright, landscape when the phone is sideways). */
+  readonly rot?: 0 | 90 | 180 | 270;
 }
 
 export interface CameraInfo {
@@ -35,6 +37,8 @@ export interface HelloMessage extends PhoneMessageBase {
   readonly user_agent: string;
   readonly camera: CameraInfo;
   readonly mount: MountInfo | null;
+  /** 'device_xyz': IMU rotation columns are about device x, y, z. Absent in older recordings. */
+  readonly imu_axes?: 'device_xyz';
 }
 
 export interface GpsMessage extends PhoneMessageBase {
@@ -71,7 +75,31 @@ export interface PingMessage extends PhoneMessageBase {
   readonly offset_ms: number | null;
 }
 
-export type PhoneMessage = HelloMessage | GpsMessage | HeadingMessage | ImuMessage | PingMessage;
+/**
+ * Once a second, how the frame stream is coping with the link. Counters run
+ * from the start of this connection and reset on reconnect.
+ */
+export interface LinkMessage extends PhoneMessageBase {
+  readonly type: 'link';
+  /** Frames the camera delivered while this connection was open. */
+  readonly captured: number;
+  readonly sent: number;
+  /** Acks received. */
+  readonly acked: number;
+  /** Held back because too many frames were waiting for their ack. */
+  readonly skipped_flow: number;
+  /** Encoder busy or failed, or a newer frame went out first. */
+  readonly skipped_encoder: number;
+  /** Held back by the socket's send budget (bufferedAmount). */
+  readonly skipped_socket: number;
+  readonly in_flight: number;
+  /** JPEG quality in use now (adapts to the link). */
+  readonly jpeg_quality: number;
+  /** Smoothed frame send-to-ack round trip, null before the first ack. */
+  readonly ack_rtt_ms: number | null;
+}
+
+export type PhoneMessage = HelloMessage | GpsMessage | HeadingMessage | ImuMessage | PingMessage | LinkMessage;
 
 export interface PongMessage {
   readonly v: typeof PROTOCOL_VERSION;
@@ -88,7 +116,17 @@ export interface ErrorMessage {
   readonly message: string;
 }
 
-export type ServerMessage = PongMessage | ErrorMessage;
+/** Sent after each binary frame the service handled, in order: the phone's flow control. */
+export interface AckMessage {
+  readonly v: typeof PROTOCOL_VERSION;
+  readonly type: 'ack';
+  /** The frame's seq. */
+  readonly seq: number;
+  /** Service clock when it handled the frame, ms since the Unix epoch. */
+  readonly t: number;
+}
+
+export type ServerMessage = PongMessage | ErrorMessage | AckMessage;
 
 const HEADER_LENGTH_BYTES = 4;
 
@@ -119,6 +157,9 @@ export function parseServerMessage(raw: string): ServerMessage | null {
   if (!isRecord(data) || data.v !== PROTOCOL_VERSION) return null;
   if (data.type === 'pong' && isFiniteNumber(data.t) && isFiniteNumber(data.server_t)) {
     return { v: PROTOCOL_VERSION, type: 'pong', t: data.t, server_t: data.server_t };
+  }
+  if (data.type === 'ack' && Number.isSafeInteger(data.seq) && (data.seq as number) >= 0 && isFiniteNumber(data.t)) {
+    return { v: PROTOCOL_VERSION, type: 'ack', seq: data.seq as number, t: data.t };
   }
   if (data.type === 'error' && typeof data.message === 'string') {
     return { v: PROTOCOL_VERSION, type: 'error', message: data.message };

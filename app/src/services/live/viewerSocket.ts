@@ -1,13 +1,14 @@
 import { parseStatus, type ServiceStatus } from './status'
 
 // The iPad's connection to the driving service: /ws/viewer, which sends a status
-// as JSON text about ten times a second and the phone's latest camera frame as
-// JPEG bytes whenever there is a new one. Reconnects with backoff on its own.
+// as JSON text about thirty times a second, each followed by the phone's latest
+// camera frame as JPEG bytes when there is a new one (up to the phone's frame
+// rate). Reconnects with backoff on its own.
 
 const BACKOFF_BASE_MS = 500
 const BACKOFF_MAX_MS = 5000
 /**
- * The service sends a status every 100 ms. Hearing nothing for this long means
+ * The service sends a status about every 33 ms. Hearing nothing for this long means
  * the link is dead even if the socket has not noticed yet (Wi-Fi dropped, iPad
  * slept), so it is closed and reported lost straight away.
  */

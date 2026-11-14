@@ -1,7 +1,8 @@
 import type { ChairLink, DriveMode, DriveState, LatLng, LocalPoint, Place, Route } from '../../types'
 import { distanceM, toEastNorth, toLocal } from '../../lib/geo'
 import { pointAt, upcomingSteps } from '../../lib/route'
-import type { ServiceStatus } from './status'
+import { displayFps, displayHeadingDeg, displaySpeedMps } from './displayPrecision'
+import type { GpsStatus, ServiceStatus } from './status'
 import type { SocketState } from './viewerSocket'
 
 // Pure functions that turn what the driving service reports, plus the trip the
@@ -19,6 +20,8 @@ export const CRUISE_MPS = 1.1
 export const MAX_MPS = 1.8
 /** Moving faster than this with a trip set means the rider is driving it with the joystick. */
 export const MOVING_MPS = 0.3
+/** Below this a chair already moving counts as stopped again (hysteresis with MOVING_MPS). */
+export const STOPPED_MPS = 0.15
 /** Within this distance of the destination (plus the GPS error) counts as arrived. */
 export const ARRIVE_RADIUS_M = 8
 /** A new GPS fix may move progress back by at most this much (the chair rarely reverses far). */
@@ -53,6 +56,8 @@ export interface LiveInputs {
   linkLost: boolean
   /** Why the service was last lost, while it is still lost. */
   linkIssue: string | null
+  /** The mode at the last update, so ready/manual has hysteresis. */
+  previousMode?: DriveMode
 }
 
 interface Pose {
@@ -94,9 +99,19 @@ export function chairPose(
     positionFrom,
     measured: freshGps !== null,
     accuracyM: freshGps?.accuracy_m ?? null,
-    headingDeg,
-    speedMps: Math.max(0, freshGps?.speed_mps ?? 0),
+    headingDeg: displayHeadingDeg(headingDeg),
+    speedMps: displaySpeedMps(chairSpeed(status, freshGps)),
   }
+}
+
+/**
+ * Fresh IMU-derived motion first (it follows the chair within a frame or two);
+ * else the fresh GPS speed, which lags by a second or more; else stopped.
+ */
+function chairSpeed(status: ServiceStatus | null, freshGps: GpsStatus | null): number {
+  const motion = status?.motion ?? null
+  const motionSpeed = motion?.fresh ? motion.speed_mps : null
+  return Math.max(0, motionSpeed ?? freshGps?.speed_mps ?? 0)
 }
 
 export function chairLink(
@@ -116,7 +131,7 @@ export function chairLink(
     issue: linkLost ? linkIssue : null,
     phone,
     gpsAccuracyM: live?.gps?.fresh ? live.gps.accuracy_m : null,
-    cameraFps: live?.phone_connected ? live.stats.fps : null,
+    cameraFps: live?.phone_connected ? displayFps(live.stats.fps) : null,
     positionFrom,
   }
 }
@@ -164,10 +179,15 @@ function engageBlocked(link: ChairLink): string {
   return 'Self-driving is not connected yet. Drive with the joystick.'
 }
 
-function modeFor(trip: Trip | null, arrived: boolean, speedMps: number): DriveMode {
+/**
+ * Manual once speed passes MOVING_MPS, and only back to ready below STOPPED_MPS.
+ * Fused speed updates ~30 times a second, so a single threshold would flicker.
+ */
+function modeFor(trip: Trip | null, arrived: boolean, speedMps: number, previousMode?: DriveMode): DriveMode {
   if (!trip) return 'idle'
   if (arrived) return 'arrived'
-  return speedMps > MOVING_MPS ? 'manual' : 'ready'
+  const threshold = previousMode === 'manual' ? STOPPED_MPS : MOVING_MPS
+  return speedMps > threshold ? 'manual' : 'ready'
 }
 
 function reasonFor(mode: DriveMode, link: ChairLink): string | null {
@@ -240,7 +260,7 @@ export function deriveState(input: LiveInputs): DriveState {
   const pose = chairPose(input.status, input.ipadPosition, input.defaultPosition, input.previousHeadingDeg)
   const link = chairLink(input.socket, input.status, pose.positionFrom, input.linkLost, input.linkIssue)
   const { arrived, ...trip } = tripFields(input.trip, pose, input.progressM, input.arrived)
-  const mode = modeFor(input.trip, arrived, pose.speedMps)
+  const mode = modeFor(input.trip, arrived, pose.speedMps, input.previousMode)
   return {
     mode,
     source: 'live',

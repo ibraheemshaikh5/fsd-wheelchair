@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   frameTimeMs,
+  isOverconstrained,
+  OPENING_FPS_LIMIT,
+  openingSize,
   pickRearCamera,
+  raisedFrameRate,
+  raiseConstraints,
   scaledSize,
   shouldGrabFallbackFrame,
   videoConstraints,
@@ -36,12 +41,12 @@ describe('pickRearCamera', () => {
 });
 
 describe('videoConstraints', () => {
-  it('asks for the environment camera when no device is chosen', () => {
-    expect(videoConstraints(null, { width: 640, height: 480, fps: 10 })).toEqual({
+  it('asks for the environment camera at exactly the chosen rate when no device is chosen', () => {
+    expect(videoConstraints(null, { width: 640, height: 480, fps: 60 })).toEqual({
       facingMode: { ideal: 'environment' },
       width: { ideal: 640 },
       height: { ideal: 480 },
-      frameRate: { ideal: 10 },
+      frameRate: { ideal: 60, max: 60 },
     });
   });
 
@@ -49,6 +54,73 @@ describe('videoConstraints', () => {
     const constraints = videoConstraints('cam-1', { width: 640, height: 480, fps: 10 });
     expect(constraints.deviceId).toEqual({ exact: 'cam-1' });
     expect(constraints.facingMode).toBeUndefined();
+  });
+
+  it('drops the frame-rate cap in the relaxed retry, so a camera without that rate still starts', () => {
+    const constraints = videoConstraints('cam-1', { width: 640, height: 480, fps: 60 }, 'relaxed');
+    expect(constraints.frameRate).toEqual({ ideal: 60 });
+  });
+});
+
+describe('openingSize', () => {
+  it('opens the camera at a rate every iPhone lens offers at 720p, even when more is wanted', () => {
+    expect(OPENING_FPS_LIMIT).toBe(60);
+    expect(openingSize({ width: 1280, height: 720, fps: 240 })).toEqual({ width: 1280, height: 720, fps: 60 });
+  });
+
+  it('keeps a lower setting as it is', () => {
+    expect(openingSize({ width: 1280, height: 720, fps: 20 })).toEqual({ width: 1280, height: 720, fps: 20 });
+  });
+});
+
+describe('raisedFrameRate', () => {
+  it('picks the most the camera offers when the setting allows more than it runs at', () => {
+    expect(raisedFrameRate(240, 60, 120)).toBe(120);
+    expect(raisedFrameRate(240, 60, 240)).toBe(240);
+  });
+
+  it('never goes past the setting', () => {
+    expect(raisedFrameRate(100, 60, 240)).toBe(100);
+  });
+
+  it('leaves a camera already at its top rate alone', () => {
+    expect(raisedFrameRate(240, 60, 60)).toBeNull();
+    expect(raisedFrameRate(30, 30, 240)).toBeNull();
+  });
+
+  it('assumes the opening rate when the camera does not say what it runs at', () => {
+    expect(raisedFrameRate(240, undefined, 120)).toBe(120);
+    expect(raisedFrameRate(240, undefined, 60)).toBeNull();
+  });
+
+  it('does nothing when the camera does not report a usable maximum', () => {
+    expect(raisedFrameRate(240, 60, undefined)).toBeNull();
+    expect(raisedFrameRate(240, 60, Number.NaN)).toBeNull();
+    expect(raisedFrameRate(240, 60, 0)).toBeNull();
+  });
+});
+
+describe('raiseConstraints', () => {
+  it('keeps the requested size and asks for the new rate without a hard limit', () => {
+    expect(raiseConstraints({ width: 1280, height: 720, fps: 60 }, 120)).toEqual({
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 120 },
+    });
+  });
+});
+
+describe('isOverconstrained', () => {
+  it('recognises the error a camera gives when it cannot meet the constraints', () => {
+    expect(isOverconstrained({ name: 'OverconstrainedError', constraint: 'frameRate' })).toBe(true);
+    expect(isOverconstrained(new DOMException('nope', 'OverconstrainedError'))).toBe(true);
+  });
+
+  it('leaves permission and other failures alone', () => {
+    expect(isOverconstrained(new DOMException('no', 'NotAllowedError'))).toBe(false);
+    expect(isOverconstrained(new Error('boom'))).toBe(false);
+    expect(isOverconstrained(null)).toBe(false);
+    expect(isOverconstrained('OverconstrainedError')).toBe(false);
   });
 });
 

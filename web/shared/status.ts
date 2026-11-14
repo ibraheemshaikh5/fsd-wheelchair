@@ -90,6 +90,35 @@ export interface ServiceStatus {
   readonly recording: RecordingStatus;
   /** Where the rider asked to go, measured from the latest fresh fix. Absent from older services. */
   readonly destination?: DestinationStatus | null;
+  /** What the service derives from the IMU. Absent from older services; null when unknown or malformed. */
+  readonly motion?: MotionStatus | null;
+  /**
+   * Set by parseStatus (never sent by the service) when the service sent a motion
+   * block that failed validation, so a contract break is not mistaken for "no estimate yet".
+   */
+  readonly motion_invalid?: true;
+}
+
+/** Where MotionStatus.speed_mps came from; 'still' means the IMU says the chair is not moving. */
+export type SpeedSource = 'gps' | 'imu' | 'still';
+
+const SPEED_SOURCES: readonly SpeedSource[] = ['gps', 'imu', 'still'];
+
+/**
+ * The chair's motion from the phone's IMU (fused with GPS). Signs: yaw positive
+ * turns left (counter-clockwise from above); accel_fwd positive speeds up along
+ * the camera's forward direction; accel_lat positive is toward the chair's left.
+ */
+export interface MotionStatus {
+  readonly speed_mps: number | null;
+  readonly speed_source: SpeedSource | null;
+  readonly yaw_rate_dps: number | null;
+  readonly accel_fwd_mps2: number | null;
+  readonly accel_lat_mps2: number | null;
+  /** Age of the newest IMU sample used. */
+  readonly age_ms: number | null;
+  /** age_ms at most 250 ms, after clock sync. */
+  readonly fresh: boolean;
 }
 
 export interface DestinationStatus {
@@ -102,6 +131,32 @@ export interface DestinationStatus {
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+type Check = (value: unknown) => boolean;
+
+const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+const nullOr =
+  (check: Check): Check =>
+  (value) =>
+    value === null || check(value);
+const nonNegative: Check = (value) => isFiniteNumber(value) && value >= 0;
+
+const MOTION_FIELDS: Readonly<Record<keyof MotionStatus, Check>> = {
+  speed_mps: nullOr(nonNegative),
+  speed_source: nullOr((value) => SPEED_SOURCES.includes(value as SpeedSource)),
+  yaw_rate_dps: nullOr(isFiniteNumber),
+  accel_fwd_mps2: nullOr(isFiniteNumber),
+  accel_lat_mps2: nullOr(isFiniteNumber),
+  age_ms: nullOr(nonNegative),
+  fresh: (value) => typeof value === 'boolean',
+};
+
+/** A well-formed motion block, or null: a bad one loses only the motion readings, not the status. */
+export function parseMotion(value: unknown): MotionStatus | null {
+  if (!isObject(value)) return null;
+  const valid = Object.entries(MOTION_FIELDS).every(([key, check]) => check(value[key]));
+  return valid ? (value as unknown as MotionStatus) : null;
+}
 
 /**
  * A status message from the viewer socket, or null for anything else. Checks
@@ -120,7 +175,12 @@ export function parseStatus(raw: string): ServiceStatus | null {
     typeof value.phone_connected === 'boolean' &&
     isObject(value.stats) &&
     isObject(value.recording);
-  return valid ? (value as unknown as ServiceStatus) : null;
+  if (!valid) return null;
+  const status = value as unknown as ServiceStatus;
+  if (!('motion' in value)) return status;
+  const motion = parseMotion(value.motion);
+  const invalid = motion === null && value.motion !== null;
+  return invalid ? { ...status, motion, motion_invalid: true } : { ...status, motion };
 }
 
 /** Envelope used by every /api response. */

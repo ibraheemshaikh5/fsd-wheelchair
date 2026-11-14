@@ -27,3 +27,6 @@ recordings/
 # Model work (large downloads and generated output)
 ml/weights/
 ml/runs/
+
+# TypeScript build cache
+*.tsbuildinfo

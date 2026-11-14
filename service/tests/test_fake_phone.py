@@ -72,6 +72,7 @@ def test_fake_phone_messages_are_accepted_by_the_service(tmp_path: Path):
             phone.send_text(fake_phone.heading(NOW_MS, pose))
             phone.send_text(fake_phone.imu(NOW_MS))
             phone.send_bytes(fake_phone.frame(0, NOW_MS, 64, 48))
+            assert json.loads(phone.receive_text())["type"] == "ack"
             phone.send_text(fake_phone.ping(NOW_MS, 12.0, -3.0))
             assert json.loads(phone.receive_text())["type"] == "pong"
             status = client.get("/api/status").json()["data"]
@@ -82,4 +83,21 @@ def test_fake_phone_messages_are_accepted_by_the_service(tmp_path: Path):
     assert status["frame"]["w"] == 64
     assert status["clock"]["offset_ms"] == -3.0
     assert stopped["frames"] == 1
-    assert stopped["sensors"] == 3  # gps, heading, imu (hello came before the start)
+    assert stopped["sensors"] == 4  # gps, heading, imu, motion (hello came before the start)
+
+
+def test_fake_imu_looks_like_an_upright_mounted_iphone():
+    # iOS reports gravity pointing down, so an upright phone (top up) reads -g on y,
+    # and the motion estimator can find a horizontal forward axis.
+    from drive_service.motion import MotionState, update_imu
+    from drive_service.protocol import Imu
+
+    batch = Imu.model_validate(json.loads(fake_phone.imu(NOW_MS)))
+    assert all(s[2] == pytest.approx(-fake_phone.GRAVITY) for s in batch.samples)
+    _, result = update_imu(MotionState(), batch, legacy_axes=False)
+    assert result.rows[-1].accel_fwd_mps2 == pytest.approx(0.0, abs=0.01)
+    assert result.rows[-1].yaw_rate_dps == pytest.approx(0.0, abs=0.01)
+
+
+def test_fake_hello_declares_device_axes():
+    assert json.loads(fake_phone.hello(NOW_MS, 640, 360, 60.0))["imu_axes"] == "device_xyz"

@@ -2,15 +2,21 @@
 // without a browser lives in the neighbouring modules; this file only wires
 // those to Safari/Chrome and is exercised by the Playwright test and on device.
 
+import { drawTransform, type FrameOrientation, frameRotation, rotatedSize } from './orientation';
 import {
   type CaptureSize,
   type FallbackFrameState,
   type FrameMetadataLike,
+  isOverconstrained,
+  openingSize,
   pickRearCamera,
+  raiseConstraints,
+  raisedFrameRate,
   scaledSize,
   shouldGrabFallbackFrame,
   videoConstraints,
 } from './camera';
+import { isFrameDue, nextDueMs } from './frame-rate';
 import type { OrientationLike } from './heading';
 import type { PositionLike } from './location';
 import type { MotionLike } from './motion';
@@ -79,16 +85,49 @@ function keepUnlessAborted(stream: MediaStream, signal: AbortSignal): MediaStrea
 }
 
 /**
- * Open the rear camera, preferring the ultra-wide lens. The first request uses
- * facingMode because device labels stay hidden until permission is granted.
- * Once `signal` aborts, any stream obtained is stopped and the call rejects.
+ * Ask a camera for its top rate, up to size.fps, once it is open. If it refuses,
+ * it keeps running at the rate it opened with, which is still a working camera,
+ * so the refusal is deliberately not an error.
+ */
+async function raiseFrameRate(stream: MediaStream, size: CaptureSize): Promise<void> {
+  const track = stream.getVideoTracks()[0];
+  if (track === undefined || typeof track.getCapabilities !== 'function') return;
+  const fps = raisedFrameRate(size.fps, track.getSettings().frameRate, track.getCapabilities().frameRate?.max);
+  if (fps === null) return;
+  try {
+    await track.applyConstraints(raiseConstraints(size, fps));
+  } catch {
+    // Refused (OverconstrainedError or similar): stay at the opening rate.
+  }
+}
+
+/** getUserMedia at exactly size.fps, or, if the camera cannot do that rate, as close as it gets. */
+async function getVideo(deviceId: string | null, size: CaptureSize): Promise<MediaStream> {
+  const open = (mode: 'capped' | 'relaxed'): Promise<MediaStream> =>
+    navigator.mediaDevices.getUserMedia({ video: videoConstraints(deviceId, size, mode), audio: false });
+  try {
+    return await open('capped');
+  } catch (error) {
+    if (!isOverconstrained(error)) throw error;
+    return open('relaxed');
+  }
+}
+
+/**
+ * Open the rear camera, preferring the ultra-wide lens, then ask it for its top
+ * rate up to size.fps. The first request uses facingMode because device labels
+ * stay hidden until permission is granted. Once `signal` aborts, any stream
+ * obtained is stopped and the call rejects.
  */
 export async function openRearCamera(size: CaptureSize, signal: AbortSignal): Promise<CameraLike<MediaStream>> {
+  const camera = await openRearLens(openingSize(size), signal);
+  await raiseFrameRate(camera.stream, size);
+  return { stream: keepUnlessAborted(camera.stream, signal), label: camera.label };
+}
+
+async function openRearLens(size: CaptureSize, signal: AbortSignal): Promise<CameraLike<MediaStream>> {
   const request = async (deviceId: string | null): Promise<MediaStream> =>
-    keepUnlessAborted(
-      await navigator.mediaDevices.getUserMedia({ video: videoConstraints(deviceId, size), audio: false }),
-      signal,
-    );
+    keepUnlessAborted(await getVideo(deviceId, size), signal);
   const first = await request(null);
   const firstTrack = first.getVideoTracks()[0];
   const best = pickRearCamera(await navigator.mediaDevices.enumerateDevices());
@@ -118,28 +157,32 @@ function fallbackFrameState(video: HTMLVideoElement): FallbackFrameState {
   };
 }
 
-/** Call onFrame at most `fps` times a second, with frame timing metadata when the browser has it. */
+/** Timer rate without requestVideoFrameCallback when every frame is wanted (60 fps: a typical camera's top rate). */
+const FALLBACK_INTERVAL_MS = 1000 / 60;
+
+/**
+ * Call onFrame for each new camera frame at least intervalMs apart (every frame
+ * when null), with frame timing metadata when the browser has it.
+ */
 export function startFrameLoop(
   video: HTMLVideoElement,
-  fps: number,
+  intervalMs: number | null,
   onFrame: (metadata: FrameMetadataLike | undefined) => void,
 ): Unsubscribe {
-  const intervalMs = 1000 / fps;
   if (!('requestVideoFrameCallback' in video)) {
     // No per-frame callback: grab on a timer, but never from a stalled camera.
     const id = window.setInterval(() => {
       if (shouldGrabFallbackFrame(fallbackFrameState(video))) onFrame(undefined);
-    }, intervalMs);
+    }, intervalMs ?? FALLBACK_INTERVAL_MS);
     return () => window.clearInterval(id);
   }
-  let last = Number.NEGATIVE_INFINITY;
+  let due: number | null = null;
   let handle = 0;
   let running = true;
   const tick = (now: number, metadata: VideoFrameCallbackMetadata): void => {
     if (!running) return;
-    // Small tolerance so 30 fps video divides evenly into 10 fps.
-    if (now - last >= intervalMs * 0.9) {
-      last = now;
+    if (isFrameDue(due, now, intervalMs)) {
+      due = intervalMs === null ? null : nextDueMs(due, now, intervalMs);
       onFrame(metadata);
     }
     handle = video.requestVideoFrameCallback(tick);
@@ -151,20 +194,29 @@ export function startFrameLoop(
   };
 }
 
-/** Draw the current video frame, scaled down, and encode it as JPEG. */
+/**
+ * Draw the current video frame, scaled down and turned upright (landscape when
+ * the phone is sideways; see orientation.ts), and encode it as JPEG.
+ */
 export function encodeJpeg(
   video: HTMLVideoElement,
   canvas: HTMLCanvasElement,
   maxSide: number,
   quality: number,
+  orientation: FrameOrientation,
 ): Promise<EncodedFrameLike | null> {
   if (video.videoWidth === 0 || video.videoHeight === 0) return Promise.resolve(null);
-  const { w, h } = scaledSize(video.videoWidth, video.videoHeight, maxSide);
+  const rot = frameRotation(video.videoWidth, video.videoHeight, orientation.physical, orientation.setting);
+  const source = scaledSize(video.videoWidth, video.videoHeight, maxSide);
+  const { w, h } = rotatedSize(source.w, source.h, rot);
   if (canvas.width !== w) canvas.width = w;
   if (canvas.height !== h) canvas.height = h;
   const context = canvas.getContext('2d');
   if (context === null) return Promise.resolve(null);
-  context.drawImage(video, 0, 0, w, h);
+  const [a, b, c, d, e, f] = drawTransform(rot, source.w, source.h) as [number, number, number, number, number, number];
+  context.setTransform(a, b, c, d, e, f);
+  context.drawImage(video, 0, 0, source.w, source.h);
+  context.setTransform(1, 0, 0, 1, 0, 0);
   return new Promise((resolve) => {
     canvas.toBlob(
       (blob) => {
@@ -174,7 +226,7 @@ export function encodeJpeg(
         }
         blob
           .arrayBuffer()
-          .then((buffer) => resolve({ bytes: new Uint8Array(buffer), w, h }))
+          .then((buffer) => resolve({ bytes: new Uint8Array(buffer), w, h, rot }))
           .catch(() => resolve(null));
       },
       'image/jpeg',

@@ -7,7 +7,8 @@ Session layout::
                          error (a failure) and end_reason (a limit was reached)
         frames/000001.jpg ...
         frames.jsonl     one line per frame: file, phone seq, capture time, receive time
-        sensors.jsonl    one line per sensor message, as received, plus recv_ms
+        sensors.jsonl    one line per sensor message, as received, plus recv_ms,
+                         and service-derived lines (type "motion"), also with recv_ms
 
 Disk writes happen on a per-session worker thread so a slow disk cannot stall
 ingest. If the worker falls behind, items are dropped and counted rather than
@@ -26,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +41,7 @@ from drive_service.recording_session import (
     RecordingSession,
     SensorItem,
     SensorMessage,
+    derived_item,
     frame_item,
     free_bytes,
     sensor_item,
@@ -176,6 +178,12 @@ class Recorder:
         session = self._accepting_session()
         if session is not None:
             self._offer(session, sensor_item(message, received_wall_ms))
+
+    def write_derived(self, record: Mapping[str, Any], received_wall_ms: float) -> None:
+        """Record a line the service computed, such as the motion estimate."""
+        session = self._accepting_session()
+        if session is not None:
+            self._offer(session, derived_item(record, received_wall_ms))
 
     def _accepting_session(self) -> RecordingSession | None:
         session = self._session

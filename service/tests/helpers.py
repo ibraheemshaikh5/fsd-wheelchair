@@ -38,6 +38,9 @@ class NullRecorder:
     def write_sensor(self, message, received_wall_ms):
         pass
 
+    def write_derived(self, record, received_wall_ms):
+        pass
+
 
 def gps_dict(**overrides: Any) -> dict[str, Any]:
     base = {
@@ -90,6 +93,24 @@ def imu_dict(**overrides: Any) -> dict[str, Any]:
 
 def ping_dict(**overrides: Any) -> dict[str, Any]:
     base = {"v": 1, "type": "ping", "t": 1_700_000_000_000.0}
+    return {**base, **overrides}
+
+
+def link_dict(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "v": 1,
+        "type": "link",
+        "t": 1_700_000_000_000.0,
+        "captured": 600,
+        "sent": 240,
+        "acked": 236,
+        "skipped_flow": 300,
+        "skipped_encoder": 40,
+        "skipped_socket": 20,
+        "in_flight": 3,
+        "jpeg_quality": 0.5,
+        "ack_rtt_ms": 180.0,
+    }
     return {**base, **overrides}
 
 

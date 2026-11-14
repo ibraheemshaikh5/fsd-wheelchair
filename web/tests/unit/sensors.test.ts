@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { sampleFromPong } from '../../capture/clock';
+import { monotonicToWallMs, sampleFromPong } from '../../capture/clock';
 import { toHeadingMessage } from '../../capture/heading';
 import { recentFix, toGpsMessage } from '../../capture/location';
-import { addMotion, EMPTY_BATCH, takeBatch } from '../../capture/motion';
+import { addMotion, drainBatch, EMPTY_BATCH, IMU_AXES, motionTimeMs, takeBatch } from '../../capture/motion';
 
 const NOW = 1_700_000_000_000;
 
@@ -15,6 +15,26 @@ describe('sampleFromPong', () => {
 
   it('ignores a pong that arrives before it was sent', () => {
     expect(sampleFromPong({ v: 1, type: 'pong', t: 1000, server_t: 1 }, 999)).toBeNull();
+  });
+});
+
+describe('monotonicToWallMs', () => {
+  const WALL_NOW = 2_000_000;
+  const MONO_NOW = 1_000;
+
+  it('subtracts the delay measured on the monotonic clock from the wall clock', () => {
+    expect(monotonicToWallMs(960, WALL_NOW, MONO_NOW)).toBe(WALL_NOW - 40);
+  });
+
+  it('never stamps a time later than now', () => {
+    expect(monotonicToWallMs(1_016, WALL_NOW, MONO_NOW)).toBe(WALL_NOW);
+  });
+
+  it('falls back to now with no time, or one older than the allowed delay', () => {
+    expect(monotonicToWallMs(undefined, WALL_NOW, MONO_NOW)).toBe(WALL_NOW);
+    expect(monotonicToWallMs(Number.NaN, WALL_NOW, MONO_NOW)).toBe(WALL_NOW);
+    expect(monotonicToWallMs(0, WALL_NOW, MONO_NOW, 500)).toBe(WALL_NOW);
+    expect(monotonicToWallMs(600, WALL_NOW, MONO_NOW, 500)).toBe(WALL_NOW - 400);
   });
 });
 
@@ -132,13 +152,37 @@ describe('IMU batching', () => {
     rotationRate: { alpha: 3, beta: 1, gamma: 2 },
   };
 
-  it('stamps samples relative to the first one and maps rotation axes to x, y, z', () => {
+  it('labels the rotation columns as rotation about device x, y, z', () => {
+    expect(IMU_AXES).toBe('device_xyz');
+  });
+
+  it('stamps samples relative to the first one and maps iOS rotation axes to x, y, z', () => {
+    // On iOS rotationRate.alpha is about device x, beta about y, gamma about z.
     const batch = addMotion(addMotion(EMPTY_BATCH, motion, 1000), motion, 1016);
     expect(batch.startMs).toBe(1000);
     expect(batch.samples).toEqual([
-      [0, 0.1, 9.7, 0.3, 1, 2, 3],
-      [16, 0.1, 9.7, 0.3, 1, 2, 3],
+      [0, 0.1, 9.7, 0.3, 3, 1, 2],
+      [16, 0.1, 9.7, 0.3, 3, 1, 2],
     ]);
+  });
+
+  it('keeps each rotation axis in its own column', () => {
+    const aboutX = addMotion(EMPTY_BATCH, { ...motion, rotationRate: { alpha: 5, beta: 0, gamma: 0 } }, 1);
+    const aboutY = addMotion(EMPTY_BATCH, { ...motion, rotationRate: { alpha: 0, beta: 5, gamma: 0 } }, 1);
+    const aboutZ = addMotion(EMPTY_BATCH, { ...motion, rotationRate: { alpha: 0, beta: 0, gamma: 5 } }, 1);
+    expect(aboutX.samples[0]?.slice(4)).toEqual([5, 0, 0]);
+    expect(aboutY.samples[0]?.slice(4)).toEqual([0, 5, 0]);
+    expect(aboutZ.samples[0]?.slice(4)).toEqual([0, 0, 5]);
+  });
+
+  it('always sends seven numbers per sample', () => {
+    const batch = addMotion(EMPTY_BATCH, motion, 1000);
+    expect(batch.samples[0]).toHaveLength(7);
+  });
+
+  it('never lets sample times run backwards (the wall clock can be stepped)', () => {
+    const batch = addMotion(addMotion(addMotion(EMPTY_BATCH, motion, 1000), motion, 1020), motion, 1010);
+    expect(batch.samples.map((sample) => sample[0])).toEqual([0, 20, 20]);
   });
 
   it('does not change the batch it was given', () => {
@@ -156,12 +200,12 @@ describe('IMU batching', () => {
 
   it('holds samples until the flush interval passes, then emits one message', () => {
     const batch = addMotion(EMPTY_BATCH, motion, 1000);
-    const early = takeBatch(batch, 1050, 100, 200);
+    const early = takeBatch(batch, 1040, 50, 200);
     expect(early.message).toBeNull();
     expect(early.batch).toBe(batch);
 
-    const due = takeBatch(batch, 1100, 100, 200);
-    expect(due.message).toEqual({ v: 1, type: 'imu', t: 1000, samples: [[0, 0.1, 9.7, 0.3, 1, 2, 3]] });
+    const due = takeBatch(batch, 1050, 50, 200);
+    expect(due.message).toEqual({ v: 1, type: 'imu', t: 1000, samples: [[0, 0.1, 9.7, 0.3, 3, 1, 2]] });
     expect(due.batch).toBe(EMPTY_BATCH);
   });
 
@@ -173,5 +217,30 @@ describe('IMU batching', () => {
 
   it('emits nothing for an empty batch', () => {
     expect(takeBatch(EMPTY_BATCH, 99_999, 100, 200).message).toBeNull();
+    expect(drainBatch(EMPTY_BATCH).message).toBeNull();
+  });
+
+  it('drains a pending batch at once, however young', () => {
+    const batch = addMotion(EMPTY_BATCH, motion, 1000);
+    const drained = drainBatch(batch);
+    expect(drained.message?.samples).toHaveLength(1);
+    expect(drained.batch).toBe(EMPTY_BATCH);
+  });
+});
+
+describe('motionTimeMs', () => {
+  const WALL_NOW = 2_000_000;
+  const MONO_NOW = 1_000;
+
+  it('stamps a sample when the sensor measured it, not when the handler ran', () => {
+    expect(motionTimeMs({ timeStamp: 990 }, WALL_NOW, MONO_NOW)).toBe(WALL_NOW - 10);
+  });
+
+  it('falls back to now without a usable event time', () => {
+    expect(motionTimeMs({}, WALL_NOW, MONO_NOW)).toBe(WALL_NOW);
+    // An epoch-style timeStamp from an old engine is far in the "future" of the monotonic clock.
+    expect(motionTimeMs({ timeStamp: 1_700_000_000_000 }, WALL_NOW, MONO_NOW)).toBe(WALL_NOW);
+    // A timeStamp from a different origin looks seconds old.
+    expect(motionTimeMs({ timeStamp: -60_000 }, WALL_NOW, MONO_NOW)).toBe(WALL_NOW);
   });
 });

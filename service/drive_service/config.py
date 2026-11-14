@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     allowed_origins: tuple[str, ...] = ()
     # Host header values to accept (port ignored), e.g. ["my-mac.tailnet.ts.net"].
     allowed_hosts: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
+    # Tailscale logins (e.g. ["you@gmail.com"]) whose phone always gets the phone
+    # slot. While one streams, any other phone is turned away (4409). The login comes
+    # from the Tailscale-User-Login header that `tailscale serve` sets. Empty: the
+    # newest connection always wins.
+    priority_users: tuple[str, ...] = ()
 
     # Size limits
     max_frame_bytes: int = 1_000_000
@@ -50,8 +55,8 @@ class Settings(BaseSettings):
 
     # Flood limits
     # Recording writes only; the snapshot always keeps the newest frame. About 2x the
-    # phone's top frame rate so jitter never drops frames.
-    max_frame_rate_hz: int = 60
+    # phone's top frame rate (60 fps) so jitter never drops frames.
+    max_frame_rate_hz: int = 120
     max_text_rate_hz: int = 200
     max_api_rate_hz: int = 20  # status reads
     max_control_rate_hz: int = 5  # recording start/stop, separate so reads cannot starve it
@@ -68,6 +73,11 @@ class Settings(BaseSettings):
     # the camera's limit above is what keeps driving safe.
     gps_stale_ms: float = 10_000.0
     heading_stale_ms: float = 1000.0
+    # Speed and turn rate come from IMU samples at about 60 Hz; older than this
+    # means the IMU stream has stalled.
+    motion_stale_ms: float = 250.0
+    # The phone reports link stats once a second; older than this means they stopped.
+    link_stale_ms: float = 3000.0
 
     # Above this speed GPS course is trusted over the compass.
     moving_speed_mps: float = 0.5
@@ -76,7 +86,8 @@ class Settings(BaseSettings):
     # Until it is known the compass heading is reported as magnetic, never as true.
     magnetic_declination_deg: float | None = Field(default=None, ge=-180.0, le=180.0)
 
-    viewer_fps: float = 10.0
+    # Status plus the newest frame, this many times a second, to every viewer.
+    viewer_fps: float = 30.0
     stats_window: int = 100
     clock_window: int = 20
     # Readings are aged from capture only with a clock estimate whose round trip is at
@@ -89,8 +100,10 @@ class Settings(BaseSettings):
 
     # Recording limits. Reaching max frames, max bytes or the free-disk floor ends the
     # recording cleanly (status recording.end_reason); starting needs min free bytes.
-    recorder_queue_size: int = 256
-    recorder_max_frames: int = 100_000
+    # Items waiting to be written: 60 frames, 20 IMU and 20 motion lines and about
+    # 10 headings a second, so this rides out about 9 s of disk stall.
+    recorder_queue_size: int = 1024
+    recorder_max_frames: int = 432_000  # 2 h at 60 fps
     recorder_max_bytes: int = 20_000_000_000  # per recording, frames plus logs
     recorder_max_queue_bytes: int = 64_000_000  # waiting to be written; more is dropped
     recorder_min_free_bytes: int = 2_000_000_000
@@ -101,3 +114,11 @@ class Settings(BaseSettings):
         if not hosts:
             raise ValueError("allowed_hosts must list at least one host")
         return tuple(_check_host_pattern(host) for host in hosts)
+
+    @field_validator("priority_users")
+    @classmethod
+    def _normalize_priority_users(cls, users: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(user.strip().lower() for user in users)
+        if any(not user for user in normalized):
+            raise ValueError("priority_users entries must be non-empty Tailscale logins")
+        return normalized

@@ -137,7 +137,8 @@ label.field {
   font-size: 14px;
 }
 
-label.field input {
+label.field input,
+label.field select {
   width: 100%;
   min-width: 0;
   font: inherit;

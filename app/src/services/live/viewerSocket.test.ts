@@ -84,6 +84,18 @@ describe('connectViewer', () => {
     expect(t.timers.delays()).toContain(500)
   })
 
+  it('keeps a single watchdog timer through a second of 30 Hz statuses and frames', () => {
+    const t = setup()
+    t.last().open()
+    for (let i = 0; i < 30; i++) {
+      t.last().sendStatus({ frame: { seq: i, fresh: true } })
+      t.last().receive(new ArrayBuffer(8))
+    }
+    expect(t.statuses).toHaveLength(30)
+    expect(t.frames).toHaveLength(30)
+    expect(t.timers.delays()).toEqual([SILENCE_TIMEOUT_MS])
+  })
+
   it('gives up on a socket that goes silent and reconnects', () => {
     const t = setup()
     const first = t.last()

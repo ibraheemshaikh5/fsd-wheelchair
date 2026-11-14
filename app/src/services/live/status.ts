@@ -25,6 +25,24 @@ const headingSchema = z.object({
 
 const frameSchema = z.object({
   seq: z.number().int(),
+  /** The newest frame's age since capture; null before clock sync. Absent from older services. */
+  age_ms: finite.nonnegative().nullable().optional().default(null),
+  fresh: z.boolean(),
+})
+
+/**
+ * What the service derives from the phone's IMU (fused with GPS). Signs:
+ * yaw positive = turning left; accel_fwd positive = speeding up along the
+ * camera's forward direction; accel_lat positive = toward the chair's left.
+ */
+const motionSchema = z.object({
+  speed_mps: finite.nonnegative().nullable(),
+  speed_source: z.enum(['gps', 'imu', 'still']).nullable(),
+  yaw_rate_dps: nullableFinite,
+  accel_fwd_mps2: nullableFinite,
+  accel_lat_mps2: nullableFinite,
+  age_ms: finite.nonnegative().nullable(),
+  /** Newest IMU sample at most 250 ms old, after clock sync. */
   fresh: z.boolean(),
 })
 
@@ -40,10 +58,14 @@ const statusSchema = z.object({
   stats: z.object({ fps: finite.nonnegative() }),
   // Where the service thinks the rider is going; absent from older services.
   destination: z.object({ lat: finite, lon: finite }).nullable().optional().default(null),
+  // Absent from older services. A malformed block only loses the motion readings:
+  // rejecting the whole status would make the link look dead.
+  motion: motionSchema.nullable().default(null).catch(null),
 })
 
 export type ServiceStatus = z.infer<typeof statusSchema>
 export type GpsStatus = z.infer<typeof gpsSchema>
+export type MotionStatus = z.infer<typeof motionSchema>
 
 /** A status message, or null for anything that is not one (pongs, malformed JSON, an older shape). */
 export function parseStatus(raw: string): ServiceStatus | null {

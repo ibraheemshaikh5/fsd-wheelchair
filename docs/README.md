@@ -23,4 +23,5 @@ Start with [architecture](architecture.md).
 |-----|--------|
 | [running.md](running.md) | Running the phone stream and the service |
 | [ml/README.md](../ml/README.md) | Running the bake-off and downloading model checkpoints |
+| [model-data-guide.md](model-data-guide.md) | Taking 20 fps frames plus matching motion, GPS and heading out of a recording |
 | [open-questions.md](open-questions.md) | What is still undecided |

@@ -1,7 +1,14 @@
 """WebSocket endpoints: /ws/phone (sensor ingest) and /ws/viewer (live debug feed).
 
-Only one phone feeds the service. The newest /ws/phone connection always wins:
-the older one is told it was superseded and closes itself with 4410. Every send
+Every binary frame the phone sends is answered with an ack carrying its seq,
+whether it was stored, only rate-limited out of the recording, or refused with a
+readable header, so the phone can cap the frames it has in flight. A frame whose
+header cannot be read gets only the error reply.
+
+Only one phone feeds the service. The newest /ws/phone connection wins: the
+older one is told it was superseded and closes itself with 4410. The exception is
+a phone signed in to Tailscale as one of ``priority_users``: while it holds the
+slot, any other phone is turned away with 4409 instead. Every send
 and close on a socket happens in that socket's own task, never from another
 connection's task, so frames on the wire can never interleave.
 """
@@ -22,7 +29,16 @@ from drive_service.config import Settings
 from drive_service.destination import DestinationStore
 from drive_service.hub import Hub
 from drive_service.origin import origin_allowed
-from drive_service.protocol import ErrorReply, Frame, Pong, ProtocolError, parse_frame, parse_text
+from drive_service.protocol import (
+    Ack,
+    ErrorReply,
+    Frame,
+    FrameError,
+    Pong,
+    ProtocolError,
+    parse_frame,
+    parse_text,
+)
 from drive_service.recorder import Recorder
 from drive_service.state import Stamped
 from drive_service.status import live_status
@@ -32,10 +48,13 @@ log = logging.getLogger(__name__)
 
 CLOSE_POLICY_VIOLATION = 1008
 CLOSE_PHONE_IDLE = 4408
+CLOSE_PHONE_BUSY = 4409
 CLOSE_PHONE_REPLACED = 4410
 CLOSE_TOO_MANY_VIEWERS = 4429
 
 DISCONNECT = "websocket.disconnect"
+# Set by `tailscale serve` to the login of the tailnet user making the request.
+TAILSCALE_LOGIN_HEADER = "tailscale-user-login"
 
 # Builds the status to send a viewer, as of the moment it is called.
 type StatusNow = Callable[[], dict[str, Any]]
@@ -47,7 +66,26 @@ class _Close:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class _Outcome:
+    """What to send the phone after one message, in this order: error, pong, ack."""
+
+    error: ProtocolError | None = None
+    reply: Pong | None = None
+    ack: Ack | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Holder:
+    """The connection that holds the phone slot."""
+
+    lease: int
+    superseded: asyncio.Event
+    priority: bool
+
+
 REPLACED = _Close(CLOSE_PHONE_REPLACED, "replaced by a newer phone connection")
+BUSY = _Close(CLOSE_PHONE_BUSY, "another phone has priority")
 TOO_MANY_ERRORS = _Close(CLOSE_POLICY_VIOLATION, "too many invalid messages")
 
 
@@ -61,6 +99,11 @@ async def _close_quietly(ws: WebSocket, close: _Close) -> None:
         await ws.close(code=close.code, reason=close.reason)
     except (WebSocketDisconnect, RuntimeError) as error:
         log.debug("socket was already closed when sending %d: %r", close.code, error)
+
+
+def _is_priority(ws: WebSocket, settings: Settings) -> bool:
+    login = ws.headers.get(TAILSCALE_LOGIN_HEADER, "").strip().lower()
+    return bool(login) and login in settings.priority_users
 
 
 def _discard(task: asyncio.Future[Any]) -> None:
@@ -96,44 +139,47 @@ async def _next_phone_event(
     return _idle(timeout_s)
 
 
-def _dispatch(hub: Hub, settings: Settings, message: dict[str, Any]) -> Pong | None:
+def _dispatch(hub: Hub, settings: Settings, message: dict[str, Any]) -> _Outcome:
     """Validate one raw WebSocket message and hand it to the hub."""
     data = message.get("bytes")
     if data is not None:
         frame = parse_frame(data, settings.max_frame_bytes, settings.max_frame_header_bytes)
-        hub.handle_frame(frame)
-        return None
+        return _Outcome(ack=hub.handle_frame(frame))
     text = message.get("text")
     if text is None:
         raise ProtocolError("empty message")
-    return hub.handle_message(parse_text(text, settings.max_text_bytes))
+    return _Outcome(reply=hub.handle_message(parse_text(text, settings.max_text_bytes)))
 
 
-def _try_dispatch(
-    hub: Hub, settings: Settings, message: dict[str, Any]
-) -> Pong | ProtocolError | None:
+def _try_dispatch(hub: Hub, settings: Settings, message: dict[str, Any]) -> _Outcome:
     try:
         return _dispatch(hub, settings, message)
     except ProtocolError as error:
         hub.note_rejected()
         log.warning("rejected phone message: %s", error)
-        return error
+        seq = error.seq if isinstance(error, FrameError) else None
+        return _Outcome(error=error, ack=None if seq is None else hub.ack_frame(seq))
 
 
-async def _reply(
-    ws: WebSocket, outcome: Pong | ProtocolError | None, errors: int, settings: Settings
-) -> int | None:
+async def _send(ws: WebSocket, outcome: _Outcome) -> None:
+    if outcome.error is not None:
+        await ws.send_text(ErrorReply(message=str(outcome.error)).to_wire())
+    if outcome.reply is not None:
+        await ws.send_text(outcome.reply.to_wire())
+    if outcome.ack is not None:
+        await ws.send_text(outcome.ack.to_wire())
+
+
+async def _reply(ws: WebSocket, outcome: _Outcome, errors: int, settings: Settings) -> int | None:
     """Answer the phone. Returns the updated error streak, or None to stop serving."""
-    if isinstance(outcome, ProtocolError):
-        await ws.send_text(ErrorReply(message=str(outcome)).to_wire())
-        if errors + 1 >= settings.max_consecutive_errors:
-            log.error("closing phone connection after %d bad messages", errors + 1)
-            await _close_quietly(ws, TOO_MANY_ERRORS)
-            return None
-        return errors + 1
-    if outcome is not None:
-        await ws.send_text(outcome.to_wire())
-    return 0
+    await _send(ws, outcome)
+    if outcome.error is None:
+        return 0
+    if errors + 1 >= settings.max_consecutive_errors:
+        log.error("closing phone connection after %d bad messages", errors + 1)
+        await _close_quietly(ws, TOO_MANY_ERRORS)
+        return None
+    return errors + 1
 
 
 async def _serve_phone(
@@ -209,8 +255,8 @@ def build_router(
         return live_status(hub, recorder, destinations, time_source.mono(), settings)
 
     viewers = {"count": 0}
-    # Set to tell the current phone connection that a newer one took over.
-    current_phone: dict[str, asyncio.Event | None] = {"superseded": None}
+    # Who holds the phone slot; its event is set to tell it a newer one took over.
+    current_phone: dict[str, _Holder | None] = {"holder": None}
 
     async def refuse_foreign_origin(ws: WebSocket) -> bool:
         if origin_allowed(ws.headers, settings.allowed_origins):
@@ -226,24 +272,36 @@ def build_router(
         await ws.close(code=CLOSE_POLICY_VIOLATION)
         return True
 
-    def take_phone_slot() -> tuple[int, asyncio.Event]:
+    def slot_reserved() -> bool:
+        """Whether a priority phone holds the slot, so others must not take it."""
+        holder = current_phone["holder"]
+        return holder is not None and holder.priority and hub.holds_phone(holder.lease)
+
+    def take_phone_slot(priority: bool) -> _Holder:
         """Supersede the current phone connection and claim the slot (no awaits)."""
-        previous = current_phone["superseded"]
+        previous = current_phone["holder"]
         if previous is not None:
-            previous.set()
-        superseded = asyncio.Event()
-        current_phone["superseded"] = superseded
-        return hub.attach_phone(), superseded
+            previous.superseded.set()
+        holder = _Holder(lease=hub.attach_phone(), superseded=asyncio.Event(), priority=priority)
+        current_phone["holder"] = holder
+        return holder
 
     @router.websocket("/ws/phone")
     async def phone_socket(ws: WebSocket) -> None:
         if await refuse_foreign_origin(ws):
             return
         await ws.accept()
-        lease, superseded = take_phone_slot()
-        log.info("phone connected (lease %d)", lease)
+        priority = _is_priority(ws, settings)
+        # No await between this check and taking the slot, so two phones cannot race past it.
+        if not priority and slot_reserved():
+            log.info("turned away a phone: a priority phone holds the slot")
+            await _close_quietly(ws, BUSY)
+            return
+        holder = take_phone_slot(priority)
+        lease = holder.lease
+        log.info("phone connected (lease %d%s)", lease, ", priority" if priority else "")
         try:
-            await _serve_phone(ws, hub, settings, lease, superseded)
+            await _serve_phone(ws, hub, settings, lease, holder.superseded)
         except WebSocketDisconnect:
             pass
         finally:

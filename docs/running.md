@@ -32,6 +32,14 @@ Install [Tailscale](https://tailscale.com/download) on the Mac and on the iPhone
 
 Only one phone streams at a time. Opening the capture page on a second phone or tab takes over, and the first one shows "Another phone or tab took over the stream".
 
+To keep your own phone in charge when others on the tailnet test the page, start the service with your Tailscale login in `DRIVE_PRIORITY_USERS` (`tailscale whois <your phone's 100.x address>` shows it):
+
+```bash
+cd service && DRIVE_PRIORITY_USERS='["you@gmail.com"]' uv run python -m drive_service
+```
+
+Your phone then always takes the stream, and other phones are turned away while it streams.
+
 Before the first real drive, run **Device check** on the mounted phone and add its results to [open questions](open-questions.md).
 
 ### Keeping the phone streaming
@@ -78,6 +86,7 @@ The service reads `DRIVE_*` environment variables; see [`config.py`](../service/
 | `DRIVE_PORT` | 8000 | |
 | `DRIVE_RECORD_DIR` | `recordings/` | |
 | `DRIVE_ALLOWED_HOSTS` | `["localhost","127.0.0.1","*.ts.net"]` | JSON list of `Host` names to answer (port ignored); others get HTTP 400. `"*"` is refused. Pin your Mac's tailnet name to be stricter |
+| `DRIVE_PRIORITY_USERS` | none | JSON list of Tailscale logins whose phone always gets the stream; others get `4409` while it streams |
 | `DRIVE_ALLOWED_ORIGINS` | none | JSON list, e.g. `["https://my-mac.tailnet.ts.net"]`, only needed if the viewer is refused |
 | `DRIVE_MAGNETIC_DECLINATION_DEG` | unset | east positive, about `-11` around College Park. Unset: computed from the first fresh GPS fix |
 | `DRIVE_PHONE_IDLE_TIMEOUT_S` | 5 | a phone that sends nothing this long is disconnected |

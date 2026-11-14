@@ -25,16 +25,74 @@ function inputs(overrides: Partial<LiveInputs> = {}): LiveInputs {
 const gps = (overrides: Record<string, unknown>) => ({ ...(status().gps as object), ...overrides })
 
 describe('chairPose', () => {
-  it('uses the phone fix, the service heading and GPS speed', () => {
-    const pose = chairPose(status({ gps: gps({ speed_mps: 1.2 }) }), IPAD, DEFAULT, 0)
+  it('uses the phone fix, the service heading and GPS speed (a service without motion)', () => {
+    const pose = chairPose(status({ motion: null, gps: gps({ speed_mps: 1.2 }) }), IPAD, DEFAULT, 0)
     expect(pose).toEqual({
       position: ORIGIN,
       positionFrom: 'phone',
       measured: true,
       accuracyM: 4,
       headingDeg: 90,
-      speedMps: 1.2,
+      speedMps: expect.closeTo(1.2, 1),
     })
+  })
+
+  it('takes speed from fresh IMU motion over GPS, which lags', () => {
+    const motion = { ...(status().motion as object), speed_mps: 0.9, speed_source: 'imu', fresh: true }
+    expect(chairPose(status({ motion, gps: gps({ speed_mps: 1.5 }) }), null, DEFAULT, 0).speedMps).toBeCloseTo(0.9, 1)
+  })
+
+  it('falls back to the fresh GPS speed when motion is stale, unknown or absent', () => {
+    const base = status().motion as object
+    const withGps = (motion: unknown) => status({ motion, gps: gps({ speed_mps: 1.5 }) })
+    expect(chairPose(withGps({ ...base, speed_mps: 0.9, fresh: false }), null, DEFAULT, 0).speedMps).toBeCloseTo(1.5, 1)
+    expect(chairPose(withGps({ ...base, speed_mps: null, fresh: true }), null, DEFAULT, 0).speedMps).toBeCloseTo(1.5, 1)
+    expect(chairPose(withGps(null), null, DEFAULT, 0).speedMps).toBeCloseTo(1.5, 1)
+  })
+
+  it('counts fresh motion speed as moving, for the manual-driving mode', () => {
+    const { route, place } = lRoute()
+    const motion = { ...(status().motion as object), speed_mps: 1, speed_source: 'imu' }
+    const state = deriveState(inputs({ status: status({ motion }), trip: { kind: 'place', place, route } }))
+    expect(state).toMatchObject({ mode: 'manual', speedMps: expect.closeTo(1, 1) })
+  })
+
+  it('does not flicker between ready and manual when speed hovers near the threshold', () => {
+    const { route, place } = lRoute()
+    const trip = { kind: 'place' as const, place, route }
+    const at = (speed: number, previousMode?: 'ready' | 'manual') =>
+      deriveState(
+        inputs({
+          status: status({ motion: { ...(status().motion as object), speed_mps: speed, speed_source: 'imu' } }),
+          trip,
+          previousMode,
+        }),
+      ).mode
+    // Starting: needs more than 0.3 m/s to count as moving.
+    expect(at(0.25, 'ready')).toBe('ready')
+    expect(at(0.35, 'ready')).toBe('manual')
+    // Already moving: stays manual until clearly stopped (below 0.15 m/s).
+    expect(at(0.25, 'manual')).toBe('manual')
+    expect(at(0.1, 'manual')).toBe('ready')
+    expect(at(0, 'manual')).toBe('ready')
+  })
+
+  it('rounds speed to the 0.1 mph the speed arc shows, so IMU jitter changes nothing on screen', () => {
+    const at = (speed_mps: number) =>
+      chairPose(status({ motion: { ...(status().motion as object), speed_mps, speed_source: 'imu' } }), null, DEFAULT, 0)
+        .speedMps
+    // 0.79, 0.80 and 0.81 m/s all read 1.8 mph.
+    expect(at(0.79)).toBe(at(0.81))
+    expect(at(0.8)).toBeCloseTo(1.8 / 2.23694, 6)
+    expect(at(0.85)).not.toBe(at(0.8))
+    expect(at(0)).toBe(0)
+  })
+
+  it('rounds the heading to whole degrees in 0–359, so compass noise changes nothing on screen', () => {
+    const facing = (deg: number) => chairPose(status({ heading: { deg, reference: 'true' } }), null, DEFAULT, 0).headingDeg
+    expect(facing(90.3)).toBe(90)
+    expect(facing(89.6)).toBe(90)
+    expect(facing(359.7)).toBe(0)
   })
 
   it('falls back to GPS course, then the previous heading', () => {
@@ -69,14 +127,19 @@ describe('chairPose', () => {
 
 describe('chairLink', () => {
   it('reports a healthy phone with GPS accuracy and frame rate', () => {
-    expect(chairLink('online', status(), 'phone')).toEqual({
+    expect(chairLink('online', status({ stats: { fps: 9.4 } }), 'phone')).toEqual({
       service: 'online',
       issue: null,
       phone: 'ok',
       gpsAccuracyM: 4,
-      cameraFps: 9.5,
+      cameraFps: 9,
       positionFrom: 'phone',
     })
+  })
+
+  it('rounds the frame rate to whole frames a second, since the service’s changes on every status', () => {
+    const fps = (value: number) => chairLink('online', status({ stats: { fps: value } }), 'phone').cameraFps
+    expect([29.7, 30.1, 30.4].map(fps)).toEqual([30, 30, 30])
   })
 
   it('says waiting while the phone is connected but its sensors are not usable', () => {
@@ -196,7 +259,7 @@ describe('deriveState', () => {
 
   it('calls it manual while the rider drives the trip with the joystick', () => {
     const { route, place } = lRoute()
-    const state = deriveState(inputs({ trip: { kind: 'place', place, route }, status: status({ gps: gps({ speed_mps: 1 }) }) }))
+    const state = deriveState(inputs({ trip: { kind: 'place', place, route }, status: status({ motion: null, gps: gps({ speed_mps: 1 }) }) }))
     expect(state.mode).toBe('manual')
     expect(state.reason).toBe('You’re driving')
   })

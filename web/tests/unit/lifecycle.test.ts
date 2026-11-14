@@ -144,6 +144,12 @@ describe('lifecycle reducer', () => {
     expect(starting.effects).toEqual(['stopSession']);
   });
 
+  it('shows the reason it was given when stopped by the service', () => {
+    const busy = next(at('starting'), { type: 'TAKEN_OVER', message: 'Another phone has priority.' });
+    expect(busy.state).toEqual({ kind: 'idle', message: 'Another phone has priority.' });
+    expect(busy.effects).toEqual(['stopSession']);
+  });
+
   it('does not restart after a takeover when the page becomes visible', () => {
     const taken = next(at('running'), { type: 'TAKEN_OVER' }).state;
     const hidden = next(taken, { type: 'HIDDEN' }).state;

@@ -1,12 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CameraFrame, DrivingService } from '../../services/drivingService'
 
-type Status = 'loading' | 'live' | 'stale' | 'unavailable'
+type Status = 'loading' | 'live' | 'delayed' | 'stale' | 'unavailable'
 
 const STATUS_TEXT: Record<Exclude<Status, 'live'>, string> = {
   loading: 'Connecting to camera…',
+  delayed: 'Picture delayed',
   stale: 'No live picture',
   unavailable: 'Camera unavailable',
+}
+
+/** No picture yet but one is on its way is still connecting; a lagging one says so. */
+function frameStatus(frame: CameraFrame): Status {
+  if (!frame.fresh) return 'stale'
+  if (!frame.url) return 'loading'
+  return frame.delayed ? 'delayed' : 'live'
 }
 
 interface Props {
@@ -37,8 +45,7 @@ export function CameraInset({ service }: Props) {
       } else {
         unsubscribe = feed.subscribe((next) => {
           setFrame(next)
-          // No picture yet but one is on its way: still connecting.
-          setStatus(next.fresh ? (next.url ? 'live' : 'loading') : 'stale')
+          setStatus(frameStatus(next))
         })
       }
     })

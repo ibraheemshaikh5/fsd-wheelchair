@@ -8,6 +8,8 @@ export interface CameraFrame {
   url: string | null
   /** False once the frame is too old to show the chair's surroundings. */
   fresh: boolean
+  /** Frames are still arriving, but were captured long enough ago that the picture lags behind. */
+  delayed: boolean
 }
 
 /** The forward camera: a live stream (simulator) or a sequence of JPEG frames (the phone). */

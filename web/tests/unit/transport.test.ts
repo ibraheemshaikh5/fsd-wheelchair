@@ -1,11 +1,11 @@
 import { backoffDelayMs } from '../../shared/backoff';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  CLOSE_BUSY,
   CLOSE_IDLE,
   CLOSE_NO_REPLY,
   CLOSE_REPLACED,
   NO_REPLY_REASON,
-  shouldSendFrame,
   SOCKET_OPEN,
   type SocketLike,
   Transport,
@@ -52,14 +52,6 @@ describe('backoffDelayMs', () => {
   });
 });
 
-describe('shouldSendFrame', () => {
-  it('sends only while the socket buffer is below the limit', () => {
-    expect(shouldSendFrame(0, 100_000)).toBe(true);
-    expect(shouldSendFrame(99_999, 100_000)).toBe(true);
-    expect(shouldSendFrame(100_000, 100_000)).toBe(false);
-  });
-});
-
 describe('Transport', () => {
   let sockets: FakeSocket[];
   let timers: { fn: () => void; ms: number }[];
@@ -87,7 +79,7 @@ describe('Transport', () => {
       clearTimer: () => {},
       onState: (state) => states.push(state),
       onMessage: (message) => messages.push(message),
-      maxBufferedBytes: 1000,
+      sendBudget: { budgetMs: 100, maxBytes: 1000 },
       now: () => now,
     });
   });
@@ -170,6 +162,18 @@ describe('Transport', () => {
     });
     transport.start();
     expect(sockets).toHaveLength(2);
+  });
+
+  it('stops for good without reconnecting when a priority phone holds the slot', () => {
+    transport.start();
+    sockets[0]?.open();
+    sockets[0]?.drop(CLOSE_BUSY, 'another phone has priority');
+    expect(timers).toHaveLength(0);
+    expect(states.at(-1)).toEqual({
+      status: 'stopped',
+      attempt: 0,
+      lastClose: { code: CLOSE_BUSY, reason: 'another phone has priority' },
+    });
   });
 
   it('reconnects when the service has said nothing for too long', () => {

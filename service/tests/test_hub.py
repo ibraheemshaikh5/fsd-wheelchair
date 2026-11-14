@@ -8,7 +8,7 @@ from drive_service.protocol import Gps, Heading, Hello, Imu, Ping, Pong
 from drive_service.state import age_ms, is_fresh
 from helpers import FakeTime, gps_dict, heading_dict, hello_dict, imu_dict, make_frame, ping_dict
 
-CLIENT_MAX_FPS = 30
+CLIENT_MAX_FPS = 60
 JITTER_S = 0.005
 
 
@@ -16,12 +16,16 @@ class SpyRecorder:
     def __init__(self) -> None:
         self.frames = []
         self.sensors = []
+        self.derived = []
 
     def write_frame(self, frame, received_wall_ms):
         self.frames.append((frame, received_wall_ms))
 
     def write_sensor(self, message, received_wall_ms):
         self.sensors.append((message, received_wall_ms))
+
+    def write_derived(self, record, received_wall_ms):
+        self.derived.append((record, received_wall_ms))
 
 
 @pytest.fixture
@@ -210,6 +214,7 @@ def test_everything_is_offered_to_the_recorder(hub, recorder, clock):
     assert [frame.header.seq for frame, _ in recorder.frames] == [1]
     assert [message.type for message, _ in recorder.sensors] == ["gps", "imu"]
     assert recorder.sensors[0][1] == clock.wall_ms()
+    assert [record["type"] for record, _ in recorder.derived] == ["motion"]
 
 
 def test_text_flood_only_limits_recording(tmp_path, recorder, clock):

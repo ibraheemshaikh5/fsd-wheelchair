@@ -1,11 +1,27 @@
 import { backoffDelayMs } from '../shared/backoff';
 import { parseServerMessage, type ServerMessage } from '../shared/protocol';
+import {
+  fitsBudget,
+  type LinkEstimate,
+  NO_ESTIMATE,
+  observeQueue,
+  queueLimitBytes,
+  recordSend,
+  type SendBudget,
+} from './send-budget';
 
 export const SOCKET_OPEN = 1;
 
 // Close codes; see docs/phone-protocol.md and service/drive_service/sockets.py.
 /** A newer phone connection replaced this one. Reconnecting would just kick it back off. */
 export const CLOSE_REPLACED = 4410;
+/** A priority phone holds the slot. Reconnecting would just be turned away again. */
+export const CLOSE_BUSY = 4409;
+
+/** Whether the service closed this phone for good, so it must not reconnect. */
+export function isFinalClose(code: number): boolean {
+  return code === CLOSE_REPLACED || code === CLOSE_BUSY;
+}
 /** The service heard nothing from this phone for its idle timeout. */
 export const CLOSE_IDLE = 4408;
 export const CLOSE_POLICY_VIOLATION = 1008;
@@ -44,8 +60,8 @@ export interface TransportOptions {
   readonly clearTimer: (id: number) => void;
   readonly onState: (state: TransportState) => void;
   readonly onMessage: (message: ServerMessage) => void;
-  /** Skip frames and droppable messages while more than this many bytes are queued in the socket. */
-  readonly maxBufferedBytes: number;
+  /** How much may queue in the socket before frames and droppable messages are skipped. */
+  readonly sendBudget: SendBudget;
   /** Wall clock in ms, for liveness and backoff decisions. */
   readonly now: () => number;
 }
@@ -55,11 +71,6 @@ const BACKOFF_MAX_MS = 10_000;
 /** A socket open at least this long, or one the service has answered on, resets the backoff. */
 const STABLE_AFTER_MS = 2000;
 
-/** Latest-wins: a stale frame is worse than a missing one, so never queue behind a slow link. */
-export function shouldSendFrame(bufferedAmount: number, limitBytes: number): boolean {
-  return bufferedAmount < limitBytes;
-}
-
 /** One WebSocket to the service that reconnects with backoff until stopped. */
 export class Transport {
   private socket: SocketLike | null = null;
@@ -68,6 +79,8 @@ export class Transport {
   private openedAtMs = 0;
   private lastInboundMs = 0;
   private answered = false;
+  /** The uplink as seen by the current socket; reset on each connection. */
+  private link: LinkEstimate = NO_ESTIMATE;
 
   constructor(
     private readonly url: string,
@@ -95,9 +108,9 @@ export class Transport {
   sendJson(message: unknown, droppable = false): boolean {
     const socket = this.openSocket();
     if (socket === null) return false;
-    if (droppable && !shouldSendFrame(socket.bufferedAmount, this.options.maxBufferedBytes)) return false;
-    socket.send(JSON.stringify(message));
-    return true;
+    const text = JSON.stringify(message);
+    // JSON here is ASCII, so its length is its size in bytes.
+    return this.queue(socket, text, text.length, droppable);
   }
 
   /**
@@ -113,12 +126,18 @@ export class Transport {
     this.scheduleReconnect({ code: CLOSE_NO_REPLY, reason: NO_REPLY_REASON });
   }
 
+  /** Latest-wins: a stale frame is worse than a missing one, so frames never queue past the budget. */
   sendFrame(bytes: Uint8Array<ArrayBuffer>): boolean {
     const socket = this.openSocket();
-    if (socket === null || !shouldSendFrame(socket.bufferedAmount, this.options.maxBufferedBytes)) {
-      return false;
-    }
-    socket.send(bytes);
+    return socket !== null && this.queue(socket, bytes, bytes.byteLength, true);
+  }
+
+  private queue(socket: SocketLike, data: string | Uint8Array<ArrayBuffer>, size: number, droppable: boolean): boolean {
+    const buffered = socket.bufferedAmount;
+    this.link = observeQueue(this.link, this.options.now(), buffered);
+    if (droppable && !fitsBudget(buffered, size, queueLimitBytes(this.link, this.options.sendBudget))) return false;
+    socket.send(data);
+    this.link = recordSend(this.link, size);
     return true;
   }
 
@@ -131,6 +150,7 @@ export class Transport {
     const socket = this.options.createSocket(this.url);
     socket.binaryType = 'arraybuffer';
     this.socket = socket;
+    this.link = NO_ESTIMATE;
     this.setState({ status: 'connecting', attempt, lastClose });
 
     socket.onopen = () => {
@@ -154,7 +174,7 @@ export class Transport {
       if (this.socket !== socket) return;
       this.socket = null;
       const lastClose = { code: event.code, reason: event.reason };
-      if (event.code === CLOSE_REPLACED) {
+      if (isFinalClose(event.code)) {
         this.setState({ status: 'stopped', attempt: 0, lastClose });
         return;
       }
