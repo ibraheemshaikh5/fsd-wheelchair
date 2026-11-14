@@ -6,7 +6,7 @@ RAM command box over SWD (openocd on the board, its TCL port tunnelled to this m
 
 Link to the board, picked automatically:
   - USB:       if adb sees the UNO Q (Arduino's adb, App Lab install).
-  - Tailscale: otherwise, SSH to WHEELCHAIR_HOST (default "wheelchair-unoq").
+  - Tailscale: otherwise (or WHEELCHAIR_LINK=tailscale), SSH to WHEELCHAIR_HOST (default "wheelchair-unoq").
 
 Mode: chair.fsd = False -> the real stick drives (stock behaviour); True -> set(x, y) drives.
 Takeover: in FSD, pushing the real stick hands control back (stats()['takeover'] == True).
@@ -34,7 +34,7 @@ class Wheelchair:
         self._x = self._y = 0; self._at = 0.0; self._seq = 0
         self._lock = threading.Lock(); self._stop = False; self._tunnel = None
         self.link = self._open_link()
-        self._sock = socket.create_connection(("127.0.0.1", PORT)); self._sock.settimeout(5)
+        self._sock = socket.create_connection(("127.0.0.1", self._port)); self._sock.settimeout(5)
         self.box = self._find_box()
         threading.Thread(target=self._sender, daemon=True).start()
 
@@ -58,14 +58,15 @@ class Wheelchair:
 
     # -- internals ---------------------------------------------------------------
     def _open_link(self):
-        if os.path.exists(ADB) and "\tdevice" in _run(ADB, "devices"):
+        if os.environ.get("WHEELCHAIR_LINK") != "tailscale" and os.path.exists(ADB) and "\tdevice" in _run(ADB, "devices"):
             _run(ADB, "shell", START_OCD); _run(ADB, "forward", f"tcp:{PORT}", f"tcp:{PORT}")
-            return "usb"
+            self._port = PORT; return "usb"
+        with socket.socket() as s: s.bind(("127.0.0.1", 0)); self._port = s.getsockname()[1]   # free local port
         ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new"]
         _run(*ssh, f"arduino@{HOST}", START_OCD)
-        self._tunnel = subprocess.Popen([*ssh, "-N", "-L", f"{PORT}:127.0.0.1:{PORT}", f"arduino@{HOST}"])
+        self._tunnel = subprocess.Popen([*ssh, "-N", "-L", f"{self._port}:127.0.0.1:{PORT}", f"arduino@{HOST}"])
         for _ in range(50):                                   # wait for the tunnel to accept
-            try: socket.create_connection(("127.0.0.1", PORT), timeout=0.2).close(); return f"tailscale:{HOST}"
+            try: socket.create_connection(("127.0.0.1", self._port), timeout=0.2).close(); return f"tailscale:{HOST}"
             except OSError: time.sleep(0.1)
         raise ConnectionError(f"no USB board and no SSH to {HOST} (Tailscale up? board on?)")
 
