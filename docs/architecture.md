@@ -50,6 +50,10 @@ iPad: destination ("coffee shop", or "go to the elevator")
 ### Phone (sensors)
 - Sends: camera video, GPS, heading (compass/IMU).
 - Mounted forward-facing at a fixed, known height and angle.
+- **Built:** an iPhone running a Safari page ([`web/capture`](../web/capture)), reaching the service over Tailscale. JPEG frames and JSON sensor messages over one WebSocket; see [phone protocol](phone-protocol.md) and [running](running.md).
+- The service keeps the latest reading of each sensor with its age, counted from capture on the phone (or arrival, if that is older). Before the phone's clock is synced nothing counts as fresh. Anything that drives must check freshness first; stale data means stop.
+- Not yet: authentication for the phone connection. The tailnet is the only boundary, so a pairing token is needed before a driving loop trusts the data ([open questions](open-questions.md)).
+- Not yet: precise motion tracking (needs a native ARKit app or offline visual odometry), which fine-tuning will need for trajectory labels.
 
 ### Driving service (computer)
 - Runs the model and the control loop.
