@@ -1,1 +1,1 @@
-"""Offline model work for the FSD wheelchair. Nothing here runs while the chair drives."""
+"""The model side of the FSD wheelchair: pipeline, simulator, models and their tools."""
