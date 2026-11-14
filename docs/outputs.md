@@ -103,10 +103,14 @@ Every moment the rider takes over is marked. Those moments, with the path the ri
 
 For completeness. These already exist as the `DrivingService` interface in [`app/src/services/drivingService.ts`](../app/src/services/drivingService.ts).
 
-| Command | Effect |
-|---------|--------|
-| Set destination | Outdoor trip. Needs to carry the route, not only the end point |
-| Set language goal | Indoor trip from a spoken instruction |
-| Engage | Start or resume self-driving |
-| Disengage | Stop and hold; the trip is kept |
-| Clear destination | End the trip |
+| Command | Effect | Sent to the service as |
+|---------|--------|------------------------|
+| Set destination | Outdoor trip. The iPad plans the route with Google | `POST /api/destination` with the end point, then `POST /api/goal` with `{"kind": "route", "points": [...]}` |
+| Set language goal | Indoor trip from a spoken instruction | `POST /api/goal` with `{"kind": "instruction", "text": "..."}` |
+| Engage | Start or resume self-driving | not sent yet |
+| Disengage | Stop and hold; the trip is kept | not sent yet |
+| Clear destination | End the trip | `DELETE /api/destination` |
+
+The service keeps one trip in memory. Its status, sent to every viewer about ten times a second, carries a small `goal` block: the kind, the instruction if there is one, how many route points, and a version number that changes with every new trip. The route itself is fetched once per version from `GET /api/goal`, so it is not streamed. A route or an instruction can be up to 2000 points or 200 characters.
+
+Whether a spoken request is indoor or outdoor is decided on the iPad, by wording ([`app/src/services/goals.ts`](../app/src/services/goals.ts)). Dictation is the browser's own speech recognition.
