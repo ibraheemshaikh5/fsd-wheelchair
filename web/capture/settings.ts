@@ -20,16 +20,19 @@ export interface CaptureSettings {
  * Bumped when a default changes in a way older saved settings should not keep.
  * 2: fps went from 10 to 60, so settings saved before then drop their fps.
  * 3: the fps setting may go up to 240 (opt-in slow-motion rates).
+ * 4: driving defaults (20 fps, 480 px), so the 60 fps and 640 px saved before drop.
  */
-export const SETTINGS_VERSION = 3;
+export const SETTINGS_VERSION = 4;
 
-// 60 fps by default (see DEFAULT_CAPTURE_FPS); the driving model takes 20 fps
-// out of the recording. Higher settings ask the camera for up to its top rate.
+// Sized for driving: 20 fps (see DEFAULT_CAPTURE_FPS) and 480 px, above every
+// model's input (FlowPilot's 384 px is the largest), so a weak link carries
+// about a third of what 60 fps at 640 px did. For training data, set 60 fps and
+// 640 px. Higher settings ask the camera for up to its top rate.
 export const DEFAULT_SETTINGS: CaptureSettings = Object.freeze({
   mountHeightM: 1.1,
   mountPitchDeg: -10,
   fps: DEFAULT_CAPTURE_FPS,
-  maxWidth: 640,
+  maxWidth: 480,
   jpegQuality: 0.7,
   rotateDeg: AUTO_ROTATION,
 });
@@ -48,7 +51,7 @@ const LIMITS: Record<NumericSetting, Range> = {
 };
 
 /** Fields whose saved value is only trusted from the current settings version. */
-const VERSIONED_FIELDS: ReadonlySet<keyof CaptureSettings> = new Set(['fps']);
+const VERSIONED_FIELDS: ReadonlySet<keyof CaptureSettings> = new Set(['fps', 'maxWidth']);
 
 const inRange = (value: unknown, [min, max]: Range): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;

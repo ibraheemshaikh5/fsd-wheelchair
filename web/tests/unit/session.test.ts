@@ -90,7 +90,7 @@ describe('Session without motion access', () => {
   });
 
   it('reports the frame rate the camera achieved in hello, and thins frames only above the target', async () => {
-    const h = harness();
+    const h = harness({ ...DEFAULT_SETTINGS, fps: 60 });
     const started = h.session.start(Promise.resolve('not-needed'));
     h.camera.resolve({ stream: h.stream, label: 'cam' });
     h.play.resolve({ width: 1280, height: 720, frameRate: 30 });
@@ -112,7 +112,7 @@ describe('Session without motion access', () => {
   });
 
   it('reports the usual camera default when the camera does not say what it achieved', async () => {
-    const h = harness();
+    const h = harness({ ...DEFAULT_SETTINGS, fps: 60 });
     await startFully(h, 'not-needed');
     h.transport().state(OPEN);
     expect(h.transport().sendJson.mock.calls[0]?.[0]).toMatchObject({ type: 'hello', camera: { fps: 30 } });

@@ -36,7 +36,7 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     coverage: {
       provider: 'v8',
-      include: ['src/services/live/**/*.ts', 'src/services/goals.ts', 'src/components/drive/ChairLinkChip.tsx'],
+      include: ['src/services/live/**/*.ts', 'src/services/sensors/**/*.ts', 'src/services/goals.ts', 'src/components/drive/ChairLinkChip.tsx'],
       exclude: ['**/*.test.ts', '**/testing.ts'],
       thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
     },

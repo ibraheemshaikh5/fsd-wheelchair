@@ -1,0 +1,33 @@
+[project]
+name = "chair-link"
+version = "0.1.0"
+description = "Arduino UNO Q app that links the wheelchair to the driving service."
+# The App Lab container runs Python 3.13.
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    # Keep in step with unoq-app/python/requirements.txt.
+    "websockets==15.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+]
+
+# Not installed as a package; the app code is imported from unoq-app/python.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["unoq-app/python", "tests"]
+addopts = "--cov=chair_link --cov-report=term-missing --cov-fail-under=80"
+
+[tool.ruff]
+line-length = 100
+src = ["unoq-app/python", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]

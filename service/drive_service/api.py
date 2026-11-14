@@ -20,12 +20,14 @@ from drive_service.destination import (
 )
 from drive_service.hub import Hub
 from drive_service.origin import origin_allowed
+from drive_service.protocol import CameraInfo
 from drive_service.recorder import (
     InsufficientDiskError,
     Recorder,
     RecorderBusyError,
     RecorderError,
 )
+from drive_service.state import SensorSnapshot
 from drive_service.status import live_status
 from drive_service.timeutil import TimeSource
 
@@ -65,6 +67,12 @@ def fail(status_code: int, message: str) -> JSONResponse:
     return JSONResponse({"success": False, "data": None, "error": message}, status_code=status_code)
 
 
+def _recorded_camera(snapshot: SensorSnapshot, external_camera: bool) -> CameraInfo | None:
+    """The camera whose frames a recording holds: the external one, or the phone's."""
+    hello = snapshot.camera_hello if external_camera else snapshot.hello
+    return hello.camera if hello else None
+
+
 def build_router(
     hub: Hub,
     recorder: Recorder,
@@ -87,8 +95,11 @@ def build_router(
         # Never record with missing metadata, or metadata left over from another phone.
         if not snapshot.phone_connected or hello is None:
             return fail(HTTP_CONFLICT, NO_HELLO_MESSAGE)
+        camera = _recorded_camera(snapshot, hub.external_camera)
         meta = {
-            "camera": hello.camera.model_dump(),
+            "camera": camera.model_dump() if camera else None,
+            "frame_source": "external" if hub.external_camera else "phone",
+            "camera_clock": asdict(snapshot.camera_clock) if snapshot.camera_clock else None,
             "mount": hello.mount.model_dump() if hello.mount else None,
             "user_agent": hello.user_agent,
             # Null for older pages, whose imu rotation columns are [about y, z, x].

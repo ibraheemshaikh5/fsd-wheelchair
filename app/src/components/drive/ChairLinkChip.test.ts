@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ChairLink, DriveState } from '../../types'
 import { linkSummary } from './ChairLinkChip'
 
-const LINK: ChairLink = { service: 'online', phone: 'ok', gpsAccuracyM: 4, cameraFps: 10, positionFrom: 'phone', issue: null }
+const LINK: ChairLink = { service: 'online', phone: 'ok', gpsAccuracyM: 4, cameraFps: 10, positionFrom: 'phone', issue: null, frameSource: 'phone', cameraConnected: false }
 
 const state = (link: Partial<ChairLink>, source: DriveState['source'] = 'live') =>
   ({ source, link: { ...LINK, ...link } }) as DriveState
@@ -20,6 +20,16 @@ describe('linkSummary', () => {
     [{ gpsAccuracyM: null }, 'ok', 'Phone'],
   ])('%o reads %s %s', (link, level, label) => {
     expect(linkSummary(state(link))).toMatchObject({ level, label })
+  })
+
+  it.each([
+    [{ cameraConnected: false }, 'bad', 'No camera'],
+    [{ cameraConnected: true, phone: 'none' as const }, 'bad', 'No iPad sensors'],
+    [{ cameraConnected: true, phone: 'waiting' as const }, 'warn', 'iPad'],
+    [{ cameraConnected: true, gpsAccuracyM: null }, 'ok', 'iPad'],
+    [{ cameraConnected: true }, 'ok', 'iPad'],
+  ])('with an external camera %o reads %s %s', (link, level, label) => {
+    expect(linkSummary(state({ frameSource: 'external', ...link }))).toMatchObject({ level, label })
   })
 
   it('says when the chair is simulated', () => {

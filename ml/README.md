@@ -97,7 +97,7 @@ Drop a forward-facing video on the page, or pass its path on the command line. F
 
 ## Watch a model on the chair's live camera
 
-The viewer can also show the phone's stream as it arrives. It connects to the driving service's own viewer feed as one more viewer, so the service needs no changes (it allows four viewers).
+The viewer can also show the phone's stream as it arrives. It reads the driving service's model feed (`/ws/model`), which pushes every frame the moment it lands, with its capture time, so the model sees each frame as soon as it can and picks frames by when they were taken. The service allows two model feeds at once, apart from the iPad's viewers.
 
 1. Start the viewer and choose **Live from chair**.
 2. Enter the driving service's address and press Connect: `http://127.0.0.1:8000` if the service runs on this machine, or its Tailscale `https://…ts.net` address if it runs on another.
@@ -119,6 +119,8 @@ uv run python -m scripts.fake_phone --seconds 120
 ```
 
 The code is [`fsd_ml/live.py`](fsd_ml/live.py). Its `to_sensors()` turns the same feed into the pipeline's input, which is the first half of driving for real.
+
+**Send to chair** passes each live decision (speed and turn rate only) to the driving service, which forwards it to the Arduino. Set `DRIVE_CHAIR_DRIVER_TOKEN` to the service's driver token in the shell that starts the viewer. A decision is held for 600 ms, so if the model stops deciding, the chair stops. Unticking, reconnecting or leaving the live view stops it at once. Details: [docs/chair-link.md](../docs/chair-link.md#from-the-model-to-the-chair). Code: [`fsd_ml/chair_out.py`](fsd_ml/chair_out.py).
 
 ## Real models
 

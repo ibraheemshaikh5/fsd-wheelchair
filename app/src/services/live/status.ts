@@ -46,6 +46,12 @@ const motionSchema = z.object({
   fresh: z.boolean(),
 })
 
+const frameSourceSchema = z.object({
+  kind: z.enum(['phone', 'external']),
+  connected: z.boolean(),
+  clock_synced: z.boolean(),
+})
+
 const statusSchema = z.object({
   type: z.literal('status'),
   phone_connected: z.boolean(),
@@ -61,6 +67,10 @@ const statusSchema = z.object({
   // Absent from older services. A malformed block only loses the motion readings:
   // rejecting the whole status would make the link look dead.
   motion: motionSchema.nullable().default(null).catch(null),
+  // Where frames come from: the phone, or an external camera (USB on the Mac, later
+  // the chair's board) with this iPad sending GPS, compass and motion. Absent from
+  // older services, which only had the phone.
+  frame_source: frameSourceSchema.nullable().optional().default(null).catch(null),
 })
 
 export type ServiceStatus = z.infer<typeof statusSchema>

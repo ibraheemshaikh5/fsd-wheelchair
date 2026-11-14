@@ -35,7 +35,7 @@
   .stage { position: relative; background: #000; border: 1px solid var(--line); border-radius: 8px;
     overflow: hidden; align-self: start; }
   canvas { display: block; width: 100%; height: auto; }
-  .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  .stage .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     text-align: center; color: var(--muted); padding: 24px; }
   .stage.drag { outline: 2px dashed var(--chosen); outline-offset: -6px; }
   .side { display: flex; flex-direction: column; gap: 12px; }
@@ -77,6 +77,8 @@
   .livebar input { width: 280px; max-width: 60vw; background: var(--bg); color: var(--text);
     border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; }
   .livebar .note { margin: 0; }
+  .livebar input[type=checkbox] { width: auto; }
+  .livebar .chair.on { color: var(--text); font-weight: 600; }
   .goal { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--muted); }
   .goal input[type=text] { flex: 1; min-width: 220px; background: var(--bg); color: var(--text);
     border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; }
@@ -114,7 +116,9 @@
   <label>Chair's driving service <input type="text" id="service" value="http://127.0.0.1:8000" aria-label="Driving service address"></label>
   <button id="liveConnect">Connect</button>
   <button id="liveStop">Back to video</button>
+  <label class="chair" id="toChairLabel"><input type="checkbox" id="toChair"> Send to chair</label>
   <span class="note" id="liveNote"></span>
+  <span class="note" id="chairNote"></span>
 </div>
 <div class="error" id="error" role="alert" hidden></div>
 <div class="notice" id="notice" hidden></div>
@@ -583,8 +587,32 @@ function showIpad(ipad) {
   $("ipadFollow").hidden = !set || following;
 }
 
+// Sending to the chair is always switched off again by leaving or reconnecting.
+function showChair(chair) {
+  const sending = $("toChair").checked;
+  $("toChairLabel").classList.toggle("on", sending);
+  if (!sending) { $("chairNote").textContent = ""; return; }
+  if (!chair) { $("chairNote").textContent = "Chair: waiting for a decision"; return; }
+  $("chairNote").textContent = chair.sent
+    ? `Chair: sent ${chair.v_mps.toFixed(2)} m/s, ${chair.w_radps.toFixed(2)} rad/s${chair.limited ? " (lowered to the chair's limits)" : ""}`
+    : `Chair: not sent (${chair.problem})`;
+}
+async function setToChair(on) {
+  $("toChair").checked = on;
+  try {
+    await api(`/api/live/chair?on=${on ? 1 : 0}`, { method: "POST" });
+    showError("");
+  } catch (error) {
+    $("toChair").checked = false;
+    showError(error.message);
+  }
+  showChair(null);
+}
+
 function setLive(on) {
   state.live = on;
+  $("toChair").checked = false;
+  showChair(null);
   if (!on) $("ipad").hidden = true;
   setPlaying(false);
   $("livebar").hidden = !on;
@@ -628,6 +656,7 @@ async function liveLoop() {
     showIpad(d.ipad);
     const feed = link.fps != null ? ` · camera ${Number(link.fps).toFixed(0)} fps` : "";
     const from = d.goal_note ? ` · ${d.goal_note}` : "";
+    showChair(d.chair);
     $("liveNote").textContent = d.waiting ? `Waiting: ${d.waiting}` : `Connected${feed}${link.sensors_ok ? "" : " · sensors not all fresh"}${from}`;
     if (d.waiting) {
       $("empty").hidden = false;
@@ -657,6 +686,8 @@ $("liveToggle").addEventListener("click", () => setLive(true));
 $("liveStop").addEventListener("click", () => setLive(false));
 async function connectLive() {
   const service = $("service").value.trim();
+  $("toChair").checked = false;
+  showChair(null);
   try {
     await api(`/api/live?service=${encodeURIComponent(service)}`, { method: "POST" });
     showError("");
@@ -666,6 +697,7 @@ async function connectLive() {
   }
 }
 $("liveConnect").addEventListener("click", connectLive);
+$("toChair").addEventListener("change", (event) => setToChair(event.target.checked));
 $("service").addEventListener("keydown", (event) => { if (event.key === "Enter") connectLive(); });
 $("kind").addEventListener("change", redecide);
 $("apply").addEventListener("click", redecide);

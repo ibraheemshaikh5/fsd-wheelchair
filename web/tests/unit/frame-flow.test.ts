@@ -23,15 +23,17 @@ describe('frame flow control', () => {
     expect(maySend(flow, 1)).toBe(true);
   });
 
-  it('allows at most three frames in flight once the service acks', () => {
+  it('allows at most two frames in flight once the service acks', () => {
+    // Two cover 20 fps on a round trip up to 100 ms; a third would only add a queued frame.
+    expect(MAX_FRAMES_IN_FLIGHT).toBe(2);
     const acked = recordAck(recordSent(INITIAL_FLOW, 0, 0), 0, 30);
     expect(acked).toMatchObject({ acking: true, inFlight: [], rttMs: 30 });
-    const two = sendAll(acked, [1, 2], 40);
+    const one = sendAll(acked, [1], 40);
     // Only frames actually sent count; one still encoding does not hold a slot.
-    expect(maySend(two, 40)).toBe(true);
-    const three = recordSent(two, 3, 41);
-    expect(three.inFlight).toHaveLength(MAX_FRAMES_IN_FLIGHT);
-    expect(maySend(three, 41)).toBe(false);
+    expect(maySend(one, 40)).toBe(true);
+    const two = recordSent(one, 2, 41);
+    expect(two.inFlight).toHaveLength(MAX_FRAMES_IN_FLIGHT);
+    expect(maySend(two, 41)).toBe(false);
   });
 
   it('frees a frame and every earlier one on an ack, sampling the round trip from that frame', () => {

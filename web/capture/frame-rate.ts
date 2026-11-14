@@ -4,11 +4,13 @@
 /** Highest rate believed from a camera, and the most the service accepts (CameraInfo.fps). */
 export const MAX_CAMERA_FPS = 240;
 /**
- * The default: the top rate of the iPhone's normal video formats, and three
- * frames per 20 Hz model step. Faster rates come from slow-motion formats with
- * shorter exposures (darker, noisier) and more heat, so they are opt-in.
+ * The default: the driving model's rate. Every frame crosses Wi-Fi before the
+ * model sees it, so frames it would only drop are left on the phone. 60 (the
+ * top rate of the iPhone's normal video formats) is a setting for collecting
+ * training data. Faster rates come from slow-motion formats with shorter
+ * exposures (darker, noisier) and more heat, so they are opt-in.
  */
-export const DEFAULT_CAPTURE_FPS = 60;
+export const DEFAULT_CAPTURE_FPS = 20;
 /** What a camera that does not report its rate is assumed to run at: the usual getUserMedia default. */
 const ASSUMED_CAMERA_FPS = 30;
 const MS_PER_SECOND = 1000;

@@ -9,8 +9,12 @@
 // backlog, wherever it sits, to a few frames: on a slow link fewer frames go,
 // but none of them is old. See docs/phone-protocol.md.
 
-/** Most frames sent but not yet acked. Three keep a link with some latency busy without a backlog. */
-export const MAX_FRAMES_IN_FLIGHT = 3;
+/**
+ * Most frames sent but not yet acked. At 20 fps a frame leaves every 50 ms, so
+ * two keep the full rate on a round trip up to about 100 ms; a third would only
+ * be one more frame waiting in the link.
+ */
+export const MAX_FRAMES_IN_FLIGHT = 2;
 /** A frame unacked for this long is forgotten, so a lost ack can never stall the stream. */
 export const ACK_TIMEOUT_MS = 1000;
 /** Weight of each new round-trip sample in the smoothed value. */

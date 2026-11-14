@@ -27,6 +27,7 @@ import httpx
 import numpy as np
 from PIL import Image
 
+from fsd_ml.chair_out import ChairOutError, ChairSender, token_from_env
 from fsd_ml.drivers import Driver, Goal, Motion, make_driver
 from fsd_ml.flowpilot import ONNX_PATH as FLOWPILOT_WEIGHTS
 from fsd_ml.live import ChairGoal, LiveFeed, ipad_message
@@ -119,6 +120,8 @@ class Session:
         self.live_photo: np.ndarray | None = None
         self._live_jpeg: bytes | None = None
         self._chair_goal: ChairGoal | None = None
+        # Set while the live view's decisions are being sent to the chair.
+        self.chair_out: ChairSender | None = None
         self.frame_count = 0
         self.size = (0, 0)
         self._frames_dir = work_dir / "frames"
@@ -324,9 +327,37 @@ class Session:
             return None
 
     def disconnect_live(self) -> None:
+        self.send_to_chair(False)
         if self.live is not None:
             self.live.stop()
         self.live = self._live_jpeg = None
+
+    def send_to_chair(self, on: bool) -> dict[str, Any]:
+        """Start or stop sending live decisions to the chair, through the driving service."""
+        if not on:
+            sender, self.chair_out = self.chair_out, None
+            if sender is None:
+                return {"sending": False}
+            stopped = sender.stop()
+            sender.close()
+            return {"sending": False, "chair": stopped.as_dict()}
+        if self.live is None:
+            raise ViewerError("connect to the driving service first")
+        if self.chair_out is None:
+            try:
+                self.chair_out = ChairSender(self.live.service, token_from_env())
+            except ChairOutError as error:
+                raise ViewerError(str(error)) from error
+        return {"sending": True}
+
+    def _to_chair(self, decision: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Send a decision, or stop when there is none, if sending is on. For the page."""
+        sender = self.chair_out
+        if sender is None:
+            return None
+        if decision is None:
+            return sender.stop().as_dict()
+        return sender.send(decision["v_mps"], decision["w_radps"]).as_dict()
 
     def keep_live_photo(self) -> None:
         """Use what the camera sees now as the goal photo."""
@@ -368,14 +399,15 @@ class Session:
         if waiting is None and sample.frame is None:
             waiting = "waiting for the first camera frame"
         if waiting is not None:
-            return {"waiting": waiting, "link": link, "ipad": ipad}
+            return {"waiting": waiting, "link": link, "ipad": ipad, "chair": self._to_chair(None)}
 
         note = None
         if kind == FROM_IPAD:
             # Whatever the rider set on the iPad: a route, a bare destination or an instruction.
             goal, note = self._chair_goal.read(status)
             if goal is None:
-                return {"waiting": note, "link": link, "ipad": ipad}
+                chair = self._to_chair(None)
+                return {"waiting": note, "link": link, "ipad": ipad, "chair": chair}
         else:
             goal = self._goal(kind, goal_xy, instruction, self.live_photo)
         with self._lock:
@@ -388,6 +420,7 @@ class Session:
         height, width = shown.shape[:2]
         return {
             **decision,
+            "chair": self._to_chair(decision),
             "seq": sample.frame.n,
             "width": width,
             "height": height,
@@ -429,6 +462,15 @@ class Session:
             }
             self._cache[key] = decision
             return {**decision, "cached": False}
+
+
+def same_origin(headers: Any) -> bool:
+    """A request from this viewer's own page, or from a client that sends no Origin."""
+    origin = headers.get("Origin")
+    if origin is None:
+        return True
+    host = headers.get("Host")
+    return host is not None and origin in (f"http://{host}", f"https://{host}")
 
 
 def make_server(session: Session, host: str = "127.0.0.1", port: int = 8200) -> ThreadingHTTPServer:
@@ -517,6 +559,14 @@ def make_server(session: Session, host: str = "127.0.0.1", port: int = 8200) -> 
                         session.disconnect_live()
                     elif url.path == "/api/live/photo":
                         session.keep_live_photo()
+                    elif url.path == "/api/live/chair":
+                        # Moves the chair: refuse a page on another site posting here.
+                        if not same_origin(self.headers):
+                            self._json({"error": "only this page may do that"}, 403)
+                            return
+                        on = parse_qs(url.query).get("on", ["0"])[0] == "1"
+                        self._json(session.send_to_chair(on))
+                        return
                     else:
                         self._json({"error": "not found"}, 404)
                         return

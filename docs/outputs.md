@@ -56,7 +56,7 @@ The chair reports back so the service knows it is being obeyed:
 
 `mode` is `auto` or `manual`. Touching the joystick switches to `manual` on the chair first, then reports it.
 
-The transport (serial, Bluetooth or WebSocket) is undecided until the chair is opened up.
+The transport is a WebSocket from the service to the Arduino over Tailscale, and the model's live view can now feed it: see [chair-link.md](chair-link.md#from-the-model-to-the-chair). How the Arduino turns the two numbers into the chair's input is still being worked out on the board.
 
 ## 2. Drive state (to the iPad)
 

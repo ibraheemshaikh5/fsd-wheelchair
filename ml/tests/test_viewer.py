@@ -242,8 +242,8 @@ def test_live_status_becomes_pipeline_input() -> None:
 
     from fsd_ml.live import LiveFrame, LiveSample, feed_address, to_sensors
 
-    assert feed_address("http://127.0.0.1:8000") == "ws://127.0.0.1:8000/ws/viewer"
-    assert feed_address("https://mac.tail1234.ts.net/") == "wss://mac.tail1234.ts.net/ws/viewer"
+    assert feed_address("http://127.0.0.1:8000") == "ws://127.0.0.1:8000/ws/model"
+    assert feed_address("https://mac.tail1234.ts.net/") == "wss://mac.tail1234.ts.net/ws/model"
     with pytest.raises(ValueError):
         feed_address("ftp://nope")
 
