@@ -29,7 +29,7 @@ iPad web app ──destination, start/stop──▶ Driving service
 | [`service/`](service) | Driving service (Python, FastAPI). Today: receives the phone stream, keeps the latest sensor readings, records drives. |
 | [`web/`](web) | Browser pages (TypeScript, Vite): the phone's capture page, a sensor viewer, and a device check. |
 | [`app/`](app) | iPad app (React, TypeScript, Vite). See below. |
-| [`ml/`](ml) | Offline model work (Python): run candidate models over recorded drives, download checkpoints. Post-training and evaluation go here. |
+| [`ml/`](ml) | Model side (Python): the driving pipeline, a simulated chair to run it against, the models behind one interface, and tools to compare them. |
 
 ## Docs
 

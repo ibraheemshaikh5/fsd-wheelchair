@@ -4,7 +4,15 @@
 
 Start from open-weight models that already navigate well from a single camera, then post-train on wheelchair data. The story: a strong general base, made specifically good at this chair.
 
-## Plan: two layers
+## Decision: OmniVLA for everything
+
+Decided 2026-11-14: use OmniVLA both outdoors and indoors, hosted on a Modal GPU, with latency as the constraint to watch. One model takes a GPS-style point outdoors and an instruction or photo indoors, so there is no hand-off between models, one thing to host and one model to post-train.
+
+FlowPilot stays wrapped as an outdoor fallback behind the same interface. The two-layer plan below is what this replaced; its reasoning and the benchmark still explain the trade-off: OmniVLA's sidewalk driving is unmeasured and its nearest relative did markedly worse than FlowPilot there.
+
+The driver and Modal app for OmniVLA are written but not yet run ([`ml/README.md`](../ml/README.md#omnivla-on-modal)).
+
+## Earlier plan: two layers
 
 | Layer | Job | Model | Runs at |
 |-------|-----|-------|---------|
@@ -72,7 +80,21 @@ The mount height and pitch the phone already reports feed the footprint check. T
 
 Record chair footage on sidewalks and indoors, then run FlowPilot, OmniVLA, OmniVLA-edge, S2E, and NoMaD on it offline. UCLA's Navigation Model Zoo puts most of these behind one interface, so this is cheap. Pick the driver from the result, not from this doc.
 
-The harness is in [`ml/`](../ml): it reads a recording, runs a driver over it and saves what the driver proposed. Only a straight-ahead baseline is wired in so far; each real model still needs a wrapper.
+The harness is in [`ml/`](../ml): it reads a recording, runs a driver over it and saves what the driver proposed. FlowPilot (small variant) and S2E are wrapped and run: about 400 ms and 240 ms per call on a Mac CPU. OmniVLA and the rest still need wrappers. A [viewer](../ml/README.md#watch-a-model-on-a-video) shows either model's proposals on any video.
+
+## What wrapping FlowPilot showed
+
+From FlowPilot's own documentation, read while wrapping it:
+
+- **It was trained on one camera**: a fisheye about 137° wide, 0.456 m off the ground. The table above assumed about 100°; that figure belongs to an older variant. A phone ultra-wide is narrower and a chair mount is higher, so expect shifted plans until it is post-trained on chair footage.
+- **Three public variants.** We use the small one (21M parameters). A larger one (208M) and a streaming one that needs no speed input also exist.
+- **Weights and training code are public**, so post-training is possible. The intervention-based fine-tuning stage is announced but not released yet.
+- **No licence file in its repository.** The model zoo it also ships in is Apache-2.0, but the terms for these weights are not stated. Fine for a hackathon; check before anything else.
+- **Goals closer than 20 m tell it to slow down and stop.**
+
+## Where models run
+
+On a Modal GPU, called over HTTP by the pipeline. A model on another machine sits behind the same interface as a local one, so nothing else changes. Latency is the cost: the round trip has to stay small next to the 50 ms loop, and the pipeline stops the chair if a result is more than a second old. `ml/fsd_ml/latency.py` measures the round trip. The Modal app is written but not yet run.
 
 ## Post-training
 

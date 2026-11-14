@@ -1,6 +1,6 @@
 # Driving pipeline
 
-What the driving service does between receiving sensor data and sending a command. Design only; none of this is built yet. For which models and why, see [model.md](model.md). For what comes out, see [outputs.md](outputs.md).
+What happens between receiving sensor data and sending a command. Stages 1–5 and 7–9 are built in [`ml/`](../ml) and run against a simulated chair; they are not yet connected to the driving service, the phone or the real chair. For which models and why, see [model.md](model.md). For what comes out, see [outputs.md](outputs.md).
 
 ## Stages
 
@@ -104,7 +104,7 @@ The loop only produces motion in `driving`. In every other state it still runs s
 |------|--------|
 | Loop rate | 20 Hz |
 | Camera frame to service | about 40–100 ms (measured indoors) |
-| Driver inference | to be measured in the bake-off |
+| Driver inference | S2E: about 240 ms on a Mac CPU. GPU and other models: not yet measured |
 | Oldest model result the loop will act on | to be set from that measurement |
 | Chair stops with no fresh command after | a few hundred ms, enforced on the chair |
 
@@ -115,27 +115,29 @@ The loop only produces motion in `driving`. In every other state it still runs s
 | Phone stream, freshness, heading, recording | Built | |
 | Landscape, ultra-wide, 20 fps capture | In progress | |
 | Speed and motion tracking source | In progress | ARKit check |
-| Route sent to the service | To build. Today the iPad plans the route and the service only holds the destination point | |
-| Localize | To build | Motion tracking |
-| Goal conversion and outdoor/indoor switch | To build | Route, localize |
-| Frame buffer | To build | |
-| Model worker and the shared interface | To build | Bake-off result, a GPU |
-| Obstacle and distance model | To choose, then build | |
-| Footprint check | To build | Chair dimensions, obstacle model |
-| Controller and limits | To build | |
-| Trip state machine, engage and disengage | To build | |
+| Route sent to the service | The pipeline accepts the iPad's route shape. Sending it from the iPad is not wired; today the service only holds the destination point | |
+| Gate | Built, in simulation | |
+| Localize | Built, but trusts GPS and heading as given. No filtering | Motion tracking |
+| Goal conversion | Built for routes. The outdoor/indoor switch is not | |
+| Frame buffer | Built, thinned to each model's frame rate | |
+| Model interface, local and remote | Built. S2E wrapped and running; FlowPilot and OmniVLA are not | A GPU for OmniVLA |
+| Modal endpoint | Written, not yet run on Modal | A Modal login |
+| Obstacle and distance model | To choose, then build. The simulator supplies perfect obstacles | |
+| Footprint check | Built, with placeholder chair dimensions | Chair dimensions, obstacle model |
+| Controller and limits | Built | |
+| Trip state machine, engage and disengage | Built | |
+| Simulated chair and scenarios | Built: nine scenarios | |
+| Connection to the driving service | Not started | The service side settling |
 | Chair link | Blocked | Opening up the chair |
 | Replay: run the whole pipeline on a recording | To build | Recordings |
 
-Replay comes first. It lets every stage be developed and tested against recorded drives before the chair can be commanded at all.
+The simulator came first. It lets every stage be developed and tested before the chair can be commanded at all. See [`ml/README.md`](../ml/README.md) to run it.
 
 ## Where the code goes
 
-Two places. What runs while driving goes in the service. What runs offline (the bake-off, post-training, evaluation) goes in [`ml/`](../ml), which only reads recordings and never imports the service.
+For now everything is in [`ml/`](../ml), which imports nothing from the service: the pipeline in `ml/fsd_ml/pipeline/`, the simulator in `ml/fsd_ml/sim/`, and the models behind `Driver.propose()` in [`ml/fsd_ml/drivers.py`](../ml/fsd_ml/drivers.py). Keeping it apart let it be built without touching the service while the phone stream was being finished.
 
-Both use the same model interface: frames, a goal and the chair's motion in; scored candidate paths out. It exists today as `Driver.propose()` in [`ml/fsd_ml/drivers.py`](../ml/fsd_ml/drivers.py), so a model wrapped for the bake-off can move into the service unchanged.
-
-Inside the existing `service/drive_service/` package (not created yet):
+To drive for real, the service calls the pipeline once per pass with its sensor snapshot and sends on what comes back. Whether the pipeline then moves into the service package, as sketched below, or stays importable from `ml/` is still open:
 
 ```
 drive_service/

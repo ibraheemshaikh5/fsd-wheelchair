@@ -1,6 +1,6 @@
 # Outputs
 
-What the driving service sends out on each pass of the [driving pipeline](driving-pipeline.md). Design only; not built yet.
+What is sent out on each pass of the [driving pipeline](driving-pipeline.md). All three are produced today by the pipeline in [`ml/`](../ml) running against a simulated chair ([`outputs.py`](../ml/fsd_ml/pipeline/outputs.py)). None is connected to the real chair or the iPad yet.
 
 There are three outputs. Only the first moves the chair.
 
