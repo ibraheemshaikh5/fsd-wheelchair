@@ -1,9 +1,12 @@
 """The chair's phone, live, by way of the driving service.
 
-The service already offers a feed for viewers (``/ws/viewer``): about ten times
-a second it sends its status as JSON, then the newest camera frame as a JPEG if
-there is a new one. This connects to that feed as one more viewer, so the
-service needs no changes. The service allows four viewers at once.
+This reads the service's model feed (``/ws/model``), not the viewer feed the
+iPad uses: the service pushes every camera frame the moment it lands, as the
+status (JSON) and then the frame (``[uint32 LE header length][header JSON][JPEG]``).
+The header's ``age_ms`` says how long ago the phone captured the frame, so each
+frame is placed at its capture time on this machine's clock, and a model's
+frames are spaced by when they were taken, not by when a busy link delivered
+them. The service allows two model feeds at once.
 
     feed = LiveFeed("http://127.0.0.1:8000")      # or the service's Tailscale address
     feed.start()
@@ -15,9 +18,11 @@ from __future__ import annotations
 import io
 import json
 import math
+import struct
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -34,7 +39,9 @@ from fsd_ml.video import standardize_frame
 
 # How much recent footage is kept for models that read a history.
 HISTORY_S = 4.0
-TOO_MANY_VIEWERS = 4429
+TOO_MANY_FEEDS = 4429
+MS_PER_S = 1000.0
+_LENGTH_PREFIX = struct.Struct("<I")
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +52,9 @@ class LiveFrame:
     received_s: float
     # In the form the models are fed (see video.py).
     image: np.ndarray
+    # When the phone captured it, on this machine's monotonic clock; None before
+    # the phone's clock is synced with the service.
+    captured_s: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,21 +65,44 @@ class LiveSample:
     silent_s: float
 
 
+def _split_frame(message: bytes) -> tuple[dict[str, Any], bytes] | None:
+    """A model-feed frame as (header, JPEG), or None if it is not one."""
+    if len(message) < _LENGTH_PREFIX.size:
+        return None
+    (length,) = _LENGTH_PREFIX.unpack_from(message)
+    end = _LENGTH_PREFIX.size + length
+    if end > len(message):
+        return None
+    try:
+        header = json.loads(message[_LENGTH_PREFIX.size : end])
+    except ValueError:
+        return None
+    return (header, message[end:]) if isinstance(header, dict) else None
+
+
+def _captured_s(header: dict[str, Any], received_s: float) -> float | None:
+    age_ms = header.get("age_ms")
+    if not isinstance(age_ms, int | float) or isinstance(age_ms, bool) or age_ms < 0:
+        return None
+    return received_s - age_ms / MS_PER_S
+
+
 def feed_address(service: str) -> str:
-    """``http(s)://host[:port]`` of the driving service as its viewer feed's address."""
+    """``http(s)://host[:port]`` of the driving service as its model feed's address."""
     parts = urlparse(service if "://" in service else f"http://{service}")
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ValueError("the service address should look like http://127.0.0.1:8000")
     scheme = "wss" if parts.scheme == "https" else "ws"
-    return f"{scheme}://{parts.netloc}/ws/viewer"
+    return f"{scheme}://{parts.netloc}/ws/model"
 
 
 class LiveFeed:
     """Keeps the newest status and the last few seconds of frames from the service."""
 
-    def __init__(self, service: str) -> None:
+    def __init__(self, service: str, clock: Callable[[], float] = time.monotonic) -> None:
         self.service = service
         self.address = feed_address(service)
+        self._clock = clock
         self._lock = threading.Lock()
         self._status: dict[str, Any] = {}
         self._frames: deque[LiveFrame] = deque()
@@ -106,8 +139,8 @@ class LiveFeed:
             except ConnectionClosed as closed:
                 code = closed.rcvd.code if closed.rcvd else None
                 self.problem = (
-                    "the service already has four viewers; close one"
-                    if code == TOO_MANY_VIEWERS
+                    "the service already feeds two models; close another model viewer"
+                    if code == TOO_MANY_FEEDS
                     else "the service closed the connection"
                 )
             except InvalidStatus as refused:
@@ -120,7 +153,7 @@ class LiveFeed:
             wait_s = min(wait_s * 2, 5.0)
 
     def _take(self, message: str | bytes) -> None:
-        now = time.monotonic()
+        now = self._clock()
         if isinstance(message, str):
             try:
                 status = json.loads(message)
@@ -129,14 +162,19 @@ class LiveFeed:
             with self._lock:
                 self._status, self._heard_s, self.problem = status, now, None
             return
+        parts = _split_frame(message)
+        if parts is None:
+            return
+        header, jpeg = parts
         try:
-            with Image.open(io.BytesIO(message)) as image:
+            with Image.open(io.BytesIO(jpeg)) as image:
                 frame = standardize_frame(np.asarray(image.convert("RGB")))
         except OSError:
             return
+        captured = _captured_s(header, now)
         with self._lock:
             self._count += 1
-            self._frames.append(LiveFrame(self._count, now, frame))
+            self._frames.append(LiveFrame(self._count, now, frame, captured))
             while self._frames and now - self._frames[0].received_s > HISTORY_S:
                 self._frames.popleft()
             self._heard_s = now
@@ -144,24 +182,35 @@ class LiveFeed:
     def latest(self) -> LiveSample:
         with self._lock:
             frame = self._frames[-1] if self._frames else None
-            silent = float("inf") if self._heard_s is None else time.monotonic() - self._heard_s
+            silent = float("inf") if self._heard_s is None else self._clock() - self._heard_s
             return LiveSample(dict(self._status), frame, silent)
 
     def window(self, count: int, frame_hz: float) -> list[np.ndarray]:
         """The newest ``count`` frames about ``1 / frame_hz`` apart, oldest first.
 
-        The feed is slower than some models' frame rate, so the nearest frame in
-        time stands in, and a short history repeats its oldest frame.
+        Spaced by when each picture was taken, so a stall that delivers several
+        frames at once still gives the model evenly spaced views. Where no frame
+        was taken at the wanted moment the nearest one stands in, and a short
+        history repeats its oldest frame.
         """
         with self._lock:
             frames = list(self._frames)
         if not frames:
             return []
-        newest = frames[-1].received_s
+        # Capture and arrival times differ by the link's latency, so never mix
+        # them: one frame without a capture time puts the whole window on arrival.
+        by_capture = all(f.captured_s is not None for f in frames)
+        times = [
+            f.captured_s if by_capture and f.captured_s is not None else f.received_s
+            for f in frames
+        ]
+        # Anchored on the newest arrival, the same frame latest() reports.
+        newest = times[-1]
         picked = []
         for back in range(count):
             wanted = newest - back / frame_hz
-            picked.append(min(frames, key=lambda f: abs(f.received_s - wanted)).image)
+            nearest = min(range(len(frames)), key=lambda i: abs(times[i] - wanted))
+            picked.append(frames[nearest].image)
         return picked[::-1]
 
 

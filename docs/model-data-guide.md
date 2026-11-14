@@ -9,9 +9,12 @@ The wire format is in [phone-protocol.md](phone-protocol.md).
 
 ## In short
 
-- The phone captures at **60 fps by default** (the top rate of the iPhone's
-  normal video formats; a setting allows up to 240), not at 20. You take 20 fps
-  out of that. Check the rate a recording actually has from `frames.jsonl`.
+- The phone sends **20 fps at 480 px by default**, sized for driving. For
+  training data set it to **60 fps and 640 px** in the capture page's settings
+  (60 is the top rate of the iPhone's normal video formats; a setting allows up
+  to 240) and take 20 fps out of that: at 60 fps the newest frame at a tick is
+  within ~17 ms. Earlier recordings are mostly 60 fps at 640 px.
+  Check the rate a recording actually has from `frames.jsonl`.
 - Pick frames **by capture time** on a 50 ms grid: at each tick, take the newest
   frame at or before the tick. Skip the tick if that frame is more than 25 ms
   old. Never take a frame from after the tick, and never take "every 3rd frame".
@@ -377,22 +380,35 @@ for tick, frame in picked:
 
 Run it from `ml/` (`uv run python …`).
 
-## Live feed (`/ws/viewer`)
+## Live feed for the model (`/ws/model`)
 
-Useful for a live demo, not for training data.
+What `fsd_ml.live.LiveFeed` reads. The driving model's own feed, separate from
+the iPad's viewer feed.
 
-- Every ~33 ms (30 Hz) the service sends a JSON status, then the newest JPEG as
-  a binary message if it changed. The JPEG has **no header and no capture
-  time**. The status before it describes it (`frame.seq`, `w`, `h`, `age_ms`,
-  `fresh`). Capture time ≈ arrival − `frame.age_ms`.
-- The same status has `motion` (`speed_mps`, `speed_source`, `yaw_rate_dps`,
+- The service pushes **every frame the moment it lands**, not on a timer: the
+  JSON status, then the frame as `[uint32 LE header length][header JSON][JPEG]`,
+  built together so the status describes that frame.
+- Header: `seq`, `t` (phone clock), `w`, `h`, `rot` (if the phone sent it) and
+  `age_ms`: how long ago the phone captured the frame, on the service's clock,
+  when it was sent, or null before the phone's clock is synced. Capture time on
+  the reader's clock = arrival − `age_ms`, so the two machines' clocks never
+  need to agree. `LiveFeed.window()` spaces frames by this capture time, so a
+  stall that delivers several frames at once still gives evenly spaced views.
+  If any frame in its history has no capture time, it uses arrival times for
+  all of them rather than mix the two clocks.
+- With no new frame the status still comes every ~33 ms, so a reader sees the
+  camera go stale at once.
+- The status has `motion` (`speed_mps`, `speed_source`, `yaw_rate_dps`,
   `accel_fwd_mps2`, `accel_lat_mps2`, `age_ms`, `fresh`), `gps`, `heading`
   (`deg` true north when the declination is known), `clock_synced`,
   `sensors_ok`, `camera` and `mount`. Use a value only when its `fresh` is true.
-- At most 4 viewers; a fifth is closed with `4429`. A 30 Hz newest-only feed
-  sampled at 20 Hz repeats or skips frames, so the real driving loop should
-  read frames inside the service ([driving-pipeline.md](driving-pipeline.md),
-  stage 4), using the same "newest at or before" rule.
+- At most 2 model feeds, counted apart from viewers so open iPads never lock the
+  model out; a third is closed with `4429`. Anything a reader sends is ignored.
+
+The viewer feed (`/ws/viewer`, for the iPad and debug pages) wakes every ~33 ms
+and sends the status and the newest JPEG, with no header, if it changed. It
+suits a screen, not a model: a frame can wait up to a tick, and a 30 Hz
+newest-only feed sampled at 20 Hz repeats or skips frames.
 
 ## Loader additions worth making in `ml/`
 

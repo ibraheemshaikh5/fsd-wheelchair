@@ -97,7 +97,7 @@ Drop a forward-facing video on the page, or pass its path on the command line. F
 
 ## Watch a model on the chair's live camera
 
-The viewer can also show the phone's stream as it arrives. It connects to the driving service's own viewer feed as one more viewer, so the service needs no changes (it allows four viewers).
+The viewer can also show the phone's stream as it arrives. It reads the driving service's model feed (`/ws/model`), which pushes every frame the moment it lands, with its capture time, so the model sees each frame as soon as it can and picks frames by when they were taken. The service allows two model feeds at once, apart from the iPad's viewers.
 
 1. Start the viewer and choose **Live from chair**.
 2. Enter the driving service's address and press Connect: `http://127.0.0.1:8000` if the service runs on this machine, or its Tailscale `https://…ts.net` address if it runs on another.
