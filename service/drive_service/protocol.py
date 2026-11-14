@@ -66,7 +66,9 @@ class MountInfo(_Wire):
 class Hello(_PhoneMessage):
     type: Literal["hello"]
     user_agent: str = Field(max_length=MAX_LABEL_CHARS)
-    camera: CameraInfo
+    # None from a device that sends only sensors (an iPad while an external camera
+    # supplies the frames).
+    camera: CameraInfo | None = None
     mount: MountInfo | None = None
     # "device_xyz": imu rx, ry, rz are rotation about device x, y, z. Absent on
     # older pages, which wrote [about y, about z, about x] in those columns.

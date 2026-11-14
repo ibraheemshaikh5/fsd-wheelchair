@@ -124,6 +124,9 @@ export function chairLink(
   // Once the iPad loses the service, nothing it last heard about the phone is current.
   const live = socket === 'online' ? status : null
   const phone: ChairLink['phone'] = !live?.phone_connected ? 'none' : live.sensors_ok ? 'ok' : 'waiting'
+  // The kind is configuration, so it is kept from the last status even while offline.
+  const frameSource = status?.frame_source?.kind ?? 'phone'
+  const cameraConnected = live?.frame_source?.kind === 'external' && live.frame_source.connected
   return {
     // After a loss, retrying (even a socket that opened but has sent nothing yet)
     // is still offline as far as the rider is concerned.
@@ -131,8 +134,11 @@ export function chairLink(
     issue: linkLost ? linkIssue : null,
     phone,
     gpsAccuracyM: live?.gps?.fresh ? live.gps.accuracy_m : null,
-    cameraFps: live?.phone_connected ? displayFps(live.stats.fps) : null,
+    cameraFps: frameSource === 'external' ? (cameraConnected ? displayFps(live?.stats.fps ?? 0) : null)
+      : live?.phone_connected ? displayFps(live.stats.fps) : null,
     positionFrom,
+    frameSource,
+    cameraConnected,
   }
 }
 

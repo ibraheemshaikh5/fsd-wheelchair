@@ -114,6 +114,24 @@ def _heading(
     }
 
 
+def _frame_source(
+    snapshot: SensorSnapshot, phone_clock_synced: bool, external_camera: bool, settings: Settings
+) -> dict[str, Any]:
+    """Where frames come from, and whether that sender is connected with a synced clock."""
+    if not external_camera:
+        return {
+            "kind": "phone",
+            "connected": snapshot.phone_connected,
+            "clock_synced": phone_clock_synced,
+        }
+    connected = snapshot.camera_connected
+    return {
+        "kind": "external",
+        "connected": connected,
+        "clock_synced": connected and is_synced(snapshot.camera_clock, settings.max_clock_rtt_ms),
+    }
+
+
 def build_status(
     snapshot: SensorSnapshot,
     stats: StreamStats,
@@ -124,6 +142,7 @@ def build_status(
     settings: Settings,
     destination: Destination | None = None,
     goal: Goal | None = None,
+    external_camera: bool = False,
 ) -> dict[str, Any]:
     frame_fresh = is_fresh(snapshot.frame, settings.frame_stale_ms, now_mono)
     gps_fresh = is_fresh(snapshot.gps, settings.gps_stale_ms, now_mono)
@@ -132,12 +151,24 @@ def build_status(
     # until the next one attaches.
     clock_synced = snapshot.phone_connected and is_synced(snapshot.clock, settings.max_clock_rtt_ms)
     hello = snapshot.hello
+    source = _frame_source(snapshot, clock_synced, external_camera, settings)
+    camera_hello = snapshot.camera_hello if external_camera else hello
+    camera = camera_hello.camera if camera_hello else None
     return {
         "type": "status",
         "phone_connected": snapshot.phone_connected,
         "clock_synced": clock_synced,
         # Outdoor definition: a live camera and a live GPS fix, judged by capture time.
-        "sensors_ok": snapshot.phone_connected and clock_synced and frame_fresh and gps_fresh,
+        # With an external camera its own link and clock must be live too.
+        "sensors_ok": (
+            snapshot.phone_connected
+            and clock_synced
+            and source["connected"]
+            and source["clock_synced"]
+            and frame_fresh
+            and gps_fresh
+        ),
+        "frame_source": source,
         "frame": _frame(snapshot, now_mono, frame_fresh),
         "gps": _gps(snapshot, now_mono, gps_fresh),
         "heading": _heading(snapshot, now_mono, gps_fresh, compass_fresh, settings),
@@ -148,7 +179,7 @@ def build_status(
             "rejected": rejected,
             "rate_limited": rate_limited,
         },
-        "camera": hello.camera.model_dump() if hello else None,
+        "camera": camera.model_dump() if camera else None,
         "mount": hello.mount.model_dump() if hello and hello.mount else None,
         "recording": asdict(recording),
         "destination": destination_status(
@@ -178,4 +209,5 @@ def live_status(
         settings,
         destination=destinations.current,
         goal=destinations.goal,
+        external_camera=hub.external_camera,
     )

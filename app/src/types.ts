@@ -83,6 +83,13 @@ export interface ChairLink {
   positionFrom: 'phone' | 'ipad' | 'phone-stale' | 'default'
   /** Why the iPad lost the driving service, while it is lost (e.g. too many screens). */
   issue: string | null
+  /**
+   * 'external': a separate camera sends the frames and this iPad sends GPS,
+   * compass and motion in place of the phone ('phone' in `phone` then means the iPad).
+   */
+  frameSource: 'phone' | 'external'
+  /** With an external camera: whether it is connected to the service. */
+  cameraConnected: boolean
 }
 
 export interface DriveState {

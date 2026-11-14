@@ -134,7 +134,19 @@ describe('chairLink', () => {
       gpsAccuracyM: 4,
       cameraFps: 9,
       positionFrom: 'phone',
+      frameSource: 'phone',
+      cameraConnected: false,
     })
+  })
+
+  it('follows an external camera, keeping its kind while offline', () => {
+    const external = (connected: boolean) => ({ kind: 'external', connected, clock_synced: connected })
+    const live = chairLink('online', status({ frame_source: external(true), stats: { fps: 19.6 } }), 'phone')
+    expect(live).toMatchObject({ frameSource: 'external', cameraConnected: true, cameraFps: 20 })
+    const gone = chairLink('online', status({ frame_source: external(false) }), 'phone')
+    expect(gone).toMatchObject({ frameSource: 'external', cameraConnected: false, cameraFps: null })
+    const offline = chairLink('offline', status({ frame_source: external(true) }), 'phone')
+    expect(offline).toMatchObject({ frameSource: 'external', cameraConnected: false })
   })
 
   it('rounds the frame rate to whole frames a second, since the service’s changes on every status', () => {
