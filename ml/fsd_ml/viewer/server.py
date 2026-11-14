@@ -27,7 +27,7 @@ import httpx
 import numpy as np
 from PIL import Image
 
-from fsd_ml.chair_out import ChairOutError, ChairSender, token_from_env
+from fsd_ml.chair_out import ChairOutError, ChairSender
 from fsd_ml.drivers import Driver, Goal, Motion, make_driver
 from fsd_ml.flowpilot import ONNX_PATH as FLOWPILOT_WEIGHTS
 from fsd_ml.live import ChairGoal, LiveFeed, ipad_message
@@ -333,7 +333,7 @@ class Session:
         self.live = self._live_jpeg = None
 
     def send_to_chair(self, on: bool) -> dict[str, Any]:
-        """Start or stop sending live decisions to the chair, through the driving service."""
+        """Start or stop sending live decisions to the chair (hardware/wheelchair.py)."""
         if not on:
             sender, self.chair_out = self.chair_out, None
             if sender is None:
@@ -345,7 +345,7 @@ class Session:
             raise ViewerError("connect to the driving service first")
         if self.chair_out is None:
             try:
-                self.chair_out = ChairSender(self.live.service, token_from_env())
+                self.chair_out = ChairSender()
             except ChairOutError as error:
                 raise ViewerError(str(error)) from error
         return {"sending": True}
@@ -357,7 +357,10 @@ class Session:
             return None
         if decision is None:
             return sender.stop().as_dict()
-        return sender.send(decision["v_mps"], decision["w_radps"]).as_dict()
+        result = sender.send(decision["v_mps"], decision["w_radps"])
+        if result.halted:  # the board took control back: the rider must tick again
+            self.send_to_chair(False)
+        return result.as_dict()
 
     def keep_live_photo(self) -> None:
         """Use what the camera sees now as the goal photo."""

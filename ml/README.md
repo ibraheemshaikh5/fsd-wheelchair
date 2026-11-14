@@ -120,7 +120,7 @@ uv run python -m scripts.fake_phone --seconds 120
 
 The code is [`fsd_ml/live.py`](fsd_ml/live.py). Its `to_sensors()` turns the same feed into the pipeline's input, which is the first half of driving for real.
 
-**Send to chair** passes each live decision (speed and turn rate only) to the driving service, which forwards it to the Arduino. Set `DRIVE_CHAIR_DRIVER_TOKEN` to the service's driver token in the shell that starts the viewer. A decision is held for 600 ms, so if the model stops deciding, the chair stops. Unticking, reconnecting or leaving the live view stops it at once. Details: [docs/chair-link.md](../docs/chair-link.md#from-the-model-to-the-chair). Code: [`fsd_ml/chair_out.py`](fsd_ml/chair_out.py).
+**Send to chair** passes each live decision (speed and turn rate only) to the chair through `Wheelchair().set(x, y)` ([hardware/README.md](../hardware/README.md)); the viewer's machine must be on the team Tailscale. A decision is held for 600 ms, so if the model stops deciding, the chair stops. Unticking, reconnecting or leaving the live view stops it at once, and a joystick takeover or Wi-Fi dropout unticks it. Code: [`fsd_ml/chair_out.py`](fsd_ml/chair_out.py).
 
 ## Real models
 

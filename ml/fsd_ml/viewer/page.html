@@ -591,10 +591,16 @@ function showIpad(ipad) {
 function showChair(chair) {
   const sending = $("toChair").checked;
   $("toChairLabel").classList.toggle("on", sending);
+  if (chair && chair.halted) {
+    $("toChair").checked = false;
+    $("toChairLabel").classList.remove("on");
+    $("chairNote").textContent = `Chair: stopped (${chair.problem})`;
+    return;
+  }
   if (!sending) { $("chairNote").textContent = ""; return; }
   if (!chair) { $("chairNote").textContent = "Chair: waiting for a decision"; return; }
   $("chairNote").textContent = chair.sent
-    ? `Chair: sent ${chair.v_mps.toFixed(2)} m/s, ${chair.w_radps.toFixed(2)} rad/s${chair.limited ? " (lowered to the chair's limits)" : ""}`
+    ? `Chair: sent ${chair.v_mps.toFixed(2)} m/s, ${chair.w_radps.toFixed(2)} rad/s (stick x ${chair.x}%, y ${chair.y}%)`
     : `Chair: not sent (${chair.problem})`;
 }
 async function setToChair(on) {
