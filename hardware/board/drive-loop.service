@@ -1,0 +1,14 @@
+# Moves the chair. Never enable: start it by hand (sudo systemctl start drive-loop).
+# /home/arduino/drive-loop.env holds DRIVER_URL, LOOP_ARGS, WHEELCHAIR_HOST=127.0.0.1.
+[Unit]
+Description=Phase 1 drive loop (live feed -> model -> stick)
+After=drive-service.service wheelchaird.service
+Requires=drive-service.service
+
+[Service]
+User=arduino
+WorkingDirectory=/home/arduino/fsd-wheelchair/ml
+EnvironmentFile=/home/arduino/drive-loop.env
+ExecStart=/bin/sh -c 'exec /home/arduino/fsd-wheelchair/.venv/bin/python -m fsd_ml.drive_loop --driver remote:$DRIVER_URL $LOOP_ARGS'
+KillSignal=SIGINT
+Restart=no

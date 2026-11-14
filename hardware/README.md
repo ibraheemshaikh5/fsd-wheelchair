@@ -68,8 +68,44 @@ Tailscale installed and logged in; Wi-Fi power saving off (`/etc/NetworkManager/
 **no** default app (`arduino-app-cli properties set default none`, so Linux never re-flashes the MCU at boot); `board/wheelchaird.py` copied to
 `/home/arduino/` and `board/wheelchaird.service` installed in `/etc/systemd/system/` (enabled).
 
+## Phase 1 autonomous loop on the board
+iPhone --wss--> driving service (board, :8000) --> `ml/fsd_ml/drive_loop.py` (board) --HTTPS--> OmniVLA on Modal
+--> path --> stick % --> `wheelchaird` (UDP 127.0.0.1:5005). Everything but the model runs on the UNO Q.
+
+1. **Model (Mac, teammate's Modal account).** In `ml/modal_omnivla.py` set `min_containers=1` (a GPU stays up and
+   bills until set back to 0), then `cd ml && uv run --with modal modal deploy modal_omnivla.py`. Note the URL.
+   OmniVLA takes one frame per call and the point goal; about 255 ms round trip. Any `remote:<url>` driver works.
+2. **Code to the board (Mac).** `cd web && npm run build`, then
+   `rsync -a --exclude .venv --exclude node_modules --exclude recordings --exclude .git ./ arduino@wheelchair-unoq:fsd-wheelchair/`
+   from the repo root (this includes `web/dist`).
+3. **Deps (board, once).** No uv, torch, ONNX or ffmpeg needed:
+   ```sh
+   cd ~/fsd-wheelchair && python3 -m venv .venv   # sudo apt install python3-venv if this fails
+   .venv/bin/pip install fastapi 'uvicorn[standard]' pydantic pydantic-settings pygeomag numpy pillow httpx websockets
+   ```
+4. **Service (board, once).** `sudo cp hardware/board/drive-service.service hardware/board/drive-loop.service /etc/systemd/system/`,
+   `sudo systemctl daemon-reload && sudo systemctl enable --now drive-service`, then `sudo tailscale serve --bg 8000`.
+   Do not enable `drive-loop`.
+5. **Phone.** Open `https://wheelchair-unoq.<tailnet>.ts.net` in Safari, **Chair camera**, **Start streaming**.
+6. **Dry run (board), chair still.** Prints one JSON line per decision; nothing moves:
+   ```sh
+   cd ~/fsd-wheelchair/ml && ../.venv/bin/python -m fsd_ml.drive_loop --driver remote:<url> --goal 5,0 --dry
+   ```
+   Check `frame_age_ms` stays under 500 and `decision_hz` is about 3-4.
+7. **Live, wheels up first.** Drop `--dry` and add `WHEELCHAIR_HOST=127.0.0.1` in front (and `--log drive.jsonl`).
+   Or as a unit: write `/home/arduino/drive-loop.env`:
+   ```sh
+   DRIVER_URL=https://<omnivla>.modal.run
+   LOOP_ARGS=--goal 5,0 --fwd 25 --log /home/arduino/drive.jsonl
+   WHEELCHAIR_HOST=127.0.0.1
+   ```
+   and `sudo systemctl start drive-loop` / `stop drive-loop`. Frames older than 500 ms or a failed model call send
+   nothing, so the chair stops within ~0.9 s (0.6 s hold + 0.3 s deadman). Pushing the real stick ends the loop.
+   Ctrl-C (or `systemctl stop`) stops the chair and hands back the stick. Afterwards set `min_containers=0` and redeploy.
+
 ## Files
 - `firmware/sketch.ino`: software I2C target faking the MLX90393 + software I2C master reading the real stick.
 - `wheelchair.py`: the control interface (Mac). `teleop.py`: hold-to-drive window.
 - `board/wheelchaird.py` + `.service`: the feeder daemon on the UNO Q.
+- `board/drive-service.service`, `board/drive-loop.service`: the Phase 1 loop on the UNO Q (above).
 - `tools/decode_i2c.py`, `tools/decode2.py`: decode raw I2C captures.
