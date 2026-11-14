@@ -16,8 +16,6 @@ The URL is public. To require a token, create a Modal secret named
 below, and set the same variable where the pipeline runs.
 """
 
-from __future__ import annotations
-
 import modal
 
 DRIVER = "s2e"
@@ -41,6 +39,10 @@ image = (
 )
 
 # Checkpoints are downloaded once and kept here between container starts.
+# Imported where the handlers below can see it by name: FastAPI looks the types up.
+with image.imports():
+    from fastapi import FastAPI, HTTPException, Request
+
 weights = modal.Volume.from_name("fsd-weights", create_if_missing=True)
 
 
@@ -55,7 +57,6 @@ weights = modal.Volume.from_name("fsd-weights", create_if_missing=True)
 @modal.concurrent(max_inputs=4)
 @modal.asgi_app()
 def serve():
-    from fastapi import FastAPI, HTTPException, Request
 
     from fsd_ml import remote
     from fsd_ml import weights as checkpoints

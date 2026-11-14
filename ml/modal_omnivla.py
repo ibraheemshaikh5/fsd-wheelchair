@@ -4,8 +4,8 @@ Not yet run against Modal. The first start downloads a 16 GB checkpoint into a
 Modal volume, which takes several minutes; later starts reuse it.
 
     uv run --with modal modal setup                    # once, to log in
-    uv run --with modal modal serve modal_omnivla.py   # temporary URL, live reload
-    uv run --with modal modal deploy modal_omnivla.py  # permanent URL
+    uv run --with modal modal run modal_omnivla.py::download   # fetch the checkpoint, no GPU
+    uv run --with modal modal deploy modal_omnivla.py          # permanent URL
 
 Then, from this folder:
 
@@ -17,8 +17,6 @@ The URL is public. To require a token, create a Modal secret named
 below, and set the same variable where the pipeline runs.
 """
 
-from __future__ import annotations
-
 import modal
 
 WEIGHTS_PATH = "/weights"
@@ -27,48 +25,70 @@ CODE = "/opt/OmniVLA"
 
 app = modal.App("fsd-omnivla")
 
-# OmniVLA's own pins (its SETUP.md and pyproject.toml). Its packaging has a typo
-# that breaks a plain install, so the dependencies are listed here instead.
+# Only what running the model needs, at OmniVLA's own pinned versions. Its full
+# dependency list (TensorFlow, dataset tooling) is for training and does not
+# resolve with pip; four package __init__ files that pull those in are emptied.
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("git")
-    .pip_install("numpy==1.26.4", "torch==2.2.0", "torchvision==0.17.0", "torchaudio==2.2.0")
-    .pip_install(
-        "accelerate>=0.25.0",
-        "draccus==0.8.0",
-        "einops",
-        "huggingface_hub==0.29.1",
-        "json-numpy",
-        "jsonlines",
-        "peft==0.11.1",
-        "protobuf",
-        "rich",
-        "sentencepiece==0.1.99",
+    .uv_pip_install(
+        "numpy==1.26.4",
+        "torch==2.2.0",
+        "torchvision==0.17.0",
         "timm==0.9.10",
         "tokenizers==0.19.1",
+        "sentencepiece==0.1.99",
         "transformers @ git+https://github.com/moojink/transformers-openvla-oft.git",
-        "tensorflow==2.15.0",
-        "tensorflow_datasets==4.9.3",
-        "tensorflow_graphics==2021.12.3",
-        "dlimp @ git+https://github.com/moojink/dlimp_openvla",
-        "diffusers==0.11.1",
-        "wandb",
-        "matplotlib",
-        "imageio",
-        "utm",
-        "fastapi[standard]",
-        "httpx>=0.27",
+        "huggingface_hub==0.29.1",
+        "accelerate>=0.25.0",
+        "peft==0.11.1",
+        "einops",
+        "protobuf",
+        "rich",
         "pillow>=10",
+        "httpx>=0.27",
+        "fastapi>=0.110",
+        "uvicorn>=0.30",
     )
     .run_commands(
         f"git clone --depth 1 https://github.com/NHirose/OmniVLA.git {CODE}",
-        f"pip install --no-deps -e {CODE}",
+        f"cd {CODE}/prismatic && : > __init__.py && : > vla/__init__.py"
+        " && : > training/__init__.py && : > models/__init__.py",
     )
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "0", "TOKENIZERS_PARALLELISM": "false"})
+    # Parallel downloads: the checkpoint is 16 GB and crawls without this.
+    .uv_pip_install("hf_transfer")
+    .env(
+        {
+            "PYTHONPATH": CODE,
+            "TOKENIZERS_PARALLELISM": "false",
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        }
+    )
     .add_local_python_source("fsd_ml")
 )
 
+# Imported where the handlers below can see it by name: FastAPI looks the types up.
+with image.imports():
+    from fastapi import FastAPI, HTTPException, Request
+
 weights = modal.Volume.from_name("fsd-weights", create_if_missing=True)
+
+
+def fetch_checkpoint() -> None:
+    """Download whatever of the checkpoint is missing. Quick when it is all there."""
+    from huggingface_hub import snapshot_download
+
+    from fsd_ml.omnivla import HF_REPO
+
+    weights.reload()
+    snapshot_download(HF_REPO, local_dir=CHECKPOINT)
+    weights.commit()
+
+
+@app.function(image=image, volumes={WEIGHTS_PATH: weights}, timeout=3600)
+def download() -> None:
+    """Fetch the checkpoint without renting a GPU: ``modal run modal_omnivla.py::download``."""
+    fetch_checkpoint()
 
 
 @app.function(
@@ -87,17 +107,11 @@ weights = modal.Volume.from_name("fsd-weights", create_if_missing=True)
 def serve():
     from pathlib import Path
 
-    from fastapi import FastAPI, HTTPException, Request
-    from huggingface_hub import snapshot_download
-
     from fsd_ml import remote
-    from fsd_ml.omnivla import HF_REPO, OmniVLADriver
+    from fsd_ml.omnivla import OmniVLADriver
 
-    checkpoint = Path(CHECKPOINT)
-    if not (checkpoint / "config.json").is_file():
-        snapshot_download(HF_REPO, local_dir=checkpoint)
-        weights.commit()
-    driver = OmniVLADriver(checkpoint)
+    fetch_checkpoint()
+    driver = OmniVLADriver(Path(CHECKPOINT))
 
     web = FastAPI()
 
