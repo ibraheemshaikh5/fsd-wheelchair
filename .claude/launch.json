@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "drive-service",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "cd service && uv run python -m drive_service"
+      ],
+      "port": 8000
+    },
+    {
+      "name": "ipad-app",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "cd app && npm run dev"
+      ],
+      "port": 5174
+    }
+  ]
+}

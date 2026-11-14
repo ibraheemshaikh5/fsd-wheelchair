@@ -1,5 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Web
 node_modules/
 dist/
+web/coverage/
+web/test-results/
+web/playwright-report/
+app/coverage/
+
+# Secrets
 .env
 .env.local
+
+# Recorded drives (large, may contain location and faces)
+recordings/
+
 .DS_Store
