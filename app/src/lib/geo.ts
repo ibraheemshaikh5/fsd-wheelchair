@@ -4,8 +4,6 @@ const R = 6371000
 const rad = (d: number) => (d * Math.PI) / 180
 const deg = (r: number) => (r * 180) / Math.PI
 
-export const HALF_MILE_M = 804.67
-
 export function distanceM(a: LatLng, b: LatLng): number {
   const dLat = rad(b.lat - a.lat)
   const dLng = rad(b.lng - a.lng)

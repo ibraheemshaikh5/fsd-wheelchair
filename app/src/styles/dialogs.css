@@ -168,7 +168,7 @@
 
 .gate-problem {
   margin-top: 4px;
-  color: #b3261e;
+  color: var(--red-text);
 }
 
 .gate-status {
@@ -195,8 +195,4 @@
   flex: 1;
   min-height: 56px;
   font-size: 18px;
-}
-
-.btn:disabled {
-  opacity: 0.6;
 }

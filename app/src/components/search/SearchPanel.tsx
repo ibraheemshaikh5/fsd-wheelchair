@@ -3,7 +3,7 @@ import type { LatLng, Place } from '../../types'
 import { useLatest } from '../../hooks/useLatest'
 import { distanceLabel } from '../../lib/format'
 import { classifySpokenGoal } from '../../services/goals'
-import { searchPlaces, suggestPlaces, type PlaceSuggestion } from '../../services/places'
+import { asSuggestion, searchPlaces, suggestPlaces, type PlaceSuggestion } from '../../services/places'
 import { CloseIcon, MicIcon, PinIcon, SearchIcon } from '../icons'
 import { VoiceOverlay, type VoiceQuestion } from './VoiceOverlay'
 
@@ -19,25 +19,35 @@ interface Props {
   /** Set while a route to the chosen place is being planned. */
   pendingId: string | null
   error: string | null
+  /** The rider changed the search, so any earlier route error no longer applies. */
+  onEdit: () => void
 }
 
 type Status = 'empty' | 'loading' | 'done' | 'failed'
 
-/** One row under the search bar: a type-ahead suggestion or a full search result. */
-interface Row {
-  id: string
-  name: string
-  address?: string
-  distanceM: number | null
-  pick: () => Promise<Place>
+/**
+ * Publishes the visible height as --vvh on <html>. On iPad the on-screen
+ * keyboard shrinks the visual viewport but not 100dvh, so without this the
+ * results list runs on under the keyboard instead of scrolling above it.
+ */
+function useVisibleHeightVar() {
+  useEffect(() => {
+    const vv = window.visualViewport
+    if (!vv) return
+    const root = document.documentElement
+    const update = () => root.style.setProperty('--vvh', `${vv.height}px`)
+    update()
+    vv.addEventListener('resize', update)
+    return () => {
+      vv.removeEventListener('resize', update)
+      root.style.removeProperty('--vvh')
+    }
+  }, [])
 }
 
-const fromSuggestion = (s: PlaceSuggestion): Row => ({ ...s, pick: s.resolve })
-const fromPlace = (p: Place): Row => ({ ...p, pick: async () => p })
-
-export function SearchPanel({ origin, onResults, onSelect, onIndoorGoal, pendingId, error }: Props) {
+export function SearchPanel({ origin, onResults, onSelect, onIndoorGoal, pendingId, error, onEdit }: Props) {
   const [query, setQuery] = useState('')
-  const [rows, setRows] = useState<Row[]>([])
+  const [rows, setRows] = useState<PlaceSuggestion[]>([])
   const [status, setStatus] = useState<Status>('empty')
   const [pickingId, setPickingId] = useState<string | null>(null)
   const [pickError, setPickError] = useState<string | null>(null)
@@ -45,14 +55,28 @@ export function SearchPanel({ origin, onResults, onSelect, onIndoorGoal, pending
   const [voiceNote, setVoiceNote] = useState<string | null>(null)
   const [voiceQuestion, setVoiceQuestion] = useState<VoiceQuestion | null>(null)
   const latestRequest = useRef(0)
+  // Bumped whenever the voice sheet closes, so a spoken search that finishes
+  // after Cancel can't still pick a destination.
+  const voiceSession = useRef(0)
   const suggestTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const originRef = useLatest(origin)
   const busyId = pickingId ?? pendingId
 
-  useEffect(() => () => clearTimeout(suggestTimer.current), [])
+  useVisibleHeightVar()
+
+  // Once the panel is gone (a trip started), drop any lookup still in flight,
+  // or its late answer would leave stale pins that reappear after End Trip.
+  useEffect(
+    () => () => {
+      clearTimeout(suggestTimer.current)
+      latestRequest.current++
+      voiceSession.current++
+    },
+    [],
+  )
 
   /** Runs one lookup, ignoring its answer if a newer one has started since. */
-  async function load<T>(lookup: () => Promise<T[]>, toRow: (item: T) => Row): Promise<T[] | null> {
+  async function load<T>(lookup: () => Promise<T[]>, toRow: (item: T) => PlaceSuggestion): Promise<T[] | null> {
     const id = ++latestRequest.current
     setStatus('loading')
     setPickError(null)
@@ -74,7 +98,7 @@ export function SearchPanel({ origin, onResults, onSelect, onIndoorGoal, pending
   /** Full search: every match, pinned on the map. */
   async function search(text: string): Promise<Place[] | null> {
     clearTimeout(suggestTimer.current)
-    const places = await load(() => searchPlaces(text, originRef.current), fromPlace)
+    const places = await load(() => searchPlaces(text, originRef.current), asSuggestion)
     if (places) onResults(places)
     return places
   }
@@ -82,6 +106,7 @@ export function SearchPanel({ origin, onResults, onSelect, onIndoorGoal, pending
   /** The rider edited the text: show suggestions for it after a short pause. */
   function type(text: string) {
     setQuery(text)
+    onEdit()
     onResults([])
     clearTimeout(suggestTimer.current)
     if (!text.trim()) {
@@ -91,21 +116,25 @@ export function SearchPanel({ origin, onResults, onSelect, onIndoorGoal, pending
       return
     }
     suggestTimer.current = setTimeout(
-      () => void load(() => suggestPlaces(text, originRef.current), fromSuggestion),
+      () => void load(() => suggestPlaces(text, originRef.current), (s) => s),
       SUGGEST_DELAY_MS,
     )
   }
 
   function submit(e: FormEvent) {
     e.preventDefault()
+    onEdit()
     if (query.trim()) void search(query)
   }
 
-  async function pick(row: Row) {
+  async function pick(row: PlaceSuggestion) {
+    // The rider has chosen: a search or suggestion still running is now stale.
+    clearTimeout(suggestTimer.current)
+    latestRequest.current++
     setPickingId(row.id)
     setPickError(null)
     try {
-      onSelect(await row.pick())
+      onSelect(await row.resolve())
     } catch (e) {
       console.error('Place lookup failed', e)
       setPickError(`Couldn’t look up ${row.name}. Try again.`)
@@ -115,12 +144,14 @@ export function SearchPanel({ origin, onResults, onSelect, onIndoorGoal, pending
   }
 
   function closeVoice() {
+    voiceSession.current++
     setVoiceOpen(false)
     setVoiceNote(null)
     setVoiceQuestion(null)
   }
 
   async function handleSpeech(transcript: string) {
+    const session = ++voiceSession.current
     const goal = classifySpokenGoal(transcript)
     if (goal.kind === 'indoor') {
       closeVoice()
@@ -130,6 +161,8 @@ export function SearchPanel({ origin, onResults, onSelect, onIndoorGoal, pending
     setQuery(goal.query)
     setVoiceNote(`Finding “${goal.query}”…`)
     const places = await search(goal.query)
+    // Cancelled (or the panel closed) while searching: leave the destination alone.
+    if (voiceSession.current !== session) return
     setVoiceNote(null)
     if (places?.length) {
       // Nearest match becomes the destination; the rider still has to press Start.

@@ -10,7 +10,8 @@
 
 .ring-labels text {
   fill: var(--text-3);
-  font-size: 15px;
+  /* the view is scaled down to fit the pane, so this renders at about 17px */
+  font-size: 22px;
   font-weight: 600;
 }
 
@@ -20,7 +21,7 @@
   align-items: center;
   gap: 10px;
   padding: max(18px, env(safe-area-inset-top)) 24px 0 24px;
-  font-size: 15px;
+  font-size: 19px;
   font-weight: 600;
   color: var(--text-2);
 }
@@ -29,12 +30,14 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
+  min-height: 44px;
   padding: 0 14px 0 12px;
   border-radius: 999px;
   background: var(--card);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   color: var(--text);
+  /* "Self-driving" would otherwise break at its hyphen when the header is tight. */
+  white-space: nowrap;
 }
 
 .mode-chip i {
@@ -66,14 +69,21 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
 .drive-top {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 16px;
+  /* The camera row is in flow, so on a short pane (large view plus an alert)
+     this block is the one that gives up height: its bottom (the camera) is
+     clipped rather than the Stop button being pushed off the screen. */
+  min-height: 0;
+  overflow: hidden;
   padding: 10px 24px 0;
 }
 
@@ -124,7 +134,7 @@
 .speed-arc em {
   position: relative;
   display: block;
-  font-size: 12px;
+  font-size: 15px;
   font-style: normal;
   font-weight: 600;
   letter-spacing: 0.12em;
@@ -136,7 +146,7 @@
 }
 
 .speed-arc em {
-  margin-top: 16px;
+  margin-top: 12px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -152,30 +162,51 @@
 }
 
 .drive-reason.slowing {
-  color: var(--amber);
+  color: var(--amber-text);
 }
 
 .drive-reason.blocked {
-  color: var(--red);
+  color: var(--red-text);
+}
+
+/* With the camera open it takes the reason's place beside the speed, and the
+   reason wraps onto its own line below: nothing the rider needs is covered,
+   and the chair view underneath stays mostly visible. */
+.drive-top.with-camera .drive-reason {
+  order: 3;
+  flex-basis: 100%;
+  margin-top: 0;
 }
 
 .camera-inset {
-  position: absolute;
-  top: 10px;
-  right: 24px;
+  position: relative;
+  z-index: 2;
   display: grid;
   place-items: center;
-  width: min(46%, 300px);
+  flex: 1 1 0;
+  max-width: 300px;
+  margin-left: auto;
   aspect-ratio: 4 / 3;
+  padding: 0;
   overflow: hidden;
   border-radius: 14px;
   background: #1b1d20;
   box-shadow: var(--shadow);
   color: rgba(255, 255, 255, 0.75);
-  font-size: 14px;
+  font-size: 15px;
+  transition: max-width 0.25s var(--ease);
 }
 
-.camera-inset video {
+/* Tapped: the full row, so the rider can see what the phone sees. Capped so
+   the full-width indoor pane still has room for the drive control below. */
+.camera-inset.large {
+  order: 4;
+  flex-basis: 100%;
+  max-width: min(100%, 560px);
+}
+
+.camera-inset video,
+.camera-inset img {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -183,8 +214,16 @@
   object-fit: cover;
 }
 
-.camera-inset span {
+.camera-inset.stale img {
+  opacity: 0.45;
+}
+
+.camera-note {
   position: relative;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
 }
 
 .takeover {
@@ -276,7 +315,7 @@
   padding: 10px 20px 10px 29px;
   border-top: 1px solid var(--line);
   background: rgba(0, 0, 0, 0.025);
-  font-size: 16px;
+  font-size: 18px;
   color: var(--text-2);
 }
 
@@ -290,7 +329,7 @@
 }
 
 .turn-next-distance {
-  font-size: 14px;
+  font-size: 17px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -321,14 +360,14 @@
   display: flex;
   align-items: baseline;
   gap: 18px;
-  font-size: 16px;
+  font-size: 18px;
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
 }
 
 .trip-stats strong {
   flex: 1;
-  font-size: 22px;
+  font-size: 26px;
   font-weight: 600;
   color: var(--text);
 }
@@ -341,4 +380,87 @@
 .trip-arrived {
   font-size: 22px;
   font-weight: 600;
+}
+
+/* Quiet so a trip is not ended by accident, but dark enough to find at a glance. */
+.trip-card .btn-quiet {
+  color: var(--text);
+}
+
+/* ---------- chair link ---------- */
+
+.link-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 14px 0 10px;
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  color: var(--text);
+  white-space: nowrap;
+  /* At 19px the header (mode, link, camera, battery) is wider than the 42vw
+     pane, so this chip is the one that gives way: its text ellipsizes and the
+     coloured icon still shows the link state. */
+  min-width: 0;
+  overflow: hidden;
+}
+
+.link-chip svg {
+  flex: none;
+  color: var(--link-color, var(--text-3));
+}
+
+.link-chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.link-chip.ok {
+  --link-color: var(--green);
+}
+
+.link-chip.warn {
+  --link-color: var(--amber);
+}
+
+.link-chip.bad {
+  --link-color: var(--red);
+  color: var(--red-text);
+}
+
+.link-chip.sim {
+  background: rgba(0, 0, 0, 0.07);
+  box-shadow: none;
+  color: var(--text-2);
+}
+
+.link-detail {
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+/* ---------- self-driving unavailable ---------- */
+
+.engage-blocked {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.engage-blocked p {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  text-align: center;
+  color: var(--text-2);
+}
+
+/* A narrow drive pane (smaller iPads) keeps the chip to its icon and label. */
+@container drive-pane (max-width: 440px) {
+  .link-detail {
+    display: none;
+  }
 }

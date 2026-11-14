@@ -3,18 +3,23 @@
   --card: rgba(255, 255, 255, 0.94);
   --text: #1c1d1f;
   --text-2: #5c5f66;
-  --text-3: #8d9096;
+  /* 4.5:1 on the light backgrounds, so hint text survives glare */
+  --text-3: #6b6e75;
   --line: rgba(0, 0, 0, 0.08);
   --blue: #3e6ae1;
-  --red: #e03a3a;
+  --red: #c62828;
   --amber: #d98a1f;
-  --pin: #3a3d44;
+  --green: #2f9e5b;
+  /* The bright amber and red read well as fills but not as text; these darker
+     shades keep warnings legible in sunlight. */
+  --amber-text: #9a5a00;
+  --red-text: #b3261e;
 
   --viz-bg: #f2f2f3;
   --viz-ground: #e9eaec;
   --viz-edge: #ea4a45;
   --viz-ring: rgba(0, 0, 0, 0.09);
-  --viz-idle-line: #b9bcc2;
+  --viz-idle-line: #7d8088;
   --viz-obstacle: #9a9da3;
 
   --map-land: #e9e9ea;
@@ -73,7 +78,8 @@ input:focus-visible {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  min-height: 48px;
+  /* 56px leaves room for limited dexterity on a moving chair */
+  min-height: 56px;
   padding: 0 22px;
   border-radius: 10px;
   font-size: 17px;
@@ -87,9 +93,14 @@ input:focus-visible {
   transform: scale(0.97);
 }
 
+/* A scale alone is invisible in sunlight, so a press also darkens the button. */
 .btn-quiet {
   background: rgba(0, 0, 0, 0.07);
   color: var(--text-2);
+}
+
+.btn-quiet:active {
+  background: rgba(0, 0, 0, 0.16);
 }
 
 .btn-primary {
@@ -97,11 +108,29 @@ input:focus-visible {
   color: #fff;
 }
 
+.btn-primary:active {
+  background: #2f55c0;
+}
+
 .btn-stop {
   background: var(--red);
   color: #fff;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.btn-stop:active {
+  background: #a51f1f;
+}
+
+/* Disabled must not look pressable: flat grey, no shadow, no press motion. */
+.btn:disabled,
+.btn:disabled:active {
+  transform: none;
+  cursor: default;
+  background: #c5c8ce;
+  box-shadow: none;
+  color: var(--text-2);
 }
 
 .btn-xl {
@@ -116,14 +145,14 @@ input:focus-visible {
   display: grid;
   place-items: center;
   flex: none;
-  width: 44px;
-  height: 44px;
+  width: 56px;
+  height: 56px;
   border-radius: 50%;
   color: var(--text-2);
 }
 
 .icon-btn:active {
-  background: rgba(0, 0, 0, 0.07);
+  background: rgba(0, 0, 0, 0.14);
 }
 
 /* ---------- motion ---------- */

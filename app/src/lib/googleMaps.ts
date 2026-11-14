@@ -13,7 +13,7 @@ function fail() {
 }
 
 /** True once the Maps SDK is loaded and the key has not been rejected. */
-export function googleReady(): boolean {
+function googleReady(): boolean {
   return !failed && typeof google !== 'undefined' && Boolean(google.maps?.Map)
 }
 

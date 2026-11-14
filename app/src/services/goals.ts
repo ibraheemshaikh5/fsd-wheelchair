@@ -16,8 +16,13 @@ export type SpokenGoal =
 
 const FILLER = /^(please\s+)?(can you\s+|could you\s+)?(take|bring|drive|get|navigate|go|head)(\s+me)?\s+(over\s+)?to\s+/i
 
+// Kinds of place that only exist outside: settles it even with "nearest" in front.
 const OUTDOOR =
-  /\b(\d+\s+\w+|street|st|road|rd|avenue|ave|boulevard|blvd|lane|highway|square|nearest|closest|nearby|near me|store|shop|cafe|coffee|restaurant|pizza|pharmacy|grocery|market|park|bank|atm|station|bus stop|library|school|hospital|clinic|gym|church|post office|town hall|mall)\b/i
+  /\b(\d+\s+\w+|street|st|road|rd|avenue|ave|boulevard|blvd|lane|highway|square|store|shop|cafe|coffee|restaurant|pizza|pharmacy|grocery|market|park|bank|atm|station|bus stop|library|school|hospital|clinic|gym|church|post office|town hall|mall)\b/i
+
+// "Nearest" alone leans outdoor, but only once the noun has had its say:
+// "the nearest bathroom" is down the hall, "the nearest Walgreens" is on the map.
+const QUALIFIER = /\b(nearest|closest|nearby|near me)\b/i
 
 const INDOOR =
   /\b(kitchen|bathroom|restroom|toilet|bedroom|living room|dining room|laundry|hallway|hall|corridor|lobby|elevator|lift|stairs|upstairs|downstairs|closet|garage|room|office|door|window|couch|sofa|table|desk|bed|fridge|refrigerator|sink|counter|tv|television|charger|exit|entrance)\b/i
@@ -33,5 +38,6 @@ export function classifySpokenGoal(transcript: string): SpokenGoal {
 
   if (OUTDOOR.test(target)) return { kind: 'outdoor', query }
   if (INDOOR.test(target) || INSTRUCTION.test(target)) return { kind: 'indoor', instruction: said }
+  if (QUALIFIER.test(target)) return { kind: 'outdoor', query }
   return { kind: 'unsure', query }
 }

@@ -22,12 +22,12 @@ interface Props {
 }
 
 export function VoiceOverlay({ note, question, onFinal, onClose }: Props) {
-  const { listening, transcript, error, start, stop } = useSpeechRecognition(onFinal)
+  const { listening, transcript, error, start } = useSpeechRecognition(onFinal)
 
+  // Listen straight away. The hook stops recognition itself on unmount.
   useEffect(() => {
     if (speechSupported) start()
-    return stop
-  }, [start, stop])
+  }, [start])
 
   const headline = !speechSupported
     ? 'Voice isn’t available in this browser'

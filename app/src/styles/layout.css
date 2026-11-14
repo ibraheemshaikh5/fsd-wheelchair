@@ -6,6 +6,7 @@
 }
 
 .drive-pane {
+  container: drive-pane / inline-size;
   flex: none;
   width: var(--drive-width);
   overflow: hidden;
@@ -73,7 +74,7 @@
   z-index: 1;
   background: var(--card);
   box-shadow: var(--shadow);
-  font-size: 15px;
+  font-size: 19px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -91,16 +92,17 @@
   right: 24px;
   bottom: max(44px, env(safe-area-inset-bottom));
   z-index: 1;
-  min-height: 44px;
-  padding: 0 18px;
+  min-height: 56px;
+  padding: 0 22px;
   border-radius: 999px;
   background: var(--card);
   box-shadow: var(--shadow);
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 600;
   color: var(--text-2);
 }
 
 .map-style-btn:active {
   transform: scale(0.97);
+  background: #e3e4e7;
 }

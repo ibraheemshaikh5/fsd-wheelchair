@@ -4,7 +4,9 @@
   display: flex;
   flex-direction: column;
   width: min(420px, 100%);
-  max-height: 100%;
+  /* --vvh is the visible height (set by SearchPanel), so with the keyboard up
+     the results scroll above it instead of under it. 40px is the overlay padding. */
+  max-height: min(100%, calc(var(--vvh, 100dvh) - 40px));
   overflow: hidden;
   animation: rise 0.35s var(--ease);
 }
@@ -41,7 +43,11 @@
   display: none;
 }
 
+/* Bigger than the other icon buttons: it is the main way to choose a destination
+   for riders with limited hand control. */
 .mic-btn {
+  width: 60px;
+  height: 60px;
   background: var(--blue);
   color: #fff;
 }

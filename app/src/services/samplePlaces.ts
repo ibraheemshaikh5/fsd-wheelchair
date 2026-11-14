@@ -12,7 +12,7 @@ const SAMPLES: [string, string, number, number][] = [
   ['Public Library', 'library books', 40, 540],
   ['Corner Grocery', 'grocery market food store', 120, 260],
   ['Town Hall', 'government office', 75, 760],
-  ['Riverside Clinic', 'doctor clinic medical health', 200, 1100],
+  ['Riverside Clinic', 'doctor clinic medical health', 200, 700],
 ]
 
 /** Sample places around `origin` whose name or tags match every typed word. */

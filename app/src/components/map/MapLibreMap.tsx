@@ -20,6 +20,9 @@ setWorkerUrl(workerUrl)
 // MapLibre zoom levels are one lower than Google's for the same scale.
 const HOME = HOME_ZOOM - 1
 const FOLLOW = FOLLOW_ZOOM - 1.5
+// Street-map label colour. Dark enough to read in sunlight (about 5:1 on the grey land);
+// labels are only coloured by the satellite effect, which also handles the street map.
+const STREET_LABEL = '#5f6268'
 const EMPTY: FeatureCollection = { type: 'FeatureCollection', features: [] }
 const CHAIR_SVG =
   '<svg viewBox="-17 -17 34 34" width="34" height="34">' +
@@ -40,7 +43,10 @@ function boundsOf(points: LatLng[]): LngLatBoundsLike {
   ]
 }
 
-/** The in-car look: light grey land, white roads, darker grey buildings, no colour. */
+/**
+ * The in-car look: light grey land, white roads, darker grey buildings, no colour.
+ * Labels and the search radius are coloured by the street/satellite effect instead.
+ */
 function applyTeslaLook(map: GlMap) {
   for (const layer of map.getStyle().layers) {
     const source = 'source-layer' in layer ? layer['source-layer'] : undefined
@@ -66,9 +72,6 @@ function applyTeslaLook(map: GlMap) {
       } else if (source === 'waterway') {
         map.setPaintProperty(id, 'line-color', '#cfd0d3')
       }
-    } else if (layer.type === 'symbol') {
-      map.setPaintProperty(id, 'text-color', '#7d7f84')
-      map.setPaintProperty(id, 'text-halo-color', '#ffffff')
     }
   }
 }
@@ -122,7 +125,7 @@ export function MapLibreMap({ state, results, onSelect, satellite }: MapProps) {
       // Under the labels, so satellite keeps its street names.
       m.addLayer({ id: 'satellite', type: 'raster', source: 'satellite', layout: { visibility: 'none' } }, firstLabel)
       m.addSource('radius', { type: 'geojson', data: EMPTY })
-      m.addLayer({ id: 'radius', type: 'line', source: 'radius', paint: { 'line-color': ROUTE_BLUE, 'line-width': 2, 'line-opacity': 0.45 } })
+      m.addLayer({ id: 'radius', type: 'line', source: 'radius', paint: { 'line-width': 2 } })
       m.addSource('route', { type: 'geojson', data: EMPTY })
       const round = { 'line-cap': 'round', 'line-join': 'round' } as const
       m.addLayer({ id: 'route-casing', type: 'line', source: 'route', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 11 } })
@@ -144,7 +147,7 @@ export function MapLibreMap({ state, results, onSelect, satellite }: MapProps) {
     map.setPaintProperty('radius', 'line-opacity', satellite ? 0.85 : 0.45)
     for (const layer of map.getStyle().layers) {
       if (layer.type !== 'symbol') continue
-      map.setPaintProperty(layer.id, 'text-color', satellite ? '#ffffff' : '#7d7f84')
+      map.setPaintProperty(layer.id, 'text-color', satellite ? '#ffffff' : STREET_LABEL)
       map.setPaintProperty(layer.id, 'text-halo-color', satellite ? 'rgba(0,0,0,0.75)' : '#ffffff')
     }
   }, [map, satellite])

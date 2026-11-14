@@ -124,10 +124,10 @@ function Person({ x, z, ringColor }: { x: number; z: number; ringColor: string |
 interface Props {
   state: DriveState
   /** The pane is much wider than it is tall: fit the height and let the ground run off the sides. */
-  wide?: boolean
+  wide: boolean
 }
 
-export function DriveView({ state, wide = false }: Props) {
+export function DriveView({ state, wide }: Props) {
   const driving = state.mode === 'driving'
   const color = driving ? STATUS_COLOR[state.pathStatus] : 'var(--viz-idle-line)'
   // Reach further ahead the faster the chair is going.

@@ -3,6 +3,8 @@ import { loadGoogleMaps } from '../../lib/googleMaps'
 import { SEARCH_RADIUS_M } from '../../services/places'
 import { CHAIR_RED, FOLLOW_ZOOM, HOME_ZOOM, ROUTE_BLUE, type MapProps } from './shared'
 
+const LABEL_TEXT = '#5f6268'
+
 // The in-car look: light grey land, white roads, darker grey buildings, no colour.
 const TESLA_STYLE: google.maps.MapTypeStyle[] = [
   { featureType: 'landscape.natural', elementType: 'geometry', stylers: [{ color: '#ececed' }] },
@@ -23,10 +25,11 @@ const TESLA_STYLE: google.maps.MapTypeStyle[] = [
   { featureType: 'transit', stylers: [{ visibility: 'off' }] },
   { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#d0d0d0' }] },
   { elementType: 'labels.icon', stylers: [{ saturation: -100 }, { lightness: 20 }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#8b8d92' }] },
+  // Labels dark enough to read in sunlight (about 5:1 on the grey land).
+  { elementType: 'labels.text.fill', stylers: [{ color: LABEL_TEXT }] },
   // A halo the colour of the land rather than white, so the letters read thin.
   { elementType: 'labels.text.stroke', stylers: [{ color: '#ececed' }, { weight: 2 }] },
-  { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: '#9a9ca1' }] },
+  { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: LABEL_TEXT }] },
   { featureType: 'road', elementType: 'labels.text.stroke', stylers: [{ color: '#ffffff' }, { weight: 1 }] },
 ]
 
@@ -109,15 +112,25 @@ export function GoogleMap({ state, results, onSelect, satellite }: MapProps) {
       fillOpacity: 0,
       clickable: false,
     })
+    let clamp: google.maps.MapsEventListener | null = null
     if (results.length) {
       const bounds = new google.maps.LatLngBounds(position)
       results.forEach((p) => bounds.extend(p.location))
       map.fitBounds(bounds, 70)
+      // fitBounds has no zoom cap, so one nearby result would zoom right in.
+      // Cap it once the framing settles, like the keyless map's maxZoom.
+      clamp = google.maps.event.addListenerOnce(map, 'idle', () => {
+        if ((map.getZoom() ?? 0) > HOME_ZOOM) map.setZoom(HOME_ZOOM)
+      })
     } else {
       map.setCenter(position)
       map.setZoom(HOME_ZOOM)
     }
-    return () => circle.setMap(null)
+    return () => {
+      // A re-run before the map settles must not clamp the next framing.
+      clamp?.remove()
+      circle.setMap(null)
+    }
   }, [map, mode, position.lat, position.lng, results, satellite])
 
   // Search result pins

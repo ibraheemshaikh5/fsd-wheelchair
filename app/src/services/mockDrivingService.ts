@@ -1,9 +1,9 @@
 import type { DriveState, LocalPoint, Obstacle, PathStatus, Place, Route } from '../types'
-import { onDeviceLocation } from '../lib/deviceLocation'
+import { DEFAULT_POSITION, onDeviceLocation } from '../lib/deviceLocation'
 import { distanceLabel } from '../lib/format'
 import { angleDelta, toLocal } from '../lib/geo'
 import { pointAt, upcomingSteps } from '../lib/route'
-import type { DrivingService } from './drivingService'
+import type { CameraFeed, DrivingService } from './drivingService'
 import { planRoute } from './routing'
 
 const TICK_MS = 100
@@ -13,8 +13,6 @@ const MAX_MPS = 1.8 // about 4 mph
 const ACCEL_MPS2 = 0.6
 const LOOKAHEAD_M = 30
 const INDOOR_DEMO_M = 25 // the pretend indoor trip ends after this distance
-// Used until the iPad's location is known, and whenever access is refused.
-const DEFAULT_POSITION = { lat: 42.3868, lng: -71.1768 }
 
 // How close to the chair's line of travel, and how far ahead, something has to be
 // before the chair reacts to it.
@@ -36,7 +34,10 @@ interface Walker extends Obstacle {
 export class MockDrivingService implements DrivingService {
   private state: DriveState = {
     mode: 'idle',
+    source: 'simulated',
     connected: true,
+    link: { service: 'online', phone: 'ok', gpsAccuracyM: null, cameraFps: null, positionFrom: 'default', issue: null },
+    engageBlocked: null,
     position: DEFAULT_POSITION,
     headingDeg: 0,
     speedMps: 0,
@@ -64,12 +65,16 @@ export class MockDrivingService implements DrivingService {
   private nextWalkerId = 0
   private planning = 0
   private camera: MediaStream | null = null
+  // One getUserMedia call at a time, plus a counter closeCamera bumps, so a camera
+  // closed before the iPad's prompt or stream resolves never leaves a live stream behind.
+  private cameraOpening: Promise<MediaStream | null> | null = null
+  private cameraGen = 0
 
   constructor() {
     // The real chair position comes from the phone mounted on it. Here the
     // iPad's own location stands in, so searches are centred somewhere real.
     onDeviceLocation((position) => {
-      if (this.state.mode === 'idle') this.set({ position })
+      if (this.state.mode === 'idle') this.set({ position, link: { ...this.state.link, positionFrom: 'ipad' } })
     })
     if (import.meta.env.DEV) {
       window.addEventListener('keydown', (e) => {
@@ -140,20 +145,27 @@ export class MockDrivingService implements DrivingService {
     this.set({ mode: 'ready', speedMps: 0, pathStatus: 'clear', yieldingToId: null, reason: 'Holding' })
   }
 
-  async openCamera() {
+  async openCamera(): Promise<CameraFeed | null> {
     // The real feed comes from the phone on the chair. The iPad's own camera stands in.
-    if (this.camera) return this.camera
-    try {
-      this.camera = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
-    } catch {
-      this.camera = null
+    const gen = this.cameraGen
+    this.cameraOpening ??= startIpadCamera()
+    const stream = this.camera ?? (await this.cameraOpening)
+    if (gen !== this.cameraGen) {
+      // Closed while waiting: this stream belongs to no one, so turn it off.
+      stopStream(stream)
+      return null
     }
-    return this.camera
+    this.camera = stream
+    // Refused or missing: forget the attempt so the next open can ask again.
+    if (!stream) this.cameraOpening = null
+    return stream ? { kind: 'stream', stream } : null
   }
 
   closeCamera() {
-    this.camera?.getTracks().forEach((t) => t.stop())
+    this.cameraGen++
+    stopStream(this.camera)
     this.camera = null
+    this.cameraOpening = null
   }
 
   /** Stops the chair and hands control to the rider. */
@@ -251,6 +263,17 @@ export class MockDrivingService implements DrivingService {
       this.walkers.push({ id, kind: 'pedestrian', x: side * (0.95 + Math.random() * 1.8), z: 32, vx: 0, vz: -0.9 })
     }
   }
+}
+
+/** The iPad's rear camera, or null when it is refused or missing. */
+function startIpadCamera(): Promise<MediaStream | null> {
+  return navigator.mediaDevices
+    .getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+    .catch(() => null)
+}
+
+function stopStream(stream: MediaStream | null) {
+  stream?.getTracks().forEach((t) => t.stop())
 }
 
 /** One line on what the chair is doing, most pressing reason first. */

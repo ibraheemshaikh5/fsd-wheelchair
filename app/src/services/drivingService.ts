@@ -1,5 +1,19 @@
 import type { DriveState, Place } from '../types'
+import { LiveDrivingService } from './live/liveDrivingService'
 import { MockDrivingService } from './mockDrivingService'
+
+/** A frame from the chair's camera, as an object URL the service owns and revokes. */
+export interface CameraFrame {
+  /** Null until the first frame arrives. */
+  url: string | null
+  /** False once the frame is too old to show the chair's surroundings. */
+  fresh: boolean
+}
+
+/** The forward camera: a live stream (simulator) or a sequence of JPEG frames (the phone). */
+export type CameraFeed =
+  | { kind: 'stream'; stream: MediaStream }
+  | { kind: 'frames'; subscribe(listener: (frame: CameraFrame) => void): () => void }
 
 /**
  * Everything the iPad needs from the driving service. The service owns all
@@ -27,14 +41,22 @@ export interface DrivingService {
   /** Stops the chair and holds. The destination or goal is kept. */
   disengage(): void
   /**
-   * The chair's forward camera as a live stream, or null if there is none.
+   * The chair's forward camera, or null if there is none.
    * Called when the rider opens the camera inset.
    */
-  openCamera(): Promise<MediaStream | null>
+  openCamera(): Promise<CameraFeed | null>
   /** Called when the rider closes the camera inset. */
   closeCamera(): void
+  /** Stops all background work (sockets, timers, listeners). Optional. */
+  dispose?(): void
 }
 
+/**
+ * The live driving service by default. `?sim` in the address, or
+ * VITE_DRIVING_SERVICE=sim, runs the in-browser simulator instead.
+ */
 export function createDrivingService(): DrivingService {
-  return new MockDrivingService()
+  const simulate =
+    new URLSearchParams(window.location.search).has('sim') || import.meta.env.VITE_DRIVING_SERVICE === 'sim'
+  return simulate ? new MockDrivingService() : new LiveDrivingService()
 }

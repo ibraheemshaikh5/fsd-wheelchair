@@ -63,14 +63,43 @@ export type DriveMode = 'idle' | 'ready' | 'driving' | 'arrived' | 'manual'
 /** Whether the space the chair is about to move into is free. */
 export type PathStatus = 'clear' | 'slowing' | 'blocked'
 
+/**
+ * How the iPad is hearing from the chair.
+ * service  the iPad's own connection to the driving service
+ * phone    the phone on the chair: not connected, connected but its clock or
+ *          readings are not usable yet, or streaming fresh camera and GPS
+ */
+export interface ChairLink {
+  service: 'connecting' | 'online' | 'offline'
+  phone: 'none' | 'waiting' | 'ok'
+  /** GPS accuracy of the latest fresh fix, in metres. */
+  gpsAccuracyM: number | null
+  /** Camera frames per second the service is receiving. */
+  cameraFps: number | null
+  /**
+   * Where `position` came from: a fresh fix from the chair's phone, this iPad,
+   * the phone's last fix (no longer fresh), or a default spot.
+   */
+  positionFrom: 'phone' | 'ipad' | 'phone-stale' | 'default'
+  /** Why the iPad lost the driving service, while it is lost (e.g. too many screens). */
+  issue: string | null
+}
+
 export interface DriveState {
   mode: DriveMode
+  /** 'simulated' when the browser simulator stands in for the driving service. */
+  source: 'live' | 'simulated'
+  /** False when the iPad cannot hear from the chair: the chair stops and the rider must take over. */
   connected: boolean
+  link: ChairLink
+  /** Set when Start Self-Driving cannot be offered, with the reason shown to the rider. */
+  engageBlocked: string | null
   position: LatLng
   headingDeg: number
   speedMps: number
   maxSpeedMps: number
-  batteryPct: number
+  /** Null while the chair does not report its battery. */
+  batteryPct: number | null
   /** Outdoor trip: a map destination with a GPS route. */
   destination: Place | null
   route: Route | null

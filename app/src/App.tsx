@@ -1,6 +1,7 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import type { Place } from './types'
 import { createDrivingService } from './services/drivingService'
+import { ServiceRefusedError } from './services/errors'
 import { useDriveState } from './hooks/useDriveState'
 import { Clock } from './components/Clock'
 import { DrivePane } from './components/drive/DrivePane'
@@ -10,30 +11,49 @@ import { MapPane } from './components/map/MapPane'
 import { SearchPanel } from './components/search/SearchPanel'
 
 const service = createDrivingService()
+// Fast Refresh re-runs this module on edit; close the old service's socket so
+// leaked viewer sockets never use up the service's viewer limit.
+import.meta.hot?.dispose(() => service.dispose?.())
 
 export default function App() {
   const state = useDriveState(service)
   const [results, setResults] = useState<Place[]>([])
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [routeError, setRouteError] = useState<string | null>(null)
+  // Numbers each destination request, so an older one finishing late can't
+  // clear the spinner or post an error for the one the rider made since.
+  const selectSeq = useRef(0)
   const active = state.mode !== 'idle'
   // Indoors there is no map route, so the chair view takes the whole screen.
   const indoor = state.languageGoal !== null
 
   const select = useCallback(async (place: Place) => {
+    const req = ++selectSeq.current
+    const isLatest = () => req === selectSeq.current
     setPendingId(place.id)
     setRouteError(null)
     try {
       await service.setDestination(place)
-      setResults([])
-    } catch {
-      setRouteError(`Couldn’t find a route to ${place.name}.`)
+      if (isLatest()) setResults([])
+    } catch (error) {
+      if (!isLatest()) return
+      // The service explains its own refusals; anything else is a routing failure.
+      setRouteError(
+        error instanceof ServiceRefusedError
+          ? error.message
+          : `Couldn’t find a route to ${place.name}.`,
+      )
     } finally {
-      setPendingId(null)
+      if (isLatest()) setPendingId(null)
     }
   }, [])
 
+  const clearRouteError = useCallback(() => setRouteError(null), [])
+
   const goIndoors = useCallback((instruction: string) => {
+    // An outdoor route still being planned is superseded by this goal.
+    selectSeq.current++
+    setPendingId(null)
     setRouteError(null)
     setResults([])
     void service.setLanguageGoal(instruction)
@@ -63,6 +83,7 @@ export default function App() {
               onIndoorGoal={goIndoors}
               pendingId={pendingId}
               error={routeError}
+              onEdit={clearRouteError}
             />
           )}
         </div>

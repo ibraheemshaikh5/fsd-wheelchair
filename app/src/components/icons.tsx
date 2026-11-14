@@ -54,6 +54,13 @@ export const CameraIcon = (props: IconProps) => (
   </LineIcon>
 )
 
+export const PhoneIcon = ({ size = 18 }: IconProps) => (
+  <LineIcon size={size}>
+    <rect x="7" y="2.5" width="10" height="19" rx="2.5" />
+    <path d="M11 18.5h2" />
+  </LineIcon>
+)
+
 export const SteeringIcon = (props: IconProps) => (
   <LineIcon {...props}>
     <circle cx="12" cy="12" r="9" />
