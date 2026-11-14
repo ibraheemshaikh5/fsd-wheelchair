@@ -1,4 +1,4 @@
-import type { DriveState, LatLng, Place } from '../../types'
+import type { DriveState, LatLng, Place, Route } from '../../types'
 import { DEFAULT_POSITION, onDeviceLocation } from '../../lib/deviceLocation'
 import type { CameraFeed, CameraFrame, DrivingService } from '../drivingService'
 import { ServiceRefusedError } from '../errors'
@@ -16,6 +16,10 @@ import {
 } from './viewerSocket'
 
 const DESTINATION_URL = '/api/destination'
+const GOAL_URL = '/api/goal'
+/** The service takes at most this many route points and this long an instruction. */
+const MAX_ROUTE_POINTS = 2000
+const MAX_INSTRUCTION_CHARS = 200
 /**
  * For showing the picture (not for driving), it is live while the iPad itself
  * received a frame this recently. The service's frame.fresh is the strict
@@ -66,9 +70,21 @@ async function requestFailure(response: Response): Promise<string | null> {
 }
 
 /**
+ * A route's points in the service's shape. A longer route than the service takes
+ * is thinned evenly, always keeping its last point: the destination.
+ */
+export function routePoints(route: Route): { lat: number; lon: number }[] {
+  const all = route.points
+  const step = Math.max(1, Math.ceil(all.length / MAX_ROUTE_POINTS))
+  const kept = all.filter((_, index) => index % step === 0 || index === all.length - 1)
+  return kept.slice(-MAX_ROUTE_POINTS).map((point) => ({ lat: point.lat, lon: point.lng }))
+}
+
+/**
  * The real driving service, over its /ws/viewer socket and /api/destination.
  *
- * The service streams the phone's camera and sensors and keeps the destination;
+ * The service streams the phone's camera and sensors and keeps the trip: the
+ * destination, plus the route or indoor instruction a driving model follows;
  * it does not drive yet, so engage() is never offered (DriveState.engageBlocked
  * says why) and the rider drives with the joystick while the iPad follows along.
  */
@@ -151,14 +167,14 @@ export class LiveDrivingService implements DrivingService {
     if (failure) throw new ServiceRefusedError(`Couldn’t send ${place.name} to the chair: ${failure}`)
     this.trip = { kind: 'place', place, route }
     this.update({ progressM: 0, arrived: false })
+    await this.sendRoute(route)
   }
 
   async setLanguageGoal(instruction: string): Promise<void> {
     this.planning++
-    // Indoor goals stay on the iPad for now; the service only takes map points.
     this.trip = { kind: 'indoor', instruction }
     this.update({ progressM: 0, arrived: false })
-    await this.clearServiceDestination()
+    await this.sendInstruction(instruction)
   }
 
   clearDestination(): void {
@@ -226,12 +242,17 @@ export class LiveDrivingService implements DrivingService {
     if (!this.needsSync) return
     this.needsSync = false
     if (this.trip?.kind === 'place') {
-      const { place } = this.trip
-      void this.sendDestination(place).then((failure) => {
-        if (!failure) return
+      const { place, route } = this.trip
+      void this.sendDestination(place).then(async (failure) => {
+        if (!failure) {
+          await this.sendRoute(route)
+          return
+        }
         console.warn(`Could not resend the destination to the service: ${failure}`)
         // Try again on the next connection; retrying on every status would flood it.
       })
+    } else if (this.trip?.kind === 'indoor') {
+      void this.sendInstruction(this.trip.instruction)
     } else if (status.destination) {
       void this.clearServiceDestination()
     }
@@ -314,6 +335,40 @@ export class LiveDrivingService implements DrivingService {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body,
+      })
+      return await requestFailure(response)
+    } catch (error) {
+      return error instanceof Error ? error.message : 'the service could not be reached'
+    }
+  }
+
+  /**
+   * The route is what a driving model follows. The destination is sent first, so
+   * a service too old to take a route still knows where the rider is going.
+   */
+  private async sendRoute(route: Route): Promise<void> {
+    const points = routePoints(route)
+    if (points.length < 2) return
+    const failure = await this.sendGoal({ kind: 'route', points })
+    if (failure) console.warn(`Could not send the route to the service: ${failure}`)
+  }
+
+  /** Indoors there is no map point: the words themselves are the goal. */
+  private async sendInstruction(instruction: string): Promise<void> {
+    const text = instruction.trim().slice(0, MAX_INSTRUCTION_CHARS)
+    const failure = text ? await this.sendGoal({ kind: 'instruction', text }) : 'nothing was said'
+    if (!failure) return
+    console.warn(`Could not send the instruction to the service: ${failure}`)
+    // At least make sure the chair is not still heading for the last map point.
+    await this.clearServiceDestination()
+  }
+
+  private async sendGoal(goal: object): Promise<string | null> {
+    try {
+      const response = await this.fetchFn(GOAL_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(goal),
       })
       return await requestFailure(response)
     } catch (error) {

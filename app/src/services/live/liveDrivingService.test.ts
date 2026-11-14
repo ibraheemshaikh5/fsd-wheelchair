@@ -8,7 +8,7 @@ import {
   FRAME_URLS_KEPT,
   LiveDrivingService,
   type LiveOptions,
-} from './liveDrivingService'
+ routePoints } from './liveDrivingService'
 import { FakeSocket, ManualTimers, lRoute, status } from './testing'
 
 const ok = () => new Response(JSON.stringify({ success: true, data: null, error: null }))
@@ -157,7 +157,17 @@ describe('LiveDrivingService', () => {
     t.service.clearDestination()
     await Promise.resolve()
     expect(t.service.getState().mode).toBe('idle')
-    expect(t.calls.map((c) => c.init?.method)).toEqual(['POST', 'DELETE', 'DELETE'])
+    // The destination and its route, then the instruction in place of both, then the clear.
+    expect(t.calls.map((c) => `${c.init?.method} ${c.url}`)).toEqual([
+      'POST /api/destination',
+      'POST /api/goal',
+      'POST /api/goal',
+      'DELETE /api/destination',
+    ])
+    const route = JSON.parse(String(t.calls[1].init?.body))
+    expect(route.kind).toBe('route')
+    expect(route.points).toEqual(t.route.points.map((p) => ({ lat: p.lat, lon: p.lng })))
+    expect(JSON.parse(String(t.calls[2].init?.body))).toEqual({ kind: 'instruction', text: 'go to the kitchen' })
   })
 
   it('warns, without throwing, when clearing on the service fails', async () => {
@@ -171,7 +181,8 @@ describe('LiveDrivingService', () => {
     }
     const u = setup({ fetchFn: down as unknown as typeof fetch })
     await u.service.setLanguageGoal('go to the lift')
-    expect(warn).toHaveBeenCalledTimes(2)
+    // Each time: the instruction could not be sent, then nor could the fallback clear.
+    expect(warn).toHaveBeenCalledTimes(4)
   })
 
   it('clears a destination the service still holds from before the iPad reloaded', async () => {
@@ -198,8 +209,28 @@ describe('LiveDrivingService', () => {
     t.socket().drop()
     t.timers.fire(500)
     t.online()
-    await Promise.resolve()
-    expect(t.calls.map((c) => c.init?.method)).toEqual(['POST', 'POST'])
+    await vi.waitFor(() => expect(t.calls).toHaveLength(4))
+    // Destination and route when set, then both again after the reconnect.
+    expect(t.calls.map((c) => c.url)).toEqual(['/api/destination', '/api/goal', '/api/destination', '/api/goal'])
+  })
+
+  it('resends an indoor instruction after reconnecting', async () => {
+    const t = setup()
+    t.online()
+    await t.service.setLanguageGoal('go to the kitchen')
+    t.socket().drop()
+    t.timers.fire(500)
+    t.online()
+    await vi.waitFor(() => expect(t.calls).toHaveLength(2))
+    expect(JSON.parse(String(t.calls[1].init?.body))).toEqual({ kind: 'instruction', text: 'go to the kitchen' })
+  })
+
+  it('thins a route longer than the service takes, keeping its end', () => {
+    const points = Array.from({ length: 5001 }, (_, i) => ({ lat: i / 1e5, lng: 0 }))
+    const sent = routePoints({ points, steps: [], lengthM: 0 })
+    expect(sent.length).toBeLessThanOrEqual(2000)
+    expect(sent[0]).toEqual({ lat: 0, lon: 0 })
+    expect(sent.at(-1)).toEqual({ lat: 0.05, lon: 0 })
   })
 
   it('never engages: self-driving is not available from the service yet', () => {
