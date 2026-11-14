@@ -15,6 +15,36 @@ Sidewalks and indoors.
 - **Sidewalks**: GPS gives position and the route. The loop above applies as written.
 - **Indoors**: no GPS. The destination has to be given another way, which is still [undecided](open-questions.md). The model and chair control stay the same; only steps 2 and 3 change.
 
+## How the models fit together
+
+Two models, one steering at a time. Everything they output passes through the same non-model checks before reaching the chair. See [model.md](model.md) for why these two.
+
+```
+iPad: destination ("coffee shop", or "go to the elevator")
+        │
+        ▼
+  Route planner (not a model) ── Google Directions → GPS route
+        │
+        ▼
+ ┌─────────────────── Driving service ───────────────────┐
+ │                                                        │
+ │  OUTDOORS                      INDOORS / LAST METRES   │
+ │  FlowPilot                     OmniVLA                 │
+ │  in: camera frames, speed,     in: camera frame +      │
+ │      GPS route ahead               language or image   │
+ │  out: candidate paths + scores     goal                │
+ │                                out: path               │
+ │            └──────────┬──────────────┘                 │
+ │                       ▼                                │
+ │   Footprint check (not a model): sweep the chair's     │
+ │   rectangle along the path, reject paths that clip     │
+ │                       ▼                                │
+ │   Controller: path → speed + turn rate                 │
+ └───────────────────────┬────────────────────────────────┘
+                         ▼
+        Chair interface (watchdog, speed cap, e-stop)
+```
+
 ## Pieces
 
 ### Phone (sensors)
