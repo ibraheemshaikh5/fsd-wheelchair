@@ -27,6 +27,7 @@ fsd_ml/
   s2e.py         S2E, a second model for comparison
   viewer/        a page for watching a model decide on a video
   video.py       put any video into the form the models are fed
+  live.py        the chair's phone, live, by way of the driving service
   remote.py      call a driver on another machine over HTTP; serve one
   latency.py     measure the round trip to a served driver
   recording.py   read a recorded drive
@@ -94,11 +95,32 @@ Drop a forward-facing video on the page, or pass its path on the command line. F
 - **The Model menu at the top** shows the model in use and where it is running, and switches model without losing your place in the video. Its last entry, "Add a hosted model…", takes a hosted model's address. Those are remembered in `runs/viewer/hosted.json`.
 - **Goal given as** switches between a point, a typed instruction, and a photo. For a photo, scrub to the place you want to reach and choose "Use this frame as the goal photo". Only OmniVLA reads instructions and photos.
 
+## Watch a model on the chair's live camera
+
+The viewer can also show the phone's stream as it arrives. It connects to the driving service's own viewer feed as one more viewer, so the service needs no changes (it allows four viewers).
+
+1. Start the viewer and choose **Live from chair**.
+2. Enter the driving service's address and press Connect: `http://127.0.0.1:8000` if the service runs on this machine, or its Tailscale `https://…ts.net` address if it runs on another.
+
+The same overlays appear on the live picture, plus **Camera delay** (phone to service) and how many decisions a second the model is managing. Frames go through the same conversion as uploaded videos. The feed is 10 frames a second, so a model that wants a 20-per-second history gets the nearest frames instead.
+
+To try it with no phone, run the service and its fake phone from `service/`:
+
+```bash
+uv run python -m drive_service
+```
+
+```bash
+uv run python -m scripts.fake_phone --seconds 120
+```
+
+The code is [`fsd_ml/live.py`](fsd_ml/live.py). Its `to_sensors()` turns the same feed into the pipeline's input, which is the first half of driving for real.
+
 ## Real models
 
 | Driver | Proposes | Mac CPU, per call | Notes |
 |--------|----------|-------------------|-------|
-| `omnivla` | 1 path | needs a GPU | The planned model, outdoors and in. 8B parameters, 16 GB. See below |
+| `omnivla` | 1 path | needs a GPU; about 255 ms from Modal | The planned model, outdoors and in. 8B parameters, 16 GB. See below |
 | `flowpilot` | 6 ranked paths, each with its own speed | about 400 ms | Outdoor fallback. Small variant, 21M parameters |
 | `s2e` | 1 path | about 240 ms | For comparison |
 
@@ -126,17 +148,23 @@ What FlowPilot assumes, from its own documentation, that we do not match yet:
 
 ## OmniVLA on Modal
 
-OmniVLA is too large for a laptop, so it runs on a Modal GPU and is used as a remote driver. **None of this has been run yet**: the driver and the Modal app are written from OmniVLA's own inference script and still need a first run to shake out.
+OmniVLA is too large for a laptop, so it runs on a Modal GPU and is used as a remote driver. Measured on a 24 GB NVIDIA A10 from a laptop: about 255 ms per decision there and back, of which about 200 ms is the model and about 55 ms the network. A stopped container takes about 16 seconds to wake.
 
 ```bash
 uv run --with modal modal setup
 ```
 
+Fetch the 16 GB checkpoint once (about three minutes, no GPU), then deploy:
+
 ```bash
-uv run --with modal modal serve modal_omnivla.py
+uv run --with modal modal run modal_omnivla.py::download
 ```
 
-The first start builds the image and downloads the 16 GB checkpoint, which takes several minutes. Then, with the URL it prints:
+```bash
+uv run --with modal modal deploy modal_omnivla.py
+```
+
+Then, with the address it prints:
 
 ```bash
 uv run python -m fsd_ml.latency https://<your-url>
@@ -203,4 +231,4 @@ uv run python -m fsd_ml.bakeoff ../recordings/20261114T150000Z --driver straight
 - **The baseline driver cuts corners.** It aims straight at a point 6 m along the route.
 - **A path's "going around" label can flicker** for a few passes while the chair passes an obstacle.
 - **FlowPilot gets no route map**, only a target point, and on a test clip its plan barely moved when the point did. Needs checking on real footage.
-- **OmniVLA is wrapped but has never run.** It needs a Modal login and a first deploy.
+- **OmniVLA's driving quality is unjudged.** It runs and answers every goal type, but has only been looked at briefly on live frames.
