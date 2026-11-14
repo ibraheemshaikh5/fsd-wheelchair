@@ -103,6 +103,20 @@ iPhone --wss--> driving service (board, :8000) --> `ml/fsd_ml/drive_loop.py` (bo
    nothing, so the chair stops within ~0.9 s (0.6 s hold + 0.3 s deadman). Pushing the real stick ends the loop.
    Ctrl-C (or `systemctl stop`) stops the chair and hands back the stick. Afterwards set `min_containers=0` and redeploy.
 
+
+### Current board deployment (set up and verified)
+- Service: `drive-service` systemd unit, venv at `/home/arduino/fsd-wheelchair/.venv` (Python 3.13, deps via pip).
+- Tailscale serve on the board:
+  - `https://wheelchair-unoq.<tailnet>.ts.net/` -> service: phone camera page `/capture/`, sensor viewer `/viewer/`.
+  - `https://wheelchair-unoq.<tailnet>.ts.net:8443/` -> iPad app (`app/dist` copied to `/home/arduino/ipad-app`),
+    with `/api` and `/ws` proxied to the service:
+    `tailscale serve --bg --https=8443 --set-path=/api http://127.0.0.1:8000/api`,
+    same for `/ws`, then `tailscale serve --bg --https=8443 /home/arduino/ipad-app`.
+    The map needs `VITE_GOOGLE_MAPS_API_KEY` at build time (`app/.env`).
+- Verified: iPhone streaming to the board at ~14 fps, sensors OK; OmniVLA on Modal from the board:
+  round trip p50 457 ms / p95 746 ms (inference ~200 ms, network ~255 ms), no token required (public URL).
+- Not yet run: `drive_loop --dry`, wheels-up live, on-ground tests.
+
 ## Files
 - `firmware/sketch.ino`: software I2C target faking the MLX90393 + software I2C master reading the real stick.
 - `wheelchair.py`: the control interface (Mac). `teleop.py`: hold-to-drive window.
