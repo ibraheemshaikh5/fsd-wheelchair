@@ -3,8 +3,8 @@
 // never changes here.
 //
 // With acks the signal is how long acks take and how many frames get through,
-// not the share of frames held back: at 60 fps with 3 frames in flight, any
-// round trip above ~50 ms holds back most frames even though 20+ fresh frames
+// not the share of frames held back: at 60 fps with 2 frames in flight, any
+// round trip above ~33 ms holds back most frames even though 20+ fresh frames
 // a second still arrive, which is all the driving model needs. Without acks
 // (an older service) the share held back by the send budget is all there is.
 
@@ -12,10 +12,21 @@
 export const QUALITY_FLOOR = 0.4;
 /** Acks slower than this mean frames wait in the link: step down. */
 export const RTT_HIGH_MS = 150;
-/** Acks faster than this (with enough frames getting through) mean room to step up. */
-export const RTT_LOW_MS = 100;
+/**
+ * Acks faster than this (with enough frames getting through) mean room to step
+ * up. Two frames in flight carry 20 fps up to a ~100 ms round trip, so stepping
+ * up only well below that keeps a link near the limit from bouncing.
+ */
+export const RTT_LOW_MS = 75;
 /** The driving model's frame rate: fewer frames a second getting through means step down. */
 export const MIN_SENT_FPS = 20;
+/**
+ * Share of MIN_SENT_FPS that counts as getting through. With the camera thinned
+ * to 20 fps, a window holds 19-21 frames by timing alone, and one frame lost to
+ * jitter is not the link's fault.
+ */
+const ENOUGH_SHARE = 0.9;
+const ENOUGH_FPS = MIN_SENT_FPS * ENOUGH_SHARE;
 /** Without acks: above this share of frames held back, step down. */
 export const SKIP_HIGH = 0.3;
 /** Without acks: below this share, step up. */
@@ -53,8 +64,8 @@ const round = (value: number): number => Math.round(value * 100) / 100;
 function stepWithAcks(window: QualityWindow, ackRttMs: number): Step {
   const capturedFps = window.captured / window.seconds;
   const sentFps = window.sent / window.seconds;
-  // A camera delivering under 20 fps is not the link's fault.
-  const starved = capturedFps >= MIN_SENT_FPS && sentFps < MIN_SENT_FPS;
+  // A camera delivering under 20 fps (give or take jitter) is not the link's fault.
+  const starved = capturedFps >= ENOUGH_FPS && sentFps < ENOUGH_FPS;
   if (ackRttMs > RTT_HIGH_MS || starved) return 'down';
   return ackRttMs < RTT_LOW_MS ? 'up' : 'hold';
 }

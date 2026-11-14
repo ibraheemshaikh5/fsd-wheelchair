@@ -13,18 +13,35 @@ newest IMU sample it used, and each recorded IMU batch is followed by a derived
 "motion" line with one row per sample.
 
 Every handled frame gets an ``Ack`` back (the socket sends it), so the phone
-can keep only a few frames in flight. The phone's own link report is kept,
+can keep only a few frames in flight. Each stored frame also sets the event
+``frame_arrived()`` handed out, so the model's feed sends it at once instead of
+on its next tick. The phone's own link report is kept,
 stamped with its receive time, and recorded like any other sensor message.
+
+Frames can come from an external camera instead of the phone
+(``external_camera=True``): a separate sender on /ws/camera, today a USB camera
+on the Mac, later one on the chair's board. It has its own connection slot, hello
+and clock estimate, so its frames are aged by its own clock and the phone (or
+iPad) only supplies GPS, compass and motion. In that mode the phone's frames are
+acked, so its flow control keeps working, but never stored.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any, Protocol
 
-from drive_service.clock import ClockSample, add_sample, estimate, is_synced, to_server_ms
+from drive_service.clock import (
+    ClockEstimate,
+    ClockSample,
+    add_sample,
+    estimate,
+    is_synced,
+    to_server_ms,
+)
 from drive_service.config import Settings
 from drive_service.motion import MotionState, motion_record, update_gps, update_imu
 from drive_service.protocol import Ack, Frame, Gps, Heading, Hello, Imu, Link, Ping, Pong
@@ -47,8 +64,15 @@ class RecorderSink(Protocol):
 
 
 class Hub:
-    def __init__(self, settings: Settings, recorder: RecorderSink, time_source: TimeSource) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        recorder: RecorderSink,
+        time_source: TimeSource,
+        external_camera: bool = False,
+    ) -> None:
         self._settings = settings
+        self._external_camera = external_camera
         self._recorder = recorder
         self._time = time_source
         self._snapshot = SensorSnapshot()
@@ -61,6 +85,15 @@ class Hub:
         self._rate_limited = 0
         self._phone_lease: int | None = None
         self._lease_seq = 0
+        self._camera_clock_samples: tuple[ClockSample, ...] = ()
+        self._camera_lease: int | None = None
+        self._camera_lease_seq = 0
+        self._frame_arrived = asyncio.Event()
+
+    @property
+    def external_camera(self) -> bool:
+        """True when frames come from /ws/camera and the phone's are ignored."""
+        return self._external_camera
 
     @property
     def snapshot(self) -> SensorSnapshot:
@@ -106,6 +139,66 @@ class Hub:
         # Last readings are kept; they age out through the staleness checks.
         self._snapshot = replace(self._snapshot, phone_connected=False)
 
+    def attach_camera(self) -> int:
+        """Give the external camera slot to a new connection and return its lease.
+
+        Newest wins, as for the phone. Its hello and clock start empty; the last
+        frame stays and ages out.
+        """
+        self._camera_lease_seq += 1
+        self._camera_lease = self._camera_lease_seq
+        self._camera_clock_samples = ()
+        self._snapshot = replace(
+            self._snapshot, camera_connected=True, camera_hello=None, camera_clock=None
+        )
+        return self._camera_lease_seq
+
+    def holds_camera(self, lease: int) -> bool:
+        return lease == self._camera_lease
+
+    def detach_camera(self, lease: int) -> None:
+        """Release the camera slot. Does nothing if a newer connection took it."""
+        if not self.holds_camera(lease):
+            return
+        self._camera_lease = None
+        self._snapshot = replace(self._snapshot, camera_connected=False)
+
+    def handle_camera_hello(self, hello: Hello) -> None:
+        self._snapshot = replace(self._snapshot, camera_hello=hello)
+
+    def handle_camera_ping(self, ping: Ping) -> Pong:
+        """Clock sync for the external camera, kept apart from the phone's."""
+        wall_ms = self._time.wall_ms()
+        if ping.rtt_ms is not None and ping.offset_ms is not None:
+            self._camera_clock_samples = add_sample(
+                self._camera_clock_samples,
+                ClockSample(rtt_ms=ping.rtt_ms, offset_ms=ping.offset_ms),
+                self._settings.clock_window,
+            )
+            camera_clock = estimate(self._camera_clock_samples)
+            self._snapshot = replace(self._snapshot, camera_clock=camera_clock)
+        return Pong(t=ping.t, server_t=wall_ms)
+
+    def handle_camera_frame(self, frame: Frame) -> Ack:
+        """Store a frame from the external camera, aged by the camera's own clock."""
+        now = self._time.mono()
+        wall_ms = self._time.wall_ms()
+        clock = self._snapshot.camera_clock
+        captured, future_ms = _capture_time(frame.header.t, now, wall_ms, clock, self._settings)
+        if future_ms is not None:
+            log.warning(
+                "camera frame is %.0f ms in the future; camera clock dropped until its next ping",
+                future_ms,
+            )
+            self._camera_clock_samples = ()
+            self._snapshot = replace(self._snapshot, camera_clock=None)
+            clock = None
+        return self._store_frame(frame, now, wall_ms, captured, clock)
+
+    def frame_arrived(self) -> asyncio.Event:
+        """An event set when the next frame is stored. Ask again after it fires."""
+        return self._frame_arrived
+
     def note_rejected(self) -> None:
         self._rejected += 1
 
@@ -116,14 +209,28 @@ class Hub:
     def handle_frame(self, frame: Frame) -> Ack:
         """Store a validated frame, and record it unless the frame flood limit is hit.
 
-        Returns the ack to send, whether or not the frame was recorded.
+        Returns the ack to send, whether or not the frame was recorded. With an
+        external camera the phone's frame is only acked.
         """
         now = self._time.mono()
         wall_ms = self._time.wall_ms()
+        if self._external_camera:
+            return Ack(seq=frame.header.seq, t=wall_ms)
         captured = self._captured_mono(frame.header.t, now, wall_ms)
-        clock = self._snapshot.clock
+        return self._store_frame(frame, now, wall_ms, captured, self._snapshot.clock)
+
+    def _store_frame(
+        self,
+        frame: Frame,
+        now: float,
+        wall_ms: float,
+        captured: float | None,
+        clock: ClockEstimate | None,
+    ) -> Ack:
         latency_ms = None if clock is None else wall_ms - to_server_ms(frame.header.t, clock)
         self._snapshot = replace(self._snapshot, frame=Stamped(frame, now, captured))
+        arrived, self._frame_arrived = self._frame_arrived, asyncio.Event()
+        arrived.set()
         self._stats = record_frame(
             self._stats, frame.header.seq, now, latency_ms, self._settings.stats_window
         )
@@ -203,22 +310,18 @@ class Hub:
         later step of the server's wall clock has no effect. None without a
         trusted clock estimate, which makes the reading never fresh.
         """
-        clock = self._snapshot.clock
-        if clock is None or not is_synced(clock, self._settings.max_clock_rtt_ms):
-            return None
-        # Half the round trip is the worst-case error of a min-RTT offset; adding
-        # it can only make the reading look older.
-        transit_ms = wall_ms - to_server_ms(phone_t, clock) + clock.rtt_ms / 2
-        if transit_ms < -self._settings.max_clock_skew_ms:
-            self._forget_clock(transit_ms)
-            return None
-        return now_mono - max(0.0, transit_ms) / MS_PER_S
+        captured, future_ms = _capture_time(
+            phone_t, now_mono, wall_ms, self._snapshot.clock, self._settings
+        )
+        if future_ms is not None:
+            self._forget_clock(future_ms)
+        return captured
 
-    def _forget_clock(self, transit_ms: float) -> None:
+    def _forget_clock(self, future_ms: float) -> None:
         """A reading claims to come from the future, so the offset is wrong."""
         log.warning(
             "phone reading is %.0f ms in the future; clock estimate dropped until the next ping",
-            -transit_ms,
+            future_ms,
         )
         self._clock_samples = ()
         self._snapshot = replace(self._snapshot, clock=None)
@@ -232,3 +335,27 @@ class Hub:
             )
             self._snapshot = replace(self._snapshot, clock=estimate(self._clock_samples))
         return Pong(t=ping.t, server_t=wall_ms)
+
+
+def _capture_time(
+    device_t: float,
+    now_mono: float,
+    wall_ms: float,
+    clock: ClockEstimate | None,
+    settings: Settings,
+) -> tuple[float | None, float | None]:
+    """(service monotonic capture time, ms in the future) for a reading stamped ``device_t``.
+
+    The capture time is None without a trusted clock estimate, which makes the
+    reading never fresh. The second value is set when the reading claims to come
+    from further in the future than the allowed skew: the offset is wrong and the
+    caller must drop it.
+    """
+    if clock is None or not is_synced(clock, settings.max_clock_rtt_ms):
+        return None, None
+    # Half the round trip is the worst-case error of a min-RTT offset; adding
+    # it can only make the reading look older.
+    transit_ms = wall_ms - to_server_ms(device_t, clock) + clock.rtt_ms / 2
+    if transit_ms < -settings.max_clock_skew_ms:
+        return None, -transit_ms
+    return now_mono - max(0.0, transit_ms) / MS_PER_S, None

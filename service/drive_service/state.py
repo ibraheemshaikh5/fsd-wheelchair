@@ -50,6 +50,11 @@ class SensorSnapshot:
     # The phone's own uplink report; aged by receive time only (captured_mono None).
     link: Stamped[Link] | None = None
     phone_connected: bool = False
+    # An external camera (/ws/camera) has its own connection, hello and clock.
+    # Only used when frames come from it instead of the phone.
+    camera_connected: bool = False
+    camera_hello: Hello | None = None
+    camera_clock: ClockEstimate | None = None
 
 
 def age_ms(reading: Stamped | None, now_mono: float) -> float | None:

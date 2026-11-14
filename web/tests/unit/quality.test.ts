@@ -52,6 +52,19 @@ describe('adaptive JPEG quality', () => {
       expect(adjustQuality(initialQuality(0.7), starved).quality).toBe(0.6);
     });
 
+    it('at a 20 fps camera, does not step down for a frame or two lost to timing jitter', () => {
+      const start = { quality: 0.6, ceiling: 0.7 };
+      const jitter = window({ captured: 20, sent: 19, skipped: 1, ackRttMs: 40 });
+      expect(adjustQuality(start, jitter).quality).toBe(0.65);
+      const thinned = window({ captured: 19, sent: 18, skipped: 1, ackRttMs: 40 });
+      expect(adjustQuality(start, thinned).quality).toBe(0.65);
+    });
+
+    it('at a 20 fps camera, steps down once the link loses more than a couple of frames a second', () => {
+      const lossy = window({ captured: 20, sent: 16, skipped: 4, ackRttMs: 40 });
+      expect(adjustQuality(initialQuality(0.7), lossy).quality).toBe(0.6);
+    });
+
     it('does not blame the link when the camera itself delivers under 20 fps', () => {
       const start = { quality: 0.6, ceiling: 0.7 };
       const slowCamera = window({ captured: 15, sent: 15, skipped: 0, ackRttMs: 40 });
@@ -63,7 +76,14 @@ describe('adaptive JPEG quality', () => {
       expect(steps({ quality: 0.5, ceiling: 0.7 }, healthy, 6)).toEqual([0.55, 0.6, 0.65, 0.7, 0.7, 0.7]);
     });
 
-    it('holds between 100 and 150 ms', () => {
+    it('leaves a wide hold band at the driving rate: 2 frames in flight carry 20 fps up to a 100 ms round trip', () => {
+      // Stepping up only well under 100 ms keeps a link near the 2-frame limit from bouncing.
+      expect(RTT_LOW_MS).toBe(75);
+      const start = { quality: 0.55, ceiling: 0.7 };
+      expect(adjustQuality(start, window({ captured: 20, sent: 20, skipped: 0, ackRttMs: 90 }))).toBe(start);
+    });
+
+    it('holds between 75 and 150 ms', () => {
       const start = { quality: 0.55, ceiling: 0.7 };
       expect(adjustQuality(start, window({ ackRttMs: 120 }))).toBe(start);
     });

@@ -36,7 +36,7 @@ export class MockDrivingService implements DrivingService {
     mode: 'idle',
     source: 'simulated',
     connected: true,
-    link: { service: 'online', phone: 'ok', gpsAccuracyM: null, cameraFps: null, positionFrom: 'default', issue: null },
+    link: { service: 'online', phone: 'ok', gpsAccuracyM: null, cameraFps: null, positionFrom: 'default', issue: null, frameSource: 'phone', cameraConnected: false },
     engageBlocked: null,
     position: DEFAULT_POSITION,
     headingDeg: 0,

@@ -13,7 +13,11 @@ interface LinkSummary {
 
 const FEET_PER_METRE = 3.28084
 
-/** One glanceable line on whether the iPad is hearing the chair's phone. */
+/**
+ * One glanceable line on whether the iPad is hearing the chair's sensors: the
+ * phone, or (with an external camera) that camera plus this iPad's own GPS,
+ * compass and motion.
+ */
 export function linkSummary(state: DriveState): LinkSummary {
   if (state.source === 'simulated') {
     return { level: 'sim', label: 'Simulator', detail: null, spoken: 'Simulated chair, no phone' }
@@ -25,13 +29,21 @@ export function linkSummary(state: DriveState): LinkSummary {
   if (link.service === 'offline') {
     return { level: 'bad', label: 'Service offline', detail: null, spoken: 'Driving service offline' }
   }
-  if (link.phone === 'none') return { level: 'bad', label: 'No phone', detail: null, spoken: 'Chair phone not connected' }
-  if (link.phone === 'waiting') {
-    return { level: 'warn', label: 'Phone', detail: 'waiting', spoken: 'Chair phone connected, waiting for its sensors' }
+  const external = link.frameSource === 'external'
+  if (external && !link.cameraConnected) {
+    return { level: 'bad', label: 'No camera', detail: null, spoken: 'Chair camera not connected' }
   }
-  if (link.gpsAccuracyM === null) return { level: 'ok', label: 'Phone', detail: null, spoken: 'Chair phone streaming' }
+  const label = external ? 'iPad' : 'Phone'
+  const device = external ? 'iPad sensors' : 'Chair phone'
+  if (link.phone === 'none') {
+    return { level: 'bad', label: external ? 'No iPad sensors' : 'No phone', detail: null, spoken: `${device} not connected` }
+  }
+  if (link.phone === 'waiting') {
+    return { level: 'warn', label, detail: 'waiting', spoken: `${device} connected, waiting for fresh readings` }
+  }
+  if (link.gpsAccuracyM === null) return { level: 'ok', label, detail: null, spoken: `${device} streaming` }
   const feet = Math.round(link.gpsAccuracyM * FEET_PER_METRE)
-  return { level: 'ok', label: 'Phone', detail: `±${feet} ft`, spoken: `Chair phone streaming, GPS within ${feet} feet` }
+  return { level: 'ok', label, detail: `±${feet} ft`, spoken: `${device} streaming, GPS within ${feet} feet` }
 }
 
 export function ChairLinkChip({ state }: { state: DriveState }) {

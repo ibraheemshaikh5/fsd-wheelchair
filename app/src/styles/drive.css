@@ -475,3 +475,22 @@
     display: none;
   }
 }
+
+/* The iPad standing in for the chair's phone: a tap it needs from the rider. */
+.uplink-notice {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: calc(100vw - 32px);
+  padding: 12px 12px 12px 20px;
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-size: 15px;
+}

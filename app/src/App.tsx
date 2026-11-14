@@ -3,10 +3,12 @@ import type { Place } from './types'
 import { createDrivingService } from './services/drivingService'
 import { ServiceRefusedError } from './services/errors'
 import { useDriveState } from './hooks/useDriveState'
+import { useSensorUplink } from './hooks/useSensorUplink'
 import { Clock } from './components/Clock'
 import { DrivePane } from './components/drive/DrivePane'
 import { TripCard, TurnCard } from './components/drive/TripCards'
 import { PermissionsGate } from './components/PermissionsGate'
+import { SensorUplinkNotice } from './components/SensorUplinkNotice'
 import { MapPane } from './components/map/MapPane'
 import { SearchPanel } from './components/search/SearchPanel'
 
@@ -17,6 +19,8 @@ import.meta.hot?.dispose(() => service.dispose?.())
 
 export default function App() {
   const state = useDriveState(service)
+  // With an external camera on the chair, this iPad sends GPS, compass and motion.
+  const uplink = useSensorUplink(state.source === 'live' && state.link.frameSource === 'external')
   const [results, setResults] = useState<Place[]>([])
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [routeError, setRouteError] = useState<string | null>(null)
@@ -90,6 +94,7 @@ export default function App() {
       </main>
 
       <PermissionsGate />
+      <SensorUplinkNotice uplink={uplink} />
     </div>
   )
 }

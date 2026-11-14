@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from drive_service import api, sockets
+from drive_service.camera import CameraSettings, build_camera_router
 from drive_service.config import Settings
 from drive_service.destination import DestinationStore
 from drive_service.hub import Hub
@@ -39,11 +40,17 @@ def _rate_budget(path: str, settings: Settings) -> tuple[str, int] | None:
     return None
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    camera_settings: CameraSettings | None = None,
+) -> FastAPI:
     settings = settings or Settings()
+    camera_settings = camera_settings or CameraSettings()
     time_source: TimeSource = SystemTime()
     recorder = Recorder(settings.record_dir, limits_from_settings(settings))
-    hub = Hub(settings, recorder, time_source)
+    external_camera = camera_settings.source == "external"
+    hub = Hub(settings, recorder, time_source, external_camera=external_camera)
+    log.info("camera frames come from %s", "/ws/camera" if external_camera else "the phone")
     destinations = DestinationStore()
 
     @asynccontextmanager
@@ -84,6 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(api.build_router(hub, recorder, destinations, settings, time_source))
     app.include_router(sockets.build_router(hub, recorder, destinations, settings, time_source))
+    app.include_router(build_camera_router(hub, settings, camera_settings))
 
     if settings.web_dist.is_dir():
         app.mount("/", StaticFiles(directory=settings.web_dist, html=True), name="web")

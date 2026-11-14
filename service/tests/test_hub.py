@@ -238,3 +238,20 @@ def test_rejected_messages_are_counted(hub):
     hub.note_rejected()
     hub.note_rejected()
     assert hub.rejected == 2
+
+
+def test_frame_arrival_wakes_a_waiter_once(hub):
+    arrived = hub.frame_arrived()
+    assert not arrived.is_set()
+    hub.handle_frame(make_frame(seq=0))
+    assert arrived.is_set()
+    # The next wait is for the next frame.
+    following = hub.frame_arrived()
+    assert following is not arrived
+    assert not following.is_set()
+
+
+def test_text_messages_do_not_signal_a_frame(hub):
+    arrived = hub.frame_arrived()
+    hub.handle_message(Gps.model_validate(gps_dict()))
+    assert not arrived.is_set()
