@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -65,13 +65,13 @@ class SendResult:
         }
 
 
+def _cap(pct: float) -> int:
+    return max(-MAX_PCT, min(MAX_PCT, round(pct)))
+
+
 def to_stick(v_mps: float, w_radps: float) -> tuple[int, int]:
     """Forward speed (never reverse) and turn rate (positive left) as capped stick (x, y)."""
-
-    def cap(pct: float) -> int:
-        return max(-MAX_PCT, min(MAX_PCT, round(pct)))
-
-    return cap(-100 * w_radps / W_FULL_RADPS), cap(100 * max(0.0, v_mps) / V_FULL_MPS)
+    return _cap(-100 * w_radps / W_FULL_RADPS), _cap(100 * max(0.0, v_mps) / V_FULL_MPS)
 
 
 class ChairSender:
@@ -109,15 +109,19 @@ class ChairSender:
     def send(self, v_mps: float, w_radps: float) -> SendResult:
         """Drive at ``v_mps`` forward and ``w_radps`` (positive left), held for ``hold_ms``."""
         v, w = max(0.0, float(v_mps)), float(w_radps)
+        return replace(self.send_stick(*to_stick(v, w)), v_mps=v, w_radps=w)
+
+    def send_stick(self, x: float, y: float) -> SendResult:
+        """Drive at stick percent (x right, y forward, never reverse), capped, held ``hold_ms``."""
+        x, y = _cap(x), _cap(max(0.0, y))
         reason = self._halt_reason()
         if reason is not None:
             self._command = None
-            return SendResult(False, v, w, reason, halted=True)
-        x, y = to_stick(v, w)
+            return SendResult(False, 0.0, 0.0, reason, halted=True)
         with self._lock:
             self._command = (x, y, self._clock())
             self.chair.set(x, y)
-        return SendResult(True, v, w, x=x, y=y)
+        return SendResult(True, 0.0, 0.0, x=x, y=y)
 
     def _hold(self) -> None:
         while not self._closed.wait(TICK_S):
