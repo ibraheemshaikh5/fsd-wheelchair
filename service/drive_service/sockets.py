@@ -1,4 +1,5 @@
-"""WebSocket endpoints: /ws/phone (sensor ingest) and /ws/viewer (live debug feed).
+"""WebSocket endpoints: /ws/phone (sensor ingest), /ws/viewer (live debug feed)
+and /ws/model (every frame for the driving model, see ``model_feed``).
 
 Every binary frame the phone sends is answered with an ack carrying its seq,
 whether it was stored, only rate-limited out of the recording, or refused with a
@@ -28,6 +29,7 @@ from starlette.websockets import WebSocketDisconnect
 from drive_service.config import Settings
 from drive_service.destination import DestinationStore
 from drive_service.hub import Hub
+from drive_service.model_feed import MAX_MODEL_FEEDS, serve_model
 from drive_service.origin import origin_allowed
 from drive_service.protocol import (
     Ack,
@@ -255,6 +257,8 @@ def build_router(
         return live_status(hub, recorder, destinations, time_source.mono(), settings)
 
     viewers = {"count": 0}
+    # Counted apart from viewers, so open iPads and debug pages never lock the model out.
+    model_feeds = {"count": 0}
     # Who holds the phone slot; its event is set to tell it a newer one took over.
     current_phone: dict[str, _Holder | None] = {"holder": None}
 
@@ -323,5 +327,21 @@ def build_router(
             pass
         finally:
             viewers["count"] -= 1
+
+    @router.websocket("/ws/model")
+    async def model_socket(ws: WebSocket) -> None:
+        if await refuse_foreign_origin(ws):
+            return
+        await ws.accept()
+        if model_feeds["count"] >= MAX_MODEL_FEEDS:
+            await ws.close(code=CLOSE_TOO_MANY_VIEWERS, reason="too many model feeds")
+            return
+        model_feeds["count"] += 1
+        try:
+            await serve_model(ws, hub, status_now, time_source.mono, 1.0 / settings.viewer_fps)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            model_feeds["count"] -= 1
 
     return router

@@ -13,12 +13,15 @@ newest IMU sample it used, and each recorded IMU batch is followed by a derived
 "motion" line with one row per sample.
 
 Every handled frame gets an ``Ack`` back (the socket sends it), so the phone
-can keep only a few frames in flight. The phone's own link report is kept,
+can keep only a few frames in flight. Each stored frame also sets the event
+``frame_arrived()`` handed out, so the model's feed sends it at once instead of
+on its next tick. The phone's own link report is kept,
 stamped with its receive time, and recorded like any other sensor message.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import replace
@@ -61,6 +64,7 @@ class Hub:
         self._rate_limited = 0
         self._phone_lease: int | None = None
         self._lease_seq = 0
+        self._frame_arrived = asyncio.Event()
 
     @property
     def snapshot(self) -> SensorSnapshot:
@@ -106,6 +110,10 @@ class Hub:
         # Last readings are kept; they age out through the staleness checks.
         self._snapshot = replace(self._snapshot, phone_connected=False)
 
+    def frame_arrived(self) -> asyncio.Event:
+        """An event set when the next frame is stored. Ask again after it fires."""
+        return self._frame_arrived
+
     def note_rejected(self) -> None:
         self._rejected += 1
 
@@ -124,6 +132,8 @@ class Hub:
         clock = self._snapshot.clock
         latency_ms = None if clock is None else wall_ms - to_server_ms(frame.header.t, clock)
         self._snapshot = replace(self._snapshot, frame=Stamped(frame, now, captured))
+        arrived, self._frame_arrived = self._frame_arrived, asyncio.Event()
+        arrived.set()
         self._stats = record_frame(
             self._stats, frame.header.seq, now, latency_ms, self._settings.stats_window
         )
