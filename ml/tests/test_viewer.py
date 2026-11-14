@@ -1,0 +1,223 @@
+from __future__ import annotations
+
+import shutil
+import subprocess
+import threading
+from collections.abc import Iterator
+from pathlib import Path
+
+import httpx
+import pytest
+
+from fsd_ml.drivers import FanDriver, Goal
+from fsd_ml.viewer.server import Session, ViewerError, describe, make_server
+
+pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+
+
+@pytest.fixture(scope="module")
+def clip(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One second of test pattern."""
+    path = tmp_path_factory.mktemp("clip") / "clip.mp4"
+    pattern = "testsrc=duration=1:size=320x180:rate=20"
+    command = ["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", pattern]
+    subprocess.run([*command, "-pix_fmt", "yuv420p", str(path)], check=True)
+    return path
+
+
+@pytest.fixture
+def client(tmp_path: Path) -> Iterator[httpx.Client]:
+    server = make_server(Session(FanDriver(), tmp_path), port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    with httpx.Client(base_url=f"http://127.0.0.1:{server.server_address[1]}", timeout=30) as c:
+        yield c
+    server.shutdown()
+    server.server_close()
+
+
+def test_session_decides_on_a_frame(tmp_path: Path, clip: Path) -> None:
+    session = Session(FanDriver(), tmp_path)
+    session.open(clip)
+
+    info = session.info()
+    assert (info["frames"], info["width"], info["step"]) == (20, 640, 1)
+
+    decision = session.decide(10, (10.0, 2.0), 1.0)
+    assert len(decision["candidates"]) == 5
+    assert decision["chosen"] == 0
+    assert decision["status"] == "clear"
+    assert decision["w_radps"] > 0.0  # the goal is to the left
+    assert decision["cached"] is False
+    assert session.decide(10, (10.0, 2.0), 1.0)["cached"] is True
+    with pytest.raises(ViewerError):
+        session.decide(99, (10.0, 0.0), 1.0)
+
+
+def test_page_upload_frames_and_decisions(client: httpx.Client, clip: Path) -> None:
+    assert "Model viewer" in client.get("/").text
+    assert client.get("/api/info").json()["frames"] == 0
+
+    info = client.post("/api/video", params={"name": "my drive.mp4"}, content=clip.read_bytes())
+    assert info.json()["video"] == "my drive.mp4"
+    assert info.json()["frames"] == 20
+
+    frame = client.get("/frame/3.jpg")
+    assert frame.headers["content-type"] == "image/jpeg"
+    assert frame.content[:2] == b"\xff\xd8"
+    decided = client.get("/api/decide", params={"i": 3, "gx": 10, "gy": 0, "speed": 1})
+    assert decided.json()["v_mps"] == pytest.approx(1.0)
+
+    assert client.get("/frame/999.jpg").status_code == 400
+    assert client.get("/api/decide", params={"i": "x"}).status_code == 400
+
+
+def test_upload_rejects_what_is_not_a_video(client: httpx.Client) -> None:
+    wrong_type = client.post("/api/video", params={"name": "notes.txt"}, content=b"hello")
+    assert wrong_type.status_code == 400
+
+    broken = client.post("/api/video", params={"name": "broken.mp4"}, content=b"not a video")
+    assert broken.status_code == 400
+    assert "could not read" in broken.json()["error"]
+
+
+def test_goal_can_be_an_instruction_or_a_photo(tmp_path: Path, clip: Path) -> None:
+    seen = []
+
+    class Recorder(FanDriver):
+        def propose(self, frames, goal, motion):
+            seen.append(goal)
+            return super().propose(frames, Goal(point_xy=(5.0, 0.0)), motion)
+
+    session = Session(Recorder(), tmp_path)
+    session.open(clip)
+
+    session.decide(5, (10.0, 0.0), 1.0, "say", " go to the door ")
+    assert (seen[-1].instruction, seen[-1].point_xy, seen[-1].image) == (
+        "go to the door",
+        None,
+        None,
+    )
+
+    session.decide(5, (10.0, 0.0), 1.0, "photo+point", "", 12)
+    assert seen[-1].point_xy == (10.0, 0.0)
+    assert seen[-1].image.shape[2] == 3
+
+    # A different instruction is a different decision, not a cached one.
+    assert session.decide(5, (10.0, 0.0), 1.0, "say", "turn around")["cached"] is False
+
+    with pytest.raises(ViewerError, match="instruction"):
+        session.decide(5, (10.0, 0.0), 1.0, "say", "  ")
+    with pytest.raises(ViewerError, match="goal photo"):
+        session.decide(5, (10.0, 0.0), 1.0, "photo")
+    with pytest.raises(ViewerError, match="goal type"):
+        session.decide(5, (10.0, 0.0), 1.0, "dance")
+
+
+def test_page_is_told_which_model_and_where_it_runs() -> None:
+    local = describe(FanDriver())
+    assert (local["title"], local["runs_on"]) == ("Fan (a stand-in, not a model)", "this computer")
+
+    class OnCpu(FanDriver):
+        name = "flowpilot"
+        provider = "CPUExecutionProvider"
+
+    assert describe(OnCpu())["runs_on"] == "this computer (CPU)"
+    assert describe(OnCpu())["title"] == "FlowPilot (small)"
+
+    class Hosted(FanDriver):
+        name = "remote-omnivla"
+        provider = "NVIDIA A10G"
+        host = "example.modal.run"
+
+    hosted = describe(Hosted())
+    assert (hosted["title"], hosted["remote"]) == ("OmniVLA", True)
+    assert hosted["runs_on"] == "example.modal.run (NVIDIA A10G)"
+
+
+def test_switching_models_keeps_the_video(tmp_path: Path, clip: Path) -> None:
+    from fsd_ml import remote
+
+    hosted = remote.make_server(FanDriver(), port=0)
+    threading.Thread(target=hosted.serve_forever, daemon=True).start()
+    address = f"http://127.0.0.1:{hosted.server_address[1]}"
+
+    session = Session(FanDriver(), tmp_path, "fan")
+    session.open(clip)
+    session.decide(5, (10.0, 0.0), 1.0)
+
+    session.switch(f"remote:{address}/")
+    assert session.info()["driver"]["title"] == "Fan (a stand-in, not a model)"
+    assert session.info()["driver"]["remote"] is True
+    assert session.info()["frames"] == 20
+    # The other model has not decided on this frame yet.
+    assert session.decide(5, (10.0, 0.0), 1.0)["cached"] is False
+
+    models = session.models()
+    assert models["current"] == f"remote:{address}"
+    assert f"remote:{address}" in [option["id"] for option in models["options"]]
+    labels = {option["id"]: option["label"] for option in models["options"]}
+    assert labels[f"remote:{address}"] == "Fan (a stand-in, not a model) · 127.0.0.1"
+    # The address is remembered for the next run.
+    assert Session(FanDriver(), tmp_path).hosted() == [address]
+
+    session.switch("fan")
+    assert session.models()["current"] == "fan"
+    hosted.shutdown()
+    hosted.server_close()
+
+
+def test_switching_explains_what_went_wrong(tmp_path: Path) -> None:
+    session = Session(FanDriver(), tmp_path, "fan")
+
+    with pytest.raises(ViewerError, match="no model called"):
+        session.switch("nope")
+    with pytest.raises(ViewerError, match="https://"):
+        session.switch("remote:http://example.com")
+    with pytest.raises(ViewerError, match="could not reach"):
+        session.switch("remote:http://127.0.0.1:9")
+    assert session.models()["current"] == "fan"
+    assert session.hosted() == []
+
+
+def make_clip(path: Path, size: str, rate: int = 30) -> Path:
+    pattern = f"testsrc=duration=1:size={size}:rate={rate}"
+    command = ["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", pattern]
+    subprocess.run([*command, "-pix_fmt", "yuv420p", str(path)], check=True)
+    return path
+
+
+def test_any_video_becomes_20_fps_16_9_frames(tmp_path: Path) -> None:
+    from PIL import Image
+
+    from fsd_ml.video import standardize
+
+    wide = standardize(make_clip(tmp_path / "wide.mp4", "1920x1080"), tmp_path / "wide")
+    assert (wide.source_width, wide.source_height, wide.source_fps) == (1920, 1080, 30.0)
+    assert wide.frames == 20  # one second at 30 fps becomes 20 frames
+    assert (wide.kept, wide.warning) == (1.0, None)
+    assert wide.summary() == "1920×1080 at 30 fps → 640×360 at 20 fps"
+    with Image.open(tmp_path / "wide" / "000001.jpg") as frame:
+        assert frame.size == (640, 360)
+
+    # 4:3 is cut to 16:9, not squashed.
+    square = standardize(make_clip(tmp_path / "old.mp4", "640x480"), tmp_path / "old")
+    assert square.kept == pytest.approx(0.75)
+    assert "middle 75% kept" in square.summary()
+    with Image.open(tmp_path / "old" / "000001.jpg") as frame:
+        assert frame.size == (640, 360)
+
+
+def test_portrait_and_slow_videos_are_flagged(tmp_path: Path) -> None:
+    from fsd_ml.video import VideoError, standardize
+
+    portrait = standardize(make_clip(tmp_path / "tall.mp4", "360x640"), tmp_path / "tall")
+    assert portrait.kept == pytest.approx(0.316, abs=0.01)
+    assert "portrait" in portrait.warning
+
+    slow = standardize(make_clip(tmp_path / "slow.mp4", "640x360", rate=10), tmp_path / "slow")
+    assert slow.frames == 20
+    assert "10 frames a second" in slow.warning
+
+    (tmp_path / "notes.mp4").write_text("not a video")
+    with pytest.raises(VideoError, match="not a video"):
+        standardize(tmp_path / "notes.mp4", tmp_path / "bad")

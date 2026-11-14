@@ -18,6 +18,15 @@
         "cd app && npm run dev"
       ],
       "port": 5174
+    },
+    {
+      "name": "model-viewer",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "cd ml && uv run --group onnx python -m fsd_ml.viewer --driver flowpilot --no-open"
+      ],
+      "port": 8200
     }
   ]
 }
