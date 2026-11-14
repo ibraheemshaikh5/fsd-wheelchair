@@ -12,7 +12,6 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from drive_service import api, sockets
 from drive_service.camera import CameraSettings, build_camera_router
-from drive_service.chair import ChairSettings, build_chair
 from drive_service.config import Settings
 from drive_service.destination import DestinationStore
 from drive_service.hub import Hub
@@ -25,10 +24,7 @@ log = logging.getLogger(__name__)
 
 API_PREFIX = "/api/"
 # Requests that change something; they share a budget separate from status reads.
-# Bench tests of the chair link (/api/chair/test) move motors: same budget and origin rule.
-CONTROL_PREFIXES = ("/api/recording/", "/api/destination", "/api/goal", "/api/chair/")
-# The model's drive commands arrive several times a second: their own budget.
-DRIVE_PATH = "/api/chair/drive"
+CONTROL_PREFIXES = ("/api/recording/", "/api/destination", "/api/goal")
 
 
 def _rate_budget(path: str, settings: Settings) -> tuple[str, int] | None:
@@ -37,8 +33,6 @@ def _rate_budget(path: str, settings: Settings) -> tuple[str, int] | None:
     Recording and destination changes have their own budget so a flood of status
     reads can never turn away a stop. Paths outside the API are not limited.
     """
-    if path == DRIVE_PATH:
-        return "drive_window", settings.max_drive_rate_hz
     if path.startswith(CONTROL_PREFIXES):
         return "control_window", settings.max_control_rate_hz
     if path.startswith(API_PREFIX):
@@ -48,11 +42,9 @@ def _rate_budget(path: str, settings: Settings) -> tuple[str, int] | None:
 
 def create_app(
     settings: Settings | None = None,
-    chair_settings: ChairSettings | None = None,
     camera_settings: CameraSettings | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
-    chair_settings = chair_settings or ChairSettings()
     camera_settings = camera_settings or CameraSettings()
     time_source: TimeSource = SystemTime()
     recorder = Recorder(settings.record_dir, limits_from_settings(settings))
@@ -69,7 +61,6 @@ def create_app(
     app = FastAPI(title="FSD wheelchair driving service", lifespan=lifespan)
     app.state.read_window = RateWindow()
     app.state.control_window = RateWindow()
-    app.state.drive_window = RateWindow()
 
     @app.middleware("http")
     async def limit_api_rate(
@@ -101,9 +92,6 @@ def create_app(
     app.include_router(api.build_router(hub, recorder, destinations, settings, time_source))
     app.include_router(sockets.build_router(hub, recorder, destinations, settings, time_source))
     app.include_router(build_camera_router(hub, settings, camera_settings))
-    chair = build_chair(chair_settings, settings.allowed_origins, time_source)
-    app.include_router(chair.api_router)
-    app.include_router(chair.ws_router)
 
     if settings.web_dist.is_dir():
         app.mount("/", StaticFiles(directory=settings.web_dist, html=True), name="web")

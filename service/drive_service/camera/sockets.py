@@ -7,7 +7,7 @@ info), ``ping`` (clock sync, kept apart from the phone's) and binary frames,
 each answered with an ``ack``. Anything else is refused with an ``error``.
 
 Not a browser endpoint: the sender must present ``Authorization: Bearer <token>``
-and no ``Origin``, as the chair board does. The handshake is refused (1008 before
+and no ``Origin``. The handshake is refused (1008 before
 accept, HTTP 403) when frames come from the phone, with no token configured,
 with a wrong token, or from any web page. One camera at a time: the newest
 connection takes over and the older one is closed with 4410.
@@ -16,15 +16,16 @@ connection takes over and the older one is closed with 4410.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from collections.abc import Mapping
 from typing import Any
 
 from fastapi import APIRouter, WebSocket
+from pydantic import SecretStr
 from starlette.websockets import WebSocketDisconnect
 
 from drive_service.camera.config import CameraSettings
-from drive_service.chair.sockets import bearer_token_ok
 from drive_service.config import Settings
 from drive_service.hub import Hub
 from drive_service.protocol import (
@@ -50,6 +51,18 @@ CLOSE_CAMERA_REPLACED = 4410
 DISCONNECT = "websocket.disconnect"
 
 REPLACED = _Close(CLOSE_CAMERA_REPLACED, "replaced by a newer camera connection")
+BEARER_PREFIX = "Bearer "
+
+
+def bearer_token_ok(headers: Mapping[str, str], token: SecretStr | None) -> bool:
+    """True only when a token is configured and the request presents exactly it."""
+    if token is None:
+        return False
+    value = headers.get("authorization", "")
+    if not value.startswith(BEARER_PREFIX):
+        return False
+    presented = value[len(BEARER_PREFIX) :].strip().encode("utf-8")
+    return hmac.compare_digest(presented, token.get_secret_value().encode("utf-8"))
 
 
 def _refusal(headers: Mapping[str, str], settings: CameraSettings) -> str | None:

@@ -1,7 +1,0 @@
-# Holds the chair token. Copy config.example.json and fill it in on the board.
-unoq-app/config.json
-build/
-.venv/
-__pycache__/
-.pytest_cache/
-.coverage

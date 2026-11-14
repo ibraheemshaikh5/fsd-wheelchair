@@ -1,3 +1,0 @@
-name: Chair link
-icon: 🦽
-description: Links the wheelchair to the driving service. The microcontroller enforces the watchdog, speed caps, e-stop and joystick take-over.

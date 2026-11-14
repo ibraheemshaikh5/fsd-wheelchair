@@ -6,12 +6,16 @@ With no token the service refuses every camera connection (fail closed).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from drive_service.chair.config import ENV_FILE, MIN_TOKEN_CHARS, PLACEHOLDER_MARKERS
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+MIN_TOKEN_CHARS = 16
+# Example values are published in the repo, so a token containing one is never accepted.
+PLACEHOLDER_MARKERS = ("replace-with", "change-me")
 
 # "phone": frames come from the phone's capture page, as before.
 # "external": frames come from a camera sender on /ws/camera (a USB camera on the Mac,

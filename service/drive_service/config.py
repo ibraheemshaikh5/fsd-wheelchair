@@ -60,7 +60,6 @@ class Settings(BaseSettings):
     max_text_rate_hz: int = 200
     max_api_rate_hz: int = 20  # status reads
     max_control_rate_hz: int = 5  # recording start/stop, separate so reads cannot starve it
-    max_drive_rate_hz: int = 30  # the model's chair commands, separate so they cannot starve a stop
     max_consecutive_errors: int = 20
     max_viewers: int = 4
     # A phone socket that sends nothing for this long is closed (4408) so the slot

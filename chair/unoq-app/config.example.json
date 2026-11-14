@@ -1,6 +1,0 @@
-{
-  "service_url": "wss://wheelchair-mac.taile75b1b.ts.net/ws/chair",
-  "token": "CHANGE-ME-to-the-value-of-DRIVE_CHAIR_TOKEN",
-  "firmware": "chair-link 0.1.0",
-  "status_hz": 10
-}
