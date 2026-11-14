@@ -36,7 +36,9 @@ last_press = {}
 
 
 def press(e):
-    if e.keysym in KEYS: held[e.keysym] = True; last_press[e.keysym] = time.time()
+    if e.keysym in KEYS:
+        new = not held.get(e.keysym); held[e.keysym] = True; last_press[e.keysym] = time.time()
+        if new: tick(reschedule=False)                 # send the moment the key goes down
 
 
 def release(e):
@@ -46,7 +48,7 @@ def release(e):
         root.after(60, lambda: held.update({k: False}) if last_press.get(k, 0) < t else None)
 
 
-def tick():
+def tick(reschedule=True):
     x = sum(KEYS[k][0] for k, v in held.items() if v)
     y = sum(KEYS[k][1] for k, v in held.items() if v)
     chair.deadband = deadband.get(); chair.turn_deadband = turn_db.get()
@@ -55,7 +57,7 @@ def tick():
     if not chair.fsd: big.config(text="real stick drives", fg="#555")
     else: big.config(text="STOPPED" if cx == cy == 0 else f"fwd {cy:+d}  turn {cx:+d}",
                      fg="black" if cx == cy == 0 else "#0a7a2f")
-    root.after(50, tick)
+    if reschedule: root.after(50, tick)
 
 
 def show_stats():

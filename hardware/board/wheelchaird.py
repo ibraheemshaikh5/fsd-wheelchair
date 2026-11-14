@@ -6,7 +6,7 @@ into the MCU's RAM command box (SWD via local openocd) -> fake MLX90393 -> chair
 
 Packet: "x y mode arm session seq". Gaps in UDP (bad Wi-Fi):
   <= HOLD_S keep the last command (no stutter), then ease to zero over RAMP_S (0.6 s total),
-  starts ramp up at SLEW_UP %/tick (stops are instant),
+  starts jump to START (under the chair's dead zone) then ramp at SLEW_UP %/tick; stops are instant,
   after HANDBACK_S fall back to JOYSTICK mode and LATCH it: FSD stays off until the sender
   re-arms (arm counter changes = user clicked FSD again). Late/out-of-order packets are dropped
   (seq per session), so a delayed old command can never restart motion.
@@ -20,6 +20,7 @@ now = time.monotonic                              # never jumps (wall-clock step
 PORT, RATE_HZ = 5005, 50
 HOLD_S, RAMP_S, HANDBACK_S = 0.3, 0.3, 2.0
 SLEW_UP = 5                                       # max stick % increase per 20 ms tick (smooth starts); decreases are instant
+START = 35                                        # starts jump straight here: just under the chair's ~37-41% dead zone
 MAGIC = "0xc0ffee01"
 
 
@@ -27,6 +28,8 @@ def slew(out, target):
     """Next output: slowing down / stopping is instant, speeding up is limited to SLEW_UP per tick,
     a reversal stops first (then ramps the other way)."""
     if out * target < 0: return 0
+    if abs(target) <= abs(out): return target
+    if out == 0: out = START if target > 0 else -START      # skip the part of the ramp the chair ignores
     if abs(target) <= abs(out): return target
     return out + max(-SLEW_UP, min(SLEW_UP, target - out))
 
@@ -109,6 +112,6 @@ def main():
 if __name__ == "__main__":
     import sys
     if sys.argv[1:] == ["test"]:          # self-check, no hardware
-        assert [slew(0, 70), slew(70, 0), slew(70, -70), slew(0, -70), slew(40, 20), slew(68, 70)] == [5, 0, 0, -5, 20, 70]
+        assert [slew(0, 70), slew(70, 0), slew(70, -70), slew(0, -70), slew(40, 20), slew(68, 70), slew(0, 30)] == [40, 0, 0, -40, 20, 70, 30]
         print("ok"); sys.exit()
     main()
