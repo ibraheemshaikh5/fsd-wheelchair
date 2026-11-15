@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+from drive_service.chair import chair_status
 from drive_service.clock import is_synced
 from drive_service.config import Settings
 from drive_service.declination import resolve_declination
@@ -199,7 +200,7 @@ def live_status(
     settings: Settings,
 ) -> dict[str, Any]:
     """The status right now, as served by GET /api/status and every /ws/viewer message."""
-    return build_status(
+    status = build_status(
         hub.snapshot,
         hub.stats,
         recorder.info,
@@ -211,3 +212,5 @@ def live_status(
         goal=destinations.goal,
         external_camera=hub.external_camera,
     )
+    status["chair"] = chair_status()  # speed estimate, link and board health from wheelchaird
+    return status
