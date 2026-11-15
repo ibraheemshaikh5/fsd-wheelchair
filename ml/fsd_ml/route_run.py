@@ -196,33 +196,29 @@ class RouteRun:
             )
         goal = None if self._goal is None else tuple(into(pose, [self._goal])[0])
         self._looks += 1
-        said = route_pilot.report(
-            self._looks,
-            moving,
-            self._happened,
-            pose,
-            goal,
-            self._notes,
-            self._setup.camera.hfov_deg / 2,
-        )
-        self._happened = []
+        happened, self._happened = self._happened, []
         self._asked_xy = (self._xy[0], self._xy[1])
         self._runner._phase(f"look {self._looks}: the pilot is thinking", steps=self._looks)
         obstacles = self._remembered.around(pose)
-        look = {"look": self._looks, "frame": frame, "pose": pose, "report": said}
+        look = {"look": self._looks, "frame": frame, "pose": pose}
+        notes, half_view = list(self._notes), self._setup.camera.hfov_deg / 2
 
         def ask() -> None:
             try:
+                ground = self._chair.ground(frame)
+                behind = goal is not None and route_pilot.hidden(goal, ground, self._setup)
+                said = route_pilot.report(
+                    look["look"], moving, happened, pose, goal, notes, half_view, behind
+                )
                 shown = route_pilot.picture(
                     frame.jpeg,
                     self._setup,
                     obstacles,
                     self._chair.setting("path_clearance_m"),
                     rest if len(rest) > 1 else None,
-                    goal,
+                    None if behind else goal,
                 )
                 plan = self._pilot.next(shown, said)
-                ground = self._chair.ground(frame)
                 self._answer = {**look, "shown": shown, "plan": plan, "ground": ground}
             except Exception as error:  # noqa: BLE001  a failed look must not end the driving
                 self._answer = {**look, "error": repr(error)}

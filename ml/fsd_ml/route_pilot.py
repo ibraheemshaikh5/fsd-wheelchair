@@ -239,9 +239,10 @@ def interpret(
     for n, (ahead, left, floor) in enumerate(points):
         if not floor or math.hypot(ahead, left) > MAX_ROUTE_M:
             what = "is not on floor the chair can see" if not floor else "is too far to place"
-            rest = f"point {n + 1}" if n + 1 == len(points) else f"points {n + 1} to {len(points)}"
+            last = n + 1 == len(points)
+            rest = f"point {n + 1}" if last else f"points {n + 1} to {len(points)}"
             left_out = (
-                f"{rest} of your route were left out: point {n + 1} {what}"
+                f"{rest} of your route {'was' if last else 'were'} left out: point {n + 1} {what}"
                 f" ({'it is on a thing, or hidden' if not floor else 'over 3.5 m away'})."
             )
             break
@@ -371,6 +372,19 @@ class Remembered:
         ]
 
 
+def hidden(goal: tuple[float, float], ground: Ground | None, setup: ChairSetup) -> bool:
+    """Whether a remembered place (chair's frame) is behind something in this picture: what
+    the picture shows there is over a metre nearer than the place itself. A ring drawn
+    there would sit on the thing in front, and point the model at the wrong thing."""
+    if ground is None:
+        return False
+    ((x, y),) = setup.to_pixels([goal], 1000, 1000)
+    if not (0 <= x < 1000 and 0 <= y < 1000):
+        return False
+    ahead, left, _ = ground.at(x / 1000, y / 1000)
+    return math.hypot(ahead, left) < math.hypot(*goal) - 1.0
+
+
 def whereabouts(ahead: float, left: float) -> str:
     """A place relative to the chair in words: "2.3 m away, 15° to the right"."""
     bearing = math.degrees(math.atan2(left, ahead))
@@ -392,6 +406,7 @@ def report(
     goal: tuple[float, float] | None,
     notes: Sequence[str],
     half_view_deg: float,
+    goal_hidden: bool = False,
 ) -> str:
     """Everything the model is told in words with a picture: what the chair is doing, what
     happened since its last answer, where the chair and the goal it marked are believed to
@@ -413,6 +428,8 @@ def report(
         seen = (
             "it is the magenta ring" if bearing < half_view_deg and goal[0] > 0 else "out of view"
         )
+        if goal_hidden:
+            seen = "hidden behind something nearer, so not drawn"
         lines.append(
             f"The goal as you last marked it is believed to be {whereabouts(*goal)} ({seen})."
         )
