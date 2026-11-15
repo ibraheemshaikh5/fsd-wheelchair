@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -67,3 +68,22 @@ def test_ipad_trip_becomes_a_goal_for_the_model(monkeypatch: pytest.MonkeyPatch)
     assert note == "iPad route: 37 m left"
     reader.read(routed)
     assert fetched == ["https://chair.example/api/goal"]  # the route is fetched once per version
+
+
+def test_the_chairs_angle_is_the_services_own_sum_however_its_messages_arrive() -> None:
+    now = [0.0]
+    feed = live.LiveFeed("http://chair.example", clock=lambda: now[0])
+
+    def hear(at_s: float, yaw_deg: float) -> None:
+        now[0] = at_s
+        motion = {"fresh": True, "yaw_rate_dps": 20.0, "yaw_deg": yaw_deg}
+        feed._take(json.dumps({"motion": motion}))
+
+    # Unevenly spaced messages: what counts is how far the service says it has turned.
+    for at_s, yaw in [(0.0, 100.0), (0.02, 101.0), (0.3, 106.0), (0.31, 110.0)]:
+        hear(at_s, yaw)
+    assert math.degrees(feed.yaw_rad()) == pytest.approx(10.0)
+    # After a silence the service's sum may have started again: no jump, count on from it.
+    hear(5.0, 0.0)
+    hear(5.1, 2.0)
+    assert math.degrees(feed.yaw_rad()) == pytest.approx(12.0)

@@ -7,6 +7,7 @@ geometry, so it holds whichever model is driving.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -17,6 +18,17 @@ from fsd_ml.drivers import Candidate
 from fsd_ml.pipeline.types import Obstacle, PathStatus
 
 SAMPLE_SPACING_M = 0.1
+# How far short of touching something (with its margin) a run stops: next to nothing when
+# barely moving, and more the faster it goes (about 0.26 m at the 0.45 m/s creep, 0.41 m at
+# 0.75 m/s). The time covers noticing it (three looks in a row) and coasting to a stop. A
+# chair creeping up to something therefore ends about a hand's width from it.
+STOP_STILL_M = 0.03
+STOP_REACT_S = 0.5
+# The clearance kept from something the chair is already nearer to than its margin.
+BESIDE_M = 0.05
+# Something the chair already stands against stops it only where it would come this much
+# nearer still.
+CLOSING_M = 0.03
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,9 +59,11 @@ class Choice:
     speed_limit_mps: float | None = None
 
 
-def _resample(path_xy: np.ndarray) -> np.ndarray:
-    """The path from the chair's centre, as evenly spaced points."""
-    points = np.vstack([[0.0, 0.0], np.asarray(path_xy, dtype=np.float64).reshape(-1, 2)])
+def _resample(path_xy: np.ndarray, from_chair: bool = True) -> np.ndarray:
+    """The path, from the chair's centre unless it is said to be on it, as evenly spaced points."""
+    points = np.asarray(path_xy, dtype=np.float64).reshape(-1, 2)
+    if from_chair:
+        points = np.vstack([[0.0, 0.0], points])
     legs = np.linalg.norm(np.diff(points, axis=0), axis=1)
     keep = np.concatenate([[True], legs > 1e-9])
     points = points[keep]
@@ -63,12 +77,26 @@ def _resample(path_xy: np.ndarray) -> np.ndarray:
 
 
 def first_hit(
-    path_xy: np.ndarray, obstacles: Sequence[Obstacle], shape: Body, extra_m: float = 0.0
+    path_xy: np.ndarray,
+    obstacles: Sequence[Obstacle],
+    shape: Body,
+    extra_m: float = 0.0,
+    from_chair: bool = True,
+    closing: bool = False,
 ) -> tuple[float, Obstacle] | None:
-    """Distance along the path at which the chair first touches an obstacle, and which one."""
+    """Distance along the path at which the chair first touches an obstacle, and which one.
+
+    With ``closing``, an obstacle only counts where the chair has come CLOSING_M further
+    into it than it is at the path's start: for things it already stands against.
+
+    The path is taken to start at the chair's centre. For a chair already driving it,
+    ``from_chair`` false takes the path as given, from the point of it the chair is at:
+    joining the chair to the next point would turn every few centimetres it is off the
+    line into a sharp bend, and the chair's body with it.
+    """
     if not obstacles:
         return None
-    samples = _resample(path_xy)
+    samples = _resample(path_xy, from_chair)
     if len(samples) < 2:
         return None
     directions = np.gradient(samples, axis=0)
@@ -83,14 +111,94 @@ def first_hit(
         # The obstacle as seen from the chair at each sample.
         ahead = dx * np.cos(headings) + dy * np.sin(headings)
         left = -dx * np.sin(headings) + dy * np.cos(headings)
-        touching = (np.abs(ahead) <= half_length + obstacle.radius_m) & (
-            np.abs(left) <= half_width + obstacle.radius_m
+        # How far inside the chair's box (with its margin) the obstacle is: negative, outside.
+        inside = np.minimum(
+            half_length + obstacle.radius_m - np.abs(ahead),
+            half_width + obstacle.radius_m - np.abs(left),
         )
+        touching = inside >= 0
+        if closing:
+            touching &= inside > max(float(inside[0]), 0.0) + CLOSING_M
         if touching.any():
             distance = float(np.argmax(touching)) * SAMPLE_SPACING_M
             if best is None or distance < best[0]:
                 best = (distance, obstacle)
     return best
+
+
+def beside(obstacles: Sequence[Obstacle], shape: Body) -> list[Obstacle]:
+    """The obstacles already nearer the chair, as it stands, than its margin."""
+    here = np.array([[SAMPLE_SPACING_M, 0.0]])
+    return [obstacle for obstacle in obstacles if first_hit(here, [obstacle], shape)]
+
+
+def first_hit_from_here(
+    path_xy: np.ndarray, obstacles: Sequence[Obstacle], shape: Body, from_chair: bool = True
+) -> tuple[float, Obstacle] | None:
+    """As ``first_hit``, for a path that starts where the chair stands now.
+
+    The margin is room the chair keeps from things it comes up to. Something it is already
+    nearer to than that (it stands beside it) cannot be kept that far away, and holding the
+    chair to it would leave it nowhere to go: such a thing need only be cleared by BESIDE_M,
+    and if the chair is already nearer than that too (it stands against it, or the reading
+    of where it is, is a little off), it stops the chair only where the path would bring
+    the body nearer still. So the chair can always drive along or away from what is beside
+    it, and never toward it.
+    """
+    near = beside(obstacles, shape)
+    known = {id(obstacle) for obstacle in near}
+    far = [obstacle for obstacle in obstacles if id(obstacle) not in known]
+    close = Body(shape.width_m, shape.length_m, min(shape.margin_m, BESIDE_M))
+    hits = [
+        hit
+        for hit in (
+            first_hit(path_xy, far, shape, from_chair=from_chair),
+            first_hit(path_xy, near, close, from_chair=from_chair, closing=True),
+        )
+        if hit
+    ]
+    return min(hits, key=lambda hit: hit[0]) if hits else None
+
+
+def turn_room_deg(degrees_left: float, obstacles: Sequence[Obstacle], shape: Body) -> float:
+    """How far of a turn on the spot the chair can make before its body touches something.
+
+    The chair turns about the middle of its drive wheels, behind its own middle, so its
+    front swings wide. Returns the whole turn if nothing is in the way, else the part of it
+    (same sign, in 5 degree steps) that is clear by BESIDE_M. What already overlaps the
+    body as it stands is left out: that is a wrong reading, or it is too late.
+    """
+    if not obstacles or degrees_left == 0:
+        return degrees_left
+    pivot = np.array([-shape.pivot_behind_m, 0.0])
+    where = np.array([[o.x, o.y] for o in obstacles]) - pivot
+    reach = np.array([o.radius_m for o in obstacles]) + BESIDE_M
+    half_length, half_width = shape.length_m / 2 + reach, shape.width_m / 2 + reach
+
+    def touching(turned_deg: float) -> np.ndarray:
+        turned = math.radians(turned_deg)
+        ahead = where[:, 0] * math.cos(turned) + where[:, 1] * math.sin(turned) + pivot[0]
+        left = -where[:, 0] * math.sin(turned) + where[:, 1] * math.cos(turned)
+        return (np.abs(ahead) <= half_length) & (np.abs(left) <= half_width)
+
+    judged = ~touching(0.0)
+    way, clear = math.copysign(1.0, degrees_left), 0.0
+    for step in np.arange(5.0, abs(degrees_left) + 5.0, 5.0):
+        angle = min(step, abs(degrees_left))
+        if (touching(way * angle) & judged).any():
+            break
+        clear = angle
+    return way * clear
+
+
+def stop_distance_m(speed_mps: float) -> float:
+    """How much of its way must be left clear in front of a chair going this fast.
+
+    The one rule for a bench or pilot run: paths are offered no closer than this to what
+    they meet (fsd_ml/candidates.py), and a run stops when less than this is left
+    (Session.blocked), so a path that was offered is not then cut off by a stricter rule.
+    """
+    return STOP_STILL_M + STOP_REACT_S * max(0.0, speed_mps)
 
 
 def _waiting_reason(obstacle: Obstacle, verb: str) -> str:

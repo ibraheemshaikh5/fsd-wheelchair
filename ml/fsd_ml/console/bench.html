@@ -42,6 +42,9 @@
   .camwrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
   #top { width: 100%; max-width: 360px; display: block; border-radius: 8px; }
   .running { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal) inset; }
+  .alert { padding: 14px 16px; border-radius: 10px; background: #b00020; color: #fff; font-weight: 700;
+    font-size: 17px; margin-bottom: 10px; animation: alert 1s steps(2) infinite; }
+  @keyframes alert { 50% { background: #ff1744; } }
   .banner { padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); }
   .banner.go { border-color: var(--teal); }
   .banner.arrived, .banner.finished { border-color: var(--good); }
@@ -78,6 +81,7 @@
 
 <main>
   <section class="stack">
+    <div class="alert" id="alert" hidden></div>
     <div class="banner" id="banner"><strong id="bannerTitle">Ready.</strong><span id="bannerText" class="note">Pick a test on the right.</span></div>
     <div class="panel">
       <h2>What the chair sees</h2>
@@ -170,6 +174,9 @@ function render(bench) {
   const run = bench.run || {}, running = Boolean(run.running);
   for (const test of bench.cases) $(`case-${test.id}`).querySelector(".run").disabled = running;
 
+  // Loud, while driving or recording with no camera or gyro.
+  $("alert").hidden = !bench.alert;
+  $("alert").textContent = bench.alert || "";
   // The banner: what is happening now, or how the last run ended.
   const banner = $("banner");
   if (running) {

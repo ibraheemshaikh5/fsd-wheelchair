@@ -18,6 +18,10 @@ fsd_ml/
   chair_link.py   the one sender of stick commands; the 30% stick cap lives here
   moves.py     supervised runs: a straight, a turn, the pilot's moves
   pilot.py       Claude Sonnet picks moves from the camera picture (pilot_prompt.md)
+  gemini_pilot.py  Gemini picks one of the numbered paths drawn on the picture (gemini_pilot_prompt.md)
+  candidates.py    those paths: a fan the chair fits along, drawn on the camera's JPEG
+  route_pilot.py   Gemini draws its route on the picture (route_pilot_prompt.md); route_run.py drives it
+  route_sim.py     the route run against a simulated chair, phone and obstacle sense
   bench.py       the bench's runs, and the settings every way of driving reads
   runlog.py      the record of a run: every command with its camera frame
   live.py        the phone's camera, gyro and iPad goal, from the driving service
@@ -126,6 +130,9 @@ It shows what the model wants on each frame. The video does not react to the dec
 
 - **Straight** and **quarter turns** drive a fixed move. A turn is measured by the phone's gyro and stops if the gyro stops reporting.
 - **Claude drives to a named thing** is the pilot: Claude Sonnet sees the camera's picture and answers with moves (forward up to 1 m, back up to 0.4 m, turns up to 120°), which are carried out as the same straights and turns. Its instructions are in [`pilot_prompt.md`](pilot_prompt.md), read afresh for every look.
+- **Gemini drives to a named thing** is the Gemini pilot ([`gemini_pilot.py`](fsd_ml/gemini_pilot.py)). It is never asked for metres or degrees. Each look, the camera's picture gets parking-camera guide lines (where the chair's sides pass if it drives straight, with marks 0.5, 1 and 2 m ahead) and up to seven numbered paths fanned from 60° left to 60° right: solid as far as the chair fits and can see the floor, dashed beyond. Gemini Robotics-ER picks a number, or a turn (60° left or right, or around), or says it has arrived or gives up. A picked path is followed by the gyro; the chair stands still while Gemini decides. Its instructions are in [`gemini_pilot_prompt.md`](gemini_pilot_prompt.md). To see its picks on recorded frames without the chair: `uv run --env-file .env python -m fsd_ml.gemini_pilot --say "go to the stairs" <frame.jpg>`.
+- **Gemini draws its route to a named thing** is the route pilot ([`route_pilot.py`](fsd_ml/route_pilot.py), [`route_run.py`](fsd_ml/route_run.py)). Gemini decides only where to go: each look it is shown a clean picture (guide lines, and a ring where it last marked the goal) and answers with a route (points on the floor), the goal's place and how far in front of it to stop, or a look left, right or behind. The harness does the rest quietly: it fits the route past obstacles (as drawn if the body clears, else slid a little to one side), follows it without stopping while the next look is asked for, remembers what it has seen after it leaves the picture, turns only over floor it has seen clear, drives up to what stands at the goal mark and measures when it has arrived, and when it has to stop tries again by itself (the same route refitted, then from a little further back) before asking Gemini for another way. Its instructions are in [`route_pilot_prompt.md`](route_pilot_prompt.md). Without the chair: `uv run --env-file .env python -m fsd_ml.route_pilot --say "..." <frame.jpg>` draws what it answers on recorded frames.
+- **What a pilot is told after each move** is what happened, not what it asked for: a turn as "asked left 25°, gyro measured left 18°", a straight or path as "drove about 0.40 m of 1.00 m (believed)", and if it was stopped, why, with numbers (the obstacle and where it is, the gyro or camera going quiet, the time allowed running out, a stick that is not turning the chair). Only turning is measured; distance is speed times time.
 - **A run needs the bench page open.** If the page has not asked after the run for 2 s (closed, asleep, laptop lid shut), the run ends and the chair stops.
 - **Settings** are on that page and in `runs/console/bench/settings.json`: stick strengths, ramp, braking, what full stick gives in m/s and rad/s (`v_full_mps`, `w_full_radps`), and how much of the model's stick is sent (`model_speed_pct`). They apply to every way of driving, at once.
 
@@ -136,7 +143,7 @@ Each connection to the driving service makes a folder, `runs/console/live/<date-
 | Field | What |
 |-------|------|
 | `t` | when the line was written, unix seconds |
-| `mode` | `manual`, `bench`, `model` or `pilot` |
+| `mode` | `manual`, `bench`, `model`, `pilot` or `gemini` |
 | `frame`, `frame_n`, `frame_t` | the camera's own JPEG the command was given on (path in the run folder), its number, and when the phone took it |
 | `stick` | `[x, y]` percent sent, x right, y forward; `null` if nothing was sent |
 | `sent`, `problem` | whether it reached the chair, and why not |
@@ -162,6 +169,8 @@ uv run python -m fsd_ml.runlog
 | Variable | For |
 |----------|-----|
 | `ANTHROPIC_API_KEY` | the pilot; put it in `ml/.env` and start with `uv run --env-file .env` |
+| `GEMINI_API_KEY` | the Gemini pilot; also in `ml/.env` |
+| `GEMINI_PILOT_MODEL`, `GEMINI_PILOT_THINKING` | its model (default `gemini-robotics-er-2-preview`) and thinking level (`low`, `medium`, `high`; default `low`) |
 | `FSD_DRIVER_TOKEN` | only if the Modal endpoint was deployed with a token |
 | `WHEELCHAIR_HOST` | the board's address, if not `wheelchair-unoq` |
 

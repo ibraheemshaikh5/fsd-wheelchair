@@ -22,10 +22,10 @@ class ControlConfig:
     max_yaw_rate_radps: float = 1.0
     # Slows the chair in tight turns so the rider is not thrown sideways.
     max_lateral_accel_mps2: float = 0.6
-    # A target this close to straight ahead is driven straight at. The chair's stick has a
-    # dead zone, so the smallest turn that can be sent is a real one (about 38% of the raw
-    # stick): steering for every degree would make the chair weave.
-    steer_dead_zone_deg: float = 4.0
+    # A target this close to straight ahead is driven straight at, so noise in a path does
+    # not become steering. It can be small: once the chair is moving, a small sideways stick
+    # is a small, smooth turn (5% turns it about 4 degrees a second at 10% forward).
+    steer_dead_zone_deg: float = 1.0
 
 
 def _target(path_xy: np.ndarray, lookahead_m: float) -> np.ndarray:

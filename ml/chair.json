@@ -9,7 +9,8 @@
   "chair": {
     "width_m": 0.635,
     "length_m": 1.016,
-    "margin_m": 0.305
+    "margin_m": 0.305,
+    "axle_from_rear_m": 0.083
   },
   "measured": true
 }

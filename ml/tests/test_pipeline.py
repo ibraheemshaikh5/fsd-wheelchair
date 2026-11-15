@@ -70,9 +70,8 @@ def test_steering_is_proportional_outside_a_small_dead_zone() -> None:
         off = math.radians(off_deg)
         return follow(np.array([[2.0 * math.cos(off), 2.0 * math.sin(off)]]), 1.0)[1]
 
-    # A target a few degrees off is driven straight at: no tiny turn for the stick's dead
-    # zone to blow up into a real one.
-    assert turn_toward(3.0) == 0.0 and turn_toward(-3.0) == 0.0
+    # A target under a degree off is driven straight at: noise is not steered for.
+    assert turn_toward(0.5) == 0.0 and turn_toward(-0.5) == 0.0
     # Further off, the turn is toward the target (positive left) and grows with the angle.
     assert 0.0 < turn_toward(10.0) < turn_toward(25.0)
     assert turn_toward(-10.0) == pytest.approx(-turn_toward(10.0))

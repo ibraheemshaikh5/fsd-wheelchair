@@ -116,12 +116,13 @@ class Pilot:
     model: str = MODEL
     thinking: bool = THINKING
     client: Any = None
+    prompt_file: Path = PROMPT_FILE
     messages: list[dict[str, Any]] = field(default_factory=list)
     # How the last reply went, for the record.
     last: dict[str, Any] = field(default_factory=dict)
 
     def _prompt(self) -> str:
-        return PROMPT_FILE.read_text()
+        return self.prompt_file.read_text()
 
     def next(
         self, jpeg: bytes, report: str, results: list[tuple[str, str, bool]] | None = None
@@ -188,6 +189,10 @@ class Pilot:
             "output_tokens": usage.output_tokens,
             "cached_tokens": usage.cache_read_input_tokens or 0,
             "text": " ".join(b.text for b in response.content if b.type == "text").strip(),
+            # Exactly what was sent with the picture (the report, and what its last moves
+            # did), and what came back.
+            "prompt": [block for block in content if block["type"] != "image"],
+            "raw": [block.model_dump(mode="json") for block in response.content],
         }
         if response.stop_reason != "tool_use":
             return []

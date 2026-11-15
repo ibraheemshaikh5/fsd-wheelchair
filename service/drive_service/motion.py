@@ -30,6 +30,11 @@ Method:
   rates tracked the accelerometer best (20 deg error vs 32-66 deg otherwise).
 * Yaw rate: rotation rate dotted with unit up, so it works for any mount.
   Positive = turning left (counter-clockwise seen from above).
+* Yaw: the yaw rate summed sample by sample over the phone's own sample times, so
+  how messages are batched or delayed on the way here does not change it. It is
+  how far the chair has turned since the phone connected, not a compass heading.
+  A resting gyro reads a small steady rate (its bias); that is learned whenever
+  the phone is still and taken off every sample, so standing does not drift.
 * Forward: the camera axis (-z) projected onto the horizontal plane; left is
   up x forward. Accelerations are projected onto both.
 * Speed: integrate forward acceleration between GPS fixes (never below 0), blend
@@ -80,6 +85,8 @@ STILL_MOVING_SPEED_MPS = 0.3
 STILL_GYRO_DPS = 2.0
 STILL_LINEAR_ACCEL_MPS2 = 0.25
 STILL_ACCEL_SPREAD_MPS2 = 0.4
+# How fast the gyro's resting yaw rate is learned once the phone is held still.
+GYRO_BIAS_TIME_CONSTANT_S = 2.0
 
 # Each GPS speed moves the estimate this fraction of the way to it.
 GPS_BLEND_GAIN = 0.7
@@ -111,6 +118,8 @@ class MotionEstimate:
     speed_mps: float | None = None
     speed_source: SpeedSource | None = None
     yaw_rate_dps: float | None = None
+    # Turned since the phone connected, positive left, bias taken off. Not wrapped.
+    yaw_deg: float | None = None
     accel_fwd_mps2: float | None = None
     accel_lat_mps2: float | None = None
 
@@ -154,6 +163,9 @@ class MotionState:
     gps_moving: bool = False
     # Phone time speed was last pinned by a GPS speed or a still period.
     anchor_t_ms: float | None = None
+    # The running yaw, and the gyro's resting yaw rate as last learned.
+    yaw_deg: float = 0.0
+    yaw_bias_dps: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +244,8 @@ def _usable(sample: ImuSample) -> bool:
 
 def _step(state: MotionState, sample: ImuSample, t_ms: float) -> MotionState:
     if state.last_t_ms is not None and t_ms - state.last_t_ms > IMU_GAP_MS:
-        state = MotionState()
+        # What was turned before the gap still was; what was turned during it is lost.
+        state = MotionState(yaw_deg=state.yaw_deg, yaw_bias_dps=state.yaw_bias_dps)
     reading: Vec3 = (sample[1], sample[2], sample[3])
     gyro: Vec3 = (sample[4], sample[5], sample[6])
     dt_s = 0.0 if state.last_t_ms is None else (t_ms - state.last_t_ms) / MS_PER_S
@@ -242,10 +255,17 @@ def _step(state: MotionState, sample: ImuSample, t_ms: float) -> MotionState:
     still = _update_still(state.still, reading, gyro, linear, t_ms)
     accel_fwd = _project(linear, axes.forward if axes else None)
     speed, source, anchor = _speed(state, accel_fwd, dt_s, still, t_ms)
+    yaw_rate = dot(gyro, axes.up) if axes else None
+    yaw, bias = state.yaw_deg, state.yaw_bias_dps
+    if yaw_rate is not None:
+        if still is not None and t_ms - still.start_ms >= STILL_HOLD_MS:
+            bias += (yaw_rate - bias) * dt_s / (GYRO_BIAS_TIME_CONSTANT_S + dt_s)
+        yaw += (yaw_rate - bias) * dt_s
     estimate = MotionEstimate(
         speed_mps=speed,
         speed_source=source,
-        yaw_rate_dps=dot(gyro, axes.up) if axes else None,
+        yaw_rate_dps=yaw_rate,
+        yaw_deg=yaw if yaw_rate is not None else None,
         accel_fwd_mps2=accel_fwd,
         accel_lat_mps2=_project(linear, axes.left if axes else None),
     )
@@ -256,6 +276,8 @@ def _step(state: MotionState, sample: ImuSample, t_ms: float) -> MotionState:
         last_t_ms=t_ms,
         still=still,
         anchor_t_ms=anchor,
+        yaw_deg=yaw,
+        yaw_bias_dps=bias,
     )
 
 

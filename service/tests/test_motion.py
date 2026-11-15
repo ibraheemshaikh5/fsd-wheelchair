@@ -102,6 +102,18 @@ def test_turning_left_is_a_positive_yaw_rate_for_any_mount(up, gyro):
     assert rows[-1].yaw_rate_dps == pytest.approx(20.0)
 
 
+def test_yaw_adds_up_the_turn_and_a_resting_gyro_does_not_drift_it():
+    # 20 deg/s to the left for one second is 20 degrees, summed on the samples' own times.
+    turned, _ = _run(MotionState(), seconds=1.0, gyro=(0, 20, 0))
+    assert turned.estimate.yaw_deg == pytest.approx(20.0, abs=0.5)
+    # Standing still with a gyro that reads 0.3 deg/s at rest: the bias is learned, so the
+    # yaw stops creeping (unlearned, ten more seconds would add three degrees).
+    resting, _ = _run(turned, seconds=10.0, t=T0 + 1000, gyro=(0, 0.3, 0))
+    later, _ = _run(resting, seconds=10.0, t=T0 + 11000, gyro=(0, 0.3, 0))
+    assert later.yaw_bias_dps == pytest.approx(0.3, abs=0.02)
+    assert later.estimate.yaw_deg - resting.estimate.yaw_deg == pytest.approx(0.0, abs=0.1)
+
+
 def test_turning_right_is_negative():
     state, _ = _run(MotionState(), seconds=0.5, gyro=(0, -15, 0))
     assert state.estimate.yaw_rate_dps == pytest.approx(-15.0)

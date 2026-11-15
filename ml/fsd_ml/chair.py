@@ -15,6 +15,7 @@ sitting in the chair. Edit that file and restart the console.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -44,6 +45,14 @@ class Body:
     length_m: float = 1.016
     # Kept clear on every side.
     margin_m: float = 0.15
+    # From the chair's rearmost point forward to the middle of its big drive wheels: the
+    # point it turns about. Measured: the hubs are 0.711 m behind the lens.
+    axle_from_rear_m: float = 0.083
+
+    @property
+    def pivot_behind_m(self) -> float:
+        """How far behind the chair's middle the point it turns about is."""
+        return self.length_m / 2 - self.axle_from_rear_m
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +73,40 @@ class ChairSetup:
         The camera looks straight ahead, so this is a plain shift.
         """
         return np.asarray(path_xy, dtype=np.float64).reshape(-1, 2) + self.lens_xy
+
+    def to_pixels(self, floor_xy: np.ndarray, width: int, height: int) -> np.ndarray:
+        """Points on the floor (chair frame) as pixels in the camera's picture.
+
+        Points behind the lens come back as NaN. This is the arithmetic of ``project`` in
+        console/page.html (its normal lens), so a path is drawn in the same place by both.
+        """
+        camera = self.camera
+        ahead, left = (np.asarray(floor_xy, dtype=np.float64).reshape(-1, 2) - self.lens_xy).T
+        tilt = math.radians(camera.tilt_down_deg)
+        depth = ahead * math.cos(tilt) + camera.height_m * math.sin(tilt)
+        below = -ahead * math.sin(tilt) + camera.height_m * math.cos(tilt)
+        depth = np.where(depth < 0.05, np.nan, depth)
+        focal = (width / 2) / math.tan(math.radians(camera.hfov_deg) / 2)
+        return np.column_stack(
+            [width / 2 - focal * left / depth, height / 2 + focal * below / depth]
+        )
+
+    def to_floor(self, pixels_xy: np.ndarray, width: int, height: int) -> np.ndarray:
+        """Pixels of the camera's picture as the points of the floor they show (chair frame).
+
+        The other way round from ``to_pixels``. A pixel at or above the horizon shows no
+        floor and comes back as NaN.
+        """
+        camera = self.camera
+        x, y = np.asarray(pixels_xy, dtype=np.float64).reshape(-1, 2).T
+        focal = (width / 2) / math.tan(math.radians(camera.hfov_deg) / 2)
+        across, down = (x - width / 2) / focal, (y - height / 2) / focal
+        tilt = math.radians(camera.tilt_down_deg)
+        # Along the lens's axis to where the ray meets the floor, the lens's height below it.
+        falls = down * math.cos(tilt) + math.sin(tilt)
+        depth = np.where(falls > 1e-6, camera.height_m / np.where(falls > 1e-6, falls, 1.0), np.nan)
+        ahead = depth * (math.cos(tilt) - down * math.sin(tilt))
+        return np.column_stack([ahead, -across * depth]) + self.lens_xy
 
     def as_dict(self) -> dict:
         ahead, left = self.lens_xy

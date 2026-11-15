@@ -94,6 +94,8 @@ iOS Safari differs from the W3C spec in two ways.
   reads `az ≈ −9.8`. True linear acceleration is `G − reading`, with `G` the low-passed reading.
 - **Derived motion** (service): `yaw_rate_dps` positive = turning left; `accel_fwd_mps2` positive = speeding up along the
   camera's forward; `accel_lat_mps2` positive = toward the chair's left.
+  The status also carries `yaw_deg`: the yaw rate summed over the phone's own sample times since it connected
+  (positive left, not wrapped, the gyro's resting rate taken off). It is not in the recorded `motion` line.
 
 ## Recordings
 

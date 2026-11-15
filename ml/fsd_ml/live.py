@@ -125,6 +125,8 @@ class LiveFeed:
         # when the gyro last gave a fresh reading.
         self._yaw_rad = 0.0
         self._gyro_s: float | None = None
+        # The service's own running angle (degrees) at that reading, if it sends one.
+        self._service_yaw: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         # Why the feed is down, in words, while it is.
@@ -198,13 +200,27 @@ class LiveFeed:
             self._heard_s = now
 
     def _turned(self, status: dict[str, Any], now: float) -> None:
-        """Add the turn since the last fresh gyro reading to the running angle."""
+        """Add the turn since the last fresh gyro reading to the running angle.
+
+        The service sums the gyro sample by sample on the phone's own clock, with the
+        gyro's resting rate taken off (``yaw_deg``, drive_service/motion.py), so only the
+        change in that sum is added here: when messages arrive does not matter. After a gap
+        the sum may have started again (the phone reconnected), so the first reading only
+        sets where to count from.
+        """
         motion = status.get("motion") or {}
-        rate = motion.get("yaw_rate_dps")
+        rate, yaw = motion.get("yaw_rate_dps"), motion.get("yaw_deg")
         if not motion.get("fresh") or rate is None:
             return
-        # A resting gyro wanders a little; that is not the chair turning.
-        if self._gyro_s is not None and now - self._gyro_s < GYRO_FRESH_S and abs(rate) > 0.5:
+        continuing = self._gyro_s is not None and now - self._gyro_s < GYRO_FRESH_S
+        if yaw is not None:
+            if continuing and self._service_yaw is not None:
+                self._yaw_rad += math.radians(yaw - self._service_yaw)
+            self._service_yaw = yaw
+        elif continuing and abs(rate) > 0.5:
+            # A service from before it sent ``yaw_deg``: one rate per message, timed by
+            # arrival, and blind to turns slower than its resting wander. Remove this once
+            # the service on the board is updated.
             self._yaw_rad += math.radians(rate) * (now - self._gyro_s)
         self._gyro_s = now
 
@@ -214,6 +230,23 @@ class LiveFeed:
 
     def gyro_fresh(self) -> bool:
         return self._gyro_s is not None and self._clock() - self._gyro_s < GYRO_FRESH_S
+
+    def picture_change(self, span_s: float = 0.3) -> float | None:
+        """How much the picture has changed over about ``span_s``: the mean difference in
+        brightness (0-255) between the newest frame and one that much older, both shrunk.
+
+        Standing still it is about 0.3; driving or turning, 4 or more (measured on the
+        chair's runs). None when there are not two frames that far apart to compare.
+        """
+        with self._lock:
+            frames = list(self._frames)
+        older = [f for f in frames[:-1] if frames[-1].received_s - f.received_s >= span_s]
+        if not older or self._clock() - frames[-1].received_s > MAX_FRAME_AGE_S:
+            return None
+        new, old = (
+            f.image[::8, ::8].astype(np.float32).mean(axis=2) for f in (frames[-1], older[-1])
+        )
+        return float(np.abs(new - old).mean())
 
     def fresh_frame(self) -> LiveFrame | None:
         """The newest frame, or None when there is none young enough to drive on."""
