@@ -1,7 +1,7 @@
 """The one interface to the wheelchair: Wheelchair().set(x, y).
 
-x, y are percent of stick (-100..100; x>0 right, y>0 forward). Used by teleop.py now and by
-the AI driver later. A 20 Hz sender thread fires UDP packets over Tailscale to the daemon on
+x, y are percent of stick (-100..100; x>0 right, y>0 forward). Used by teleop.py and by the
+AI driver (ml/fsd_ml/chair_link.py). A 20 Hz sender thread fires UDP packets over Tailscale to the daemon on
 the UNO Q (board/wheelchaird.py), which feeds the fake joystick locally at 50 Hz. Nothing here
 waits on the network, so Wi-Fi jitter doesn't stall the caller.
 
@@ -23,7 +23,7 @@ PORT, RATE_HZ, FRESH_S = 5005, 20, 0.3
 
 
 class Wheelchair:
-    def __init__(self, deadband=41, turn_deadband=37):   # measured: forward creeps at 41%, turning at 37%
+    def __init__(self, deadband=41, turn_deadband=37):   # measured: forward creeps at 41%, turning at 37% (board/wheelchaird.py uses the same for its speed estimate)
         self.deadband = deadband            # % of stick the chair ignores (forward/back); mapped past it
         self.turn_deadband = turn_deadband  # same for left/right
         self._fsd = False; self._arm = 0    # arm bumps on every off->on, so the board can re-arm after a dropout
@@ -37,6 +37,7 @@ class Wheelchair:
         for _ in range(60):                 # wait up to 3 s for the board to answer
             if self._stats: return
             time.sleep(0.05)
+        self._stop = True; self._sock.close()   # stop the sender, or it would keep the board's one-sender slot
         raise ConnectionError(f"no answer from {HOST}:{PORT} (board on? Tailscale up? wheelchaird running? another program already driving?)")
 
     @property

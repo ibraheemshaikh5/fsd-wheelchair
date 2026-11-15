@@ -1,7 +1,7 @@
 """Runs ON the UNO Q (Linux side). Keeps the fake joystick fed from local openocd, so Wi-Fi
 jitter never reaches the chair.
 
-Mac/AI -> UDP "x y mode" (stick %, already past the deadband) -> this daemon -> 50 Hz writes
+Laptop (teleop or the AI) -> UDP packet (stick %, already past the deadband) -> this daemon -> 50 Hz writes
 into the MCU's RAM command box (SWD via local openocd) -> fake MLX90393 -> chair.
 
 Packet: "x y mode arm session seq". Gaps in UDP (bad Wi-Fi):
@@ -28,7 +28,7 @@ START = 35                                        # starts jump straight here: j
 MAGIC = "0xc0ffee01"
 CX, CY = 16461, 15361                             # stick centre counts (firmware sketch.ino)
 TOP_MPH, TOP_TURN_DPS = 4.0, 90.0                 # ballpark: Culver folding chairs list 3.7-4 mph; turn rate a guess
-DEAD_FWD, DEAD_TURN = 0.41, 0.37                  # stick fraction the chair ignores (measured)
+DEAD_FWD, DEAD_TURN = 0.41, 0.37                  # stick fraction the chair ignores (measured; wheelchair.py maps commands past the same values)
 LAG_S = 0.5                                       # rough time the chair takes to reach a new speed (guess)
 METRICS_PATH = "/dev/shm/wheelchair.json"
 MPH_TO_MPS = 0.44704
@@ -161,7 +161,7 @@ def main():
             s, ocd = ocd_connect(); box = find_box(ocd); socks = listen()
             print(f"wheelchaird: box {box:#x}, listening on {[u.getsockname() for u in socks]}", flush=True)
             x = y = mode = 0; last_rx = 0.0; seq = 0
-            session = last_seq = None; latched = False; dead_arm = None; ox = oy = 0; tick = 0
+            session = last_seq = None; latched = False; arm = 0; dead_arm = None; ox = oy = 0; tick = 0
             metrics = Metrics(); st = ocd(f"read_memory {box + 28:#x} 32 10").replace("0x", "")
             while True:
                 t0 = now(); tick += 1
@@ -171,13 +171,14 @@ def main():
                     while True:
                         try: data, addr = u.recvfrom(64)
                         except BlockingIOError: break
-                        try: px, py, pm, arm, sess, sq = (int(v) for v in data.split()[:6])
+                        try: px, py, pm, parm, sess, sq = (int(v) for v in data.split()[:6])
                         except ValueError: continue
+                        # Nothing from the packet is kept until it passes the sender and order checks.
                         if sess != session:
                             if t0 - last_rx < HANDBACK_S: continue                          # another sender is driving: ignore
                             session, last_seq, latched = sess, -1, False                    # new sender takes over
                         if sq <= last_seq: continue                                         # late / duplicate
-                        last_seq = sq; x, y, mode, last_rx = px, py, pm, t0
+                        last_seq = sq; x, y, mode, arm, last_rx = px, py, pm, parm, t0
                         if latched and arm != dead_arm: latched = False                     # re-armed
                         metrics.packets += 1
                         u.sendto(f"{st} {int(latched)}".encode(), addr)
