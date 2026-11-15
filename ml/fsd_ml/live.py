@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import ssl
 import struct
 import threading
 import time
@@ -30,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+import certifi
 import httpx
 import numpy as np
 from PIL import Image
@@ -143,7 +145,12 @@ class LiveFeed:
         wait_s = 0.5
         while not self._stop.is_set():
             try:
-                with connect(self.address, open_timeout=5, max_size=8 * 1024 * 1024) as socket:
+                # certifi's CAs: python.org builds on macOS have none, so wss:// would fail.
+                tls = ssl.create_default_context(cafile=certifi.where())
+                secure = {"ssl": tls} if self.address.startswith("wss://") else {}
+                with connect(
+                    self.address, open_timeout=5, max_size=8 * 1024 * 1024, **secure
+                ) as socket:
                     while not self._stop.is_set():
                         try:
                             message = socket.recv(timeout=1.0)
