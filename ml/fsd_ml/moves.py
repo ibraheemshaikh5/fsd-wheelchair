@@ -106,6 +106,9 @@ class Runner:
         self._move: dict[str, Any] | None = None
         # What the last move achieved, as its end was recorded.
         self.achieved: dict[str, Any] = {}
+        # The turn stick added, over turn_stick_pct, that the last turn needed to get the
+        # chair turning: where the next turn starts from.
+        self._turn_boost = 0.0
         self._move_s = 0.0
         self._state: dict[str, Any] = {"running": False, "phase": "idle"}
 
@@ -625,7 +628,7 @@ class Runner:
         # then; None while coasting. ``raised`` is the stick added because it was not turning.
         way = math.copysign(1.0, degrees_left)
         pushing: tuple[float, float] | None = (began, start)
-        raised, still_since = 0.0, None
+        raised, still_since = self._turn_boost, None
         # The yaw and turn rate when the stick last let go, to learn the coast from.
         let_go = (start, 0.0)
         while True:
@@ -658,7 +661,7 @@ class Runner:
                         break
                     if pushes >= MAX_PUSHES:
                         return ended("time_cap", "failed", f": still off after {pushes} pushes")
-                    way, pushing, raised = math.copysign(1.0, error), (now, yaw), 0.0
+                    way, pushing = math.copysign(1.0, error), (now, yaw)
                     pushes += 1
             else:
                 # Where it would end up if let go now, short of the goal by this much.
@@ -669,13 +672,12 @@ class Runner:
                 else:
                     # From rest the casters may be trailing the wrong way, and the usual
                     # stick does not always break them free: one that is not turning the
-                    # chair is raised, up to turn_max_pct, before it is called stuck; and
-                    # brought back down once the chair is turning.
+                    # chair is raised, up to turn_max_pct, before it is called stuck. What it
+                    # took is kept for the rest of the turn (dropping back would only stall
+                    # it again) and most of it for the next turn.
                     held = now - pushing[0]
                     if abs(rate) < STILL_DEG_PER_S and held > RAISE_AFTER_S:
                         raised = min(hardest - least, raised + RAISE_PCT_PER_S * TURN_TICK_S)
-                    elif abs(rate) >= STILL_DEG_PER_S:
-                        raised = max(0.0, raised - 2 * RAISE_PCT_PER_S * TURN_TICK_S)
                     stick = min(hardest, min(most, max(least, most * to_go / slow)) + raised)
                     if held >= STUCK_S:
                         if abs(math.degrees(yaw - pushing[1])) >= STUCK_DEG:
@@ -692,6 +694,7 @@ class Runner:
                     if problem := self._chair.drive(-way * stick, 0.0):
                         return ended(_code(problem), "aborted", f": {problem}")
             self._sleep(TURN_TICK_S)
+        self._turn_boost = 0.8 * raised
         return ended("finished", "finished")
 
 

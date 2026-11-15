@@ -339,13 +339,16 @@ class Coasting(FakeChair):
             self.now += 0.01
             while self.queue and self.queue[0][0] <= self.now:
                 self.stick = self.queue.pop(0)[1]
-            push = abs(self.stick) - self.dead_pct  # 27 degrees a second at 12% stick
-            want = -math.copysign(27.0 * push / (12 - self.dead_pct), self.stick) if push > 0 else 0
+            push = abs(self.stick) - self.dead_pct  # 27 degrees a second 7% past it
+            want = -math.copysign(27.0 * push / 7, self.stick) if push > 0 else 0
             self.rate += (want - self.rate) * 0.01 / self.lag_s
             self.yaw += math.radians(self.rate * 0.01)
 
 
-@pytest.mark.parametrize("plant", [{}, {"dead_pct": 9.0}, {"lag_s": 0.65, "delay_s": 0.35}])
+# The last is a chair that 12% turn stick does not move at all: the stick is raised until it does.
+@pytest.mark.parametrize(
+    "plant", [{}, {"dead_pct": 9.0}, {"lag_s": 0.65, "delay_s": 0.35}, {"dead_pct": 16.0}]
+)
 def test_a_turn_ends_near_its_goal_without_hunting_on_a_chair_that_coasts(plant):
     for asked in (10, 25, -50, 90):
         chair = Coasting(**plant)
