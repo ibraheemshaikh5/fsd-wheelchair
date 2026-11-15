@@ -55,6 +55,8 @@ class LiveFrame:
     # When the phone captured it, on this machine's monotonic clock; None before
     # the phone's clock is synced with the service.
     captured_s: float | None = None
+    # The JPEG exactly as the camera sent it: full size, not re-encoded.
+    jpeg: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +176,7 @@ class LiveFeed:
         captured = _captured_s(header, now)
         with self._lock:
             self._count += 1
-            self._frames.append(LiveFrame(self._count, now, frame, captured))
+            self._frames.append(LiveFrame(self._count, now, frame, captured, jpeg))
             while self._frames and now - self._frames[0].received_s > HISTORY_S:
                 self._frames.popleft()
             self._heard_s = now
@@ -217,15 +219,28 @@ class LiveFeed:
 def ipad_message(status: dict[str, Any]) -> dict[str, Any]:
     """What the rider has asked for on the iPad, in words for a person to read."""
     goal, destination = status.get("goal"), status.get("destination")
+    # ``request`` changes when the rider asks for something new, and only then.
     if goal and goal.get("kind") == "instruction":
-        return {"kind": "instruction", "text": f"“{goal['instruction']}”"}
+        return {
+            "kind": "instruction",
+            "text": f"“{goal['instruction']}”",
+            "request": f"goal-{goal.get('version')}",
+        }
     if not goal and not destination:
-        return {"kind": None, "text": "Nothing set on the iPad"}
+        return {"kind": None, "text": "Nothing set on the iPad", "request": None}
     away = (destination or {}).get("distance_m")
     where = f"{away:.0f} m away" if away is not None else "distance unknown without GPS"
     if goal and goal.get("kind") == "route":
-        return {"kind": "route", "text": f"Map destination, {where}, by a planned route"}
-    return {"kind": "destination", "text": f"Map destination, {where}, no route"}
+        return {
+            "kind": "route",
+            "text": f"Map destination, {where}, by a planned route",
+            "request": f"goal-{goal.get('version')}",
+        }
+    return {
+        "kind": "destination",
+        "text": f"Map destination, {where}, no route",
+        "request": f"point-{destination.get('lat')}-{destination.get('lon')}",
+    }
 
 
 def to_sensors(sample: LiveSample, now_ms: float) -> Sensors:
@@ -255,6 +270,9 @@ def to_sensors(sample: LiveSample, now_ms: float) -> Sensors:
 
 # How far along the route the model is aimed.
 ROUTE_LOOKAHEAD_M = 10.0
+# Closer than this counts as there: a phone's GPS cannot tell much finer.
+ARRIVE_M = 3.0
+ARRIVED = "arrived at the iPad's destination"
 
 
 class ChairGoal:
@@ -295,6 +313,9 @@ class ChairGoal:
         if not placed or heading.get("deg") is None:
             return None, "the iPad has a destination, but the chair has no fresh GPS and heading"
         facing = float(heading["deg"])
+        distance = (destination or {}).get("distance_m")
+        if distance is not None and float(distance) <= ARRIVE_M:
+            return None, ARRIVED
 
         if goal and goal.get("kind") == "route":
             try:
@@ -305,6 +326,8 @@ class ChairGoal:
                 east, north = to_local(gps["lat"], gps["lon"], route.origin)
                 self._progress_m = route.project(east, north, self._progress_m)
                 left_m = route.length_m - self._progress_m
+                if left_m <= ARRIVE_M:
+                    return None, ARRIVED
                 target = route.point_at(self._progress_m + ROUTE_LOOKAHEAD_M)
                 ahead, left = world_to_chair(target, east, north, facing)[0]
                 return Goal(
@@ -312,7 +335,7 @@ class ChairGoal:
                 ), f"iPad route: {left_m:.0f} m left"
 
         # A bare destination: aim straight at it.
-        distance, bearing = destination.get("distance_m"), destination.get("bearing_deg")
+        bearing = destination.get("bearing_deg")
         if distance is None or bearing is None:
             return None, "the iPad has a destination, but the chair has no fresh GPS"
         off = math.radians(float(bearing) - facing)

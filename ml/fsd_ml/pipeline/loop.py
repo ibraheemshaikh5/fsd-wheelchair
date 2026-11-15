@@ -42,6 +42,9 @@ class PipelineConfig:
     take_over_after_gate_ms: float = 2_000.0
     take_over_after_blocked_ms: float = 10_000.0
     command_ttl_ms: float = 200.0
+    # Where the lens sits relative to the middle of the chair, metres (ahead, left).
+    # The model's paths start at the lens; they are shifted by this to start at the chair.
+    lens_xy: tuple[float, float] = (0.0, 0.0)
     footprint: FootprintConfig = field(default_factory=FootprintConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
 
@@ -222,6 +225,10 @@ class Pipeline:
 
         # Stage 7: choose a path the chair fits along.
         candidates = _in_current_frame(proposal, pose) if proposal else []
+        if config.lens_xy != (0.0, 0.0):
+            candidates = [
+                Candidate(c.path_xy + config.lens_xy, c.score, c.speed_mps) for c in candidates
+            ]
         if candidates:
             choice = choose(candidates, sensors.obstacles, config.footprint)
         else:
@@ -251,8 +258,10 @@ class Pipeline:
                 else:
                     self._blocked_since_ms = None
                     # Stage 8: control.
+                    # Steer by the path as the model drew it; the lens shift is for the
+                    # fit check only, or the chair would drift toward the camera's side.
                     v, w = follow(
-                        choice.path_xy,
+                        choice.path_xy - config.lens_xy,
                         choice.speed_factor,
                         speed,
                         dt_s,
