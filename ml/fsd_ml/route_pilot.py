@@ -79,7 +79,7 @@ NEAR_M = 0.5
 # (a few pixels are tens of centimetres) and there will be a new look long before.
 MAX_ROUTE_M = 3.5
 # A route with less to drive than this is not worth setting off for.
-MIN_ROUTE_M = 0.3
+MIN_ROUTE_M = 0.2
 KEEP_OUT = (255, 40, 40)
 PREVIOUS = (60, 220, 255, 230)
 GOAL = (255, 60, 220, 255)

@@ -27,6 +27,10 @@ DEFAULTS: dict[str, float] = {
     "turn_slow_deg": 15.0,
     "turn_coast_s": 0.5,
     "turn_done_deg": 3.0,
+    # The most sideways stick while following a drawn route. Measured: 5% turns the moving
+    # chair about 4 degrees a second, so 12% (the turn-on-the-spot stick) could only hold a
+    # curve of 2.6 m radius at 0.45 m/s, and anything tighter was crawled round.
+    "curve_stick_pct": 22.0,
     # Standing still between one move and the next.
     "settle_s": 1.0,
     # A reverse pull to stop harder. Off: it is the harshest thing the chair can be asked for.

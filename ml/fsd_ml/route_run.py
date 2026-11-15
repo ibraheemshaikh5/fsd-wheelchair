@@ -7,7 +7,7 @@ stand waiting for it. So the two go on side by side:
 
 - The chair follows the route it has. Where it is, is kept as a believed pose in the run's
   own frame: heading from the gyro, distance from the calibrated speed of the stick sent.
-- Once it has driven REPLAN_M of a route, the next look is asked for: the picture as it is
+- As soon as it has set off on a route (REPLAN_M), the next look is asked for: the picture as it is
   then, with the pose it was taken at. When the answer comes, some seconds and a metre or
   two later, the new route is placed by that pose and taken up from wherever on it the
   chair has got to. If the chair gets to the end of its route first, it stands and waits.
@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from fsd_ml import route_pilot
-from fsd_ml.candidates import PLAN_SLACK_M
 from fsd_ml.chair_link import to_stick
 from fsd_ml.moves import STUCK, STUCK_S, _degrees
 from fsd_ml.pipeline.control import follow
@@ -46,7 +45,9 @@ if TYPE_CHECKING:
 
 TICK_S = 0.1
 # The next look is asked for once this much of the route in hand has been driven.
-REPLAN_M = 0.5
+REPLAN_M = 0.1
+# A route ends this much short of where the stop rule would stop a standing chair.
+END_SLACK_M = 0.05
 # Standing still this long before a look, so the picture is sharp and from after the move.
 SETTLE_S = 0.6
 # A route whose start is further than this off the chair's heading is turned to face first.
@@ -98,6 +99,9 @@ class RouteRun:
         self._asked_xy = (0.0, 0.0)
         self._looks = 0
         self._bad = 0
+        # Routes in a row of which nothing could be driven, and what the model answered.
+        self._undriven = 0
+        self._answers: list[str] = []
         self._no_picture_since: float | None = None
         # What the model is given back: its notes, what has happened since its last answer,
         # and where it last marked the goal (run's frame).
@@ -204,6 +208,16 @@ class RouteRun:
         goal = None if self._goal is None else tuple(into(pose, [self._goal])[0])
         self._looks += 1
         happened = [*self._happened, *self._remembered.beside(pose, self._driven)]
+        if self._undriven >= 2:
+            happened.append(
+                f"{self._undriven} routes in a row could not be driven at all. Drawing the"
+                " same way again will be cut the same way: look left or right for open"
+                " floor, back up, or start the route on the other side."
+            )
+        if self._answers:
+            happened.append(
+                "Your answers so far, oldest first: " + ", ".join(self._answers[-8:]) + "."
+            )
         self._happened = []
         self._asked_xy = (self._xy[0], self._xy[1])
         self._runner._phase(f"look {self._looks}: the pilot is thinking", steps=self._looks)
@@ -256,6 +270,7 @@ class RouteRun:
             return None
         self._bad = 0
         self._notes.append(plan.note)
+        self._answers.append(plan.action)
         ground = answer.get("ground")
         if plan.goal is not None:
             ahead, left, _ = route_pilot.place(plan.goal, ground, self._setup)
@@ -263,15 +278,22 @@ class RouteRun:
                 self._goal = tuple(out_of(pose, [[ahead, left]])[0])
         route = None
         if plan.action == "route":
-            speed = self._chair.speed_for(self._chair.setting("drive_stick_pct"))
+            # A route ends where the chair would stop for what it meets. The chair eases
+            # down to the end of a route, so that is the stop distance of a chair nearly
+            # standing, not of one at full speed: cutting by the full-speed distance threw
+            # away 0.3 m of every route, and all of a short one.
             route = route_pilot.interpret(
                 plan,
                 ground,
                 self._remembered.around(pose),
                 self._setup,
                 self._chair.setting("path_clearance_m"),
-                stop_distance_m(speed) + PLAN_SLACK_M,
+                stop_distance_m(0.0) + END_SLACK_M,
             )
+            if not len(route.path):
+                self._undriven += 1
+            else:
+                self._undriven = 0
             record["route"] = {
                 "points": [[round(a, 2), round(b, 2), floor] for a, b, floor in route.points],
                 "path": np.round(route.path, 2).tolist(),
@@ -428,9 +450,9 @@ class RouteRun:
         if left_m < 0.3:
             w = 0.0  # too near the end to aim at it: the aim swings wide as it closes
         turn, forward = to_stick(v, w, chair.setting("v_full_mps"), chair.setting("w_full_radps"))
-        # Never a harder turn than a turn on the spot is given: a curve too tight for that at
-        # this speed is driven more slowly, not wider.
-        slower = min(1.0, chair.setting("turn_stick_pct") / max(1.0, abs(turn)))
+        # Never more sideways stick than curve_stick_pct: a curve too tight for that at this
+        # speed is driven more slowly, not wider.
+        slower = min(1.0, chair.setting("curve_stick_pct") / max(1.0, abs(turn)))
         self._v = v * slower
         if problem := chair.drive(turn * slower, forward * slower):
             self._drop("takeover" if "took over" in problem else "link", problem)

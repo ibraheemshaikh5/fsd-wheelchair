@@ -25,6 +25,9 @@ STOP_STILL_M = 0.15
 STOP_REACT_S = 0.5
 # The clearance kept from something the chair is already nearer to than its margin.
 BESIDE_M = 0.05
+# Something the chair already stands against stops it only where it would come this much
+# nearer still.
+CLOSING_M = 0.03
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,8 +81,12 @@ def first_hit(
     shape: Body,
     extra_m: float = 0.0,
     from_chair: bool = True,
+    closing: bool = False,
 ) -> tuple[float, Obstacle] | None:
     """Distance along the path at which the chair first touches an obstacle, and which one.
+
+    With ``closing``, an obstacle only counts where the chair has come CLOSING_M further
+    into it than it is at the path's start: for things it already stands against.
 
     The path is taken to start at the chair's centre. For a chair already driving it,
     ``from_chair`` false takes the path as given, from the point of it the chair is at:
@@ -103,9 +110,14 @@ def first_hit(
         # The obstacle as seen from the chair at each sample.
         ahead = dx * np.cos(headings) + dy * np.sin(headings)
         left = -dx * np.sin(headings) + dy * np.cos(headings)
-        touching = (np.abs(ahead) <= half_length + obstacle.radius_m) & (
-            np.abs(left) <= half_width + obstacle.radius_m
+        # How far inside the chair's box (with its margin) the obstacle is: negative, outside.
+        inside = np.minimum(
+            half_length + obstacle.radius_m - np.abs(ahead),
+            half_width + obstacle.radius_m - np.abs(left),
         )
+        touching = inside >= 0
+        if closing:
+            touching &= inside > max(float(inside[0]), 0.0) + CLOSING_M
         if touching.any():
             distance = float(np.argmax(touching)) * SAMPLE_SPACING_M
             if best is None or distance < best[0]:
@@ -126,7 +138,11 @@ def first_hit_from_here(
 
     The margin is room the chair keeps from things it comes up to. Something it is already
     nearer to than that (it stands beside it) cannot be kept that far away, and holding the
-    chair to it would leave it nowhere to go: such a thing need only be cleared by BESIDE_M.
+    chair to it would leave it nowhere to go: such a thing need only be cleared by BESIDE_M,
+    and if the chair is already nearer than that too (it stands against it, or the reading
+    of where it is, is a little off), it stops the chair only where the path would bring
+    the body nearer still. So the chair can always drive along or away from what is beside
+    it, and never toward it.
     """
     near = beside(obstacles, shape)
     known = {id(obstacle) for obstacle in near}
@@ -136,7 +152,7 @@ def first_hit_from_here(
         hit
         for hit in (
             first_hit(path_xy, far, shape, from_chair=from_chair),
-            first_hit(path_xy, near, close, from_chair=from_chair),
+            first_hit(path_xy, near, close, from_chair=from_chair, closing=True),
         )
         if hit
     ]

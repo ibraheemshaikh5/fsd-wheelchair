@@ -33,6 +33,9 @@ Answer with one action.
   the picture, in order. The chair drives from where it is (the white triangle) to your
   first point and on through the rest, smoothly, without stopping, and asks you again on
   the way.
+  - Draw as far as the clear floor goes: 2 to 3 metres when the way is open. The chair
+    drives the whole of it without stopping while you look again, so a long route is a
+    smooth drive and a short one is a stop.
   - Every point must be on floor you can see. Do not put points on furniture, walls, steps
     or anything else, and do not draw through things. If the way goes behind something, end
     the route at the last floor you can see on that way: you will get a new picture from
