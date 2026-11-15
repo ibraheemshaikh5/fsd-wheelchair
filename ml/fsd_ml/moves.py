@@ -555,8 +555,8 @@ class Runner:
         """Mark the end of the move begun: what was achieved and exactly why it ended.
 
         Every way out of a move goes through here, so none ends without a record. ``reason``
-        is one of: finished, time_cap, obstacle, no_floor, stuck, stale_gyro, no_speed,
-        takeover, link, heartbeat, disarmed, stopped, exception.
+        is one of: finished, replaced, stalled, time_cap, obstacle, no_floor, stuck,
+        stale_gyro, no_speed, takeover, link, heartbeat, disarmed, stopped, exception.
         """
         move, self._move = self._move or {}, None
         self.achieved = achieved

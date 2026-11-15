@@ -46,6 +46,10 @@ if TYPE_CHECKING:
 TICK_S = 0.1
 # The next look is asked for once this much of the route in hand has been driven.
 REPLAN_M = 0.1
+# While driving, a look is asked for at least this often, however little ground is covered.
+REASK_S = 6.0
+# A route in hand that the chair has not been driven along for this long is given up.
+STALLED_S = 2.0
 # A route ends this much short of where the stop rule would stop a standing chair.
 END_SLACK_M = 0.05
 # Standing still this long before a look, so the picture is sharp and from after the move.
@@ -97,6 +101,9 @@ class RouteRun:
         self._asking: threading.Thread | None = None
         self._answer: dict[str, Any] | None = None
         self._asked_xy = (0.0, 0.0)
+        self._asked_s = self._clock()
+        # When the chair was last being driven forward along the route in hand.
+        self._driving_s = self._clock()
         self._looks = 0
         self._bad = 0
         # Routes in a row of which nothing could be driven, and what the model answered.
@@ -176,7 +183,7 @@ class RouteRun:
         if self._path is None:
             if now - self._stood_since < SETTLE_S:
                 return None
-        elif math.dist(self._xy, self._asked_xy) < REPLAN_M:
+        elif math.dist(self._xy, self._asked_xy) < REPLAN_M and now - self._asked_s < REASK_S:
             return None
         if self._looks >= self._max_looks:
             if self._path is None:
@@ -219,7 +226,7 @@ class RouteRun:
                 "Your answers so far, oldest first: " + ", ".join(self._answers[-8:]) + "."
             )
         self._happened = []
-        self._asked_xy = (self._xy[0], self._xy[1])
+        self._asked_xy, self._asked_s = (self._xy[0], self._xy[1]), now
         self._runner._phase(f"look {self._looks}: the pilot is thinking", steps=self._looks)
         obstacles = self._remembered.around(pose)
         look = {"look": self._looks, "frame": frame, "pose": pose}
@@ -419,10 +426,23 @@ class RouteRun:
         window = self._path[self._along : self._along + 15]
         self._along += int(np.argmin(np.linalg.norm(window - self._xy, axis=1)))
         rest = into(here, self._path[self._along + 1 :])
-        if len(rest) < 1:
+        # The route is done when none of it is left, or what is left is no longer in front
+        # of the chair: it has drawn level with the end a little to one side.
+        if len(rest) < 1 or (len(rest) * SAMPLE_SPACING_M < 0.4 and rest[-1][0] <= 0.05):
             chair.hold()
             self._happened.append(f"The chair {self._end_route('finished', 'finished')}.")
             self._v, self._moving_since, self._stood_since = 0.0, None, now
+            return None
+        # Nothing may wait for ever: a route the chair is not being driven along is given
+        # up, said so, and looked at afresh.
+        if self._v > 0.01 or self._moving_since is None:
+            self._driving_s = now
+        elif now - self._driving_s > STALLED_S:
+            self._drop(
+                "stalled",
+                f"the chair had not been driven along it for {STALLED_S:.0f} s (what was left"
+                " of it was beside or behind the chair)",
+            )
             return None
         ahead = into(here, self._path[self._along :])
         if why := chair.blocked(self._v, ahead, self._remembered.around(here, self._driven)):

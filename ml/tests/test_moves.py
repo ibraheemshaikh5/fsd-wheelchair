@@ -41,6 +41,7 @@ class FakeChair:
         }
         self.setup = ChairSetup()
         self.pictures: list[bytes] = []
+        self.ended: list[str] = []
         # What the camera says of movement (None: no picture to compare), and how far the
         # chair veers by itself each time it is driven, in degrees to the left.
         self.change: float | None = None
@@ -78,19 +79,18 @@ class FakeChair:
     def picture_change(self):
         return self.change
 
-    def blocked(self, speed_mps=0.0, path_xy=None):
+    def blocked(self, speed_mps=0.0, path_xy=None, obstacles=None):
         return self.obstacle
 
     def observe(self):
-        jpeg = io.BytesIO()
-        Image.new("RGB", (480, 270)).save(jpeg, "JPEG")
-        return type("Frame", (), {"jpeg": jpeg.getvalue()})(), "nothing sensed"
+        return type("Frame", (), {"jpeg": picture()})(), "nothing sensed"
 
     def candidates(self):
         return candidates.fan((), self.setup, 0.25)
 
     def note(self, event, **fields):
-        pass
+        if event == "action_end":
+            self.ended.append(fields.get("ended"))
 
     def record(self, mode, frame, result=None, model=None, picture=None):
         if picture:
@@ -109,6 +109,12 @@ class FakeChair:
             self.yaw += math.radians(-x_pct * 0.4 + self.veer)  # stick right turns it right
         self.x += y_pct / 12 * 0.2 * 0.1
         return None
+
+
+def picture() -> bytes:
+    jpeg = io.BytesIO()
+    Image.new("RGB", (480, 270)).save(jpeg, "JPEG")
+    return jpeg.getvalue()
 
 
 class Clock:
@@ -373,3 +379,52 @@ def test_a_straight_holds_its_heading_and_gives_up_on_a_chair_that_is_not_moving
     done = runner(chair)[0].straight(0.6, background=False)
     assert done["outcome"] == "failed" and "isn't moving" in done["reason"] and stopped(chair)
     assert 15 <= len(chair.sticks) <= 17 and done["reason"].startswith("drove forward about 0.0")
+
+
+def test_a_route_whose_end_is_beside_the_chair_is_finished_not_waited_on_for_ever():
+    from fsd_ml.route_pilot import Plan
+    from fsd_ml.route_run import RouteRun
+
+    class Draws:
+        """A pilot that draws one short route, then says it has arrived."""
+
+        task, last = "go", {}
+
+        def __init__(self):
+            self.asked = 0
+
+        def next(self, picture, report):
+            self.asked += 1
+            if self.asked > 1:
+                return Plan("arrived", note="there")
+            # Two points on the floor about 1 m ahead, as fractions of the picture.
+            pixels = chair.setup.to_pixels([[1.0, 0.0], [1.3, 0.0]], 1000, 1000)
+            return Plan("route", points=tuple((x / 1000, y / 1000) for x, y in pixels))
+
+    chair = FakeChair()
+    chair.settings.update(bench.DEFAULTS)
+    chair.settings["ramp_s"] = 0.0
+    chair.speed_for = lambda y_pct: max(0.0, y_pct) / 100 * 7.5
+    chair.ground = lambda frame: None
+    chair.sighted = lambda: None
+    chair.observe = lambda: (
+        type("Frame", (), {"jpeg": picture(), "age_s": lambda self, now: 0.0})(),
+        "",
+    )
+    # The chair really goes nowhere sideways, but is believed to: its gyro says it has
+    # swung, so the end of the route comes level to one side, never under it.
+    drive = chair.drive
+
+    def veering(x, y, reverse=False):
+        chair.yaw += math.radians(1.5)
+        return drive(0.0, y, reverse)
+
+    chair.drive = veering
+    run, clock = runner(chair)
+    run._state = {"running": True}
+    chair.sending = True
+    outcome, _ = RouteRun(run, Draws(), max_looks=5).run()
+    # It gets to ask again (and is told it has arrived) instead of standing with the route.
+    assert outcome == "arrived"
+    ended = [why for why in chair.ended if why in ("finished", "stalled")]
+    assert ended
