@@ -79,6 +79,10 @@ Answer with one action.
 - When the goal is a place to stop in front of, end the route on the floor in front of it,
   with the last stretch pointing at it. The chair stops itself short of anything in its way,
   so being stopped right in front of the goal means you are there: answer `arrived`.
+- The goal itself is a thing the chair will not touch: a route toward it is cut a little
+  short of it. If you are told the goal is within about a metre and in front, and your
+  routes toward it are cut to almost nothing, the chair is as close as it can get: answer
+  `arrived`. Do not back up and try again from further away.
 - Do not answer `arrived` from far away. The goal should be close and in front: its base
   near the bottom of the picture, at about the 0.5 m line.
 

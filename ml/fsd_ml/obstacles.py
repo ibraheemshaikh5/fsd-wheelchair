@@ -48,6 +48,11 @@ MIN_POINTS = 3
 # floor are noise in the depth, while a thin thing standing by itself (a chair leg) has many.
 ALONE_POINTS = 9
 KEEP = 60
+# How big each obstacle is taken to be round the middle of its points. It was 0.09 m (over
+# half a cell), which pushed every wall 9 cm toward the chair on top of the clearance asked
+# for, on both sides: a 1 m gap read as 0.8 m. Cells are filled every 0.15 m along a thing,
+# far closer than the chair is wide, so nothing gets between them at this size.
+OBSTACLE_RADIUS_M = 0.03
 # The bottom of the picture shows the chair's own footplate and caster: never an obstacle.
 OWN_CHAIR_ROWS = 0.12
 # Where the chair's own front corner sits in the picture: below and to the right of this
@@ -256,7 +261,7 @@ def obstacles_from_depth(
             "object",
             round(float(total_a / n) + lens_xy[0], 3),
             round(float(total_b / n) + lens_xy[1], 3),
-            radius_m=CELL_M * 0.6,
+            radius_m=OBSTACLE_RADIUS_M,
         )
         for i, (n, total_a, total_b) in enumerate(filled[:KEEP])
     ]
