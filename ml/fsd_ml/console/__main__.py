@@ -1,3 +1,3 @@
-from fsd_ml.viewer.server import main
+from fsd_ml.console.server import main
 
 main()

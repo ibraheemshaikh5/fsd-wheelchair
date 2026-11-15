@@ -1,39 +1,36 @@
 # ml
 
-The model side of the chair: the driving pipeline, a simulator to run it in, the model behind one interface, and the tools to watch and measure it. The plan is in [docs/model.md](../docs/model.md) and [docs/driving-pipeline.md](../docs/driving-pipeline.md).
+The model side of the chair. One program, the **console**, runs on a laptop: it reads the phone's camera from the driving service, asks a model where to go, and sends stick commands to the chair's board.
 
-Nothing here touches the driving service, the iPad app or the phone page. The pipeline is built and tested here against a simulated chair, and plugs into the service once it is ready.
+```
+iPhone -> drive_service -> console (this folder) -> OmniVLA on Modal, or the Claude pilot
+                              |
+                              +-> chair_link.ChairSender -> hardware/wheelchair.py (UDP) -> board
+```
 
-## Rules
-
-- **It imports nothing from `service/`.** Recordings and the message shapes in [docs/outputs.md](../docs/outputs.md) are the only contract.
-- **No model runs on this machine.** OmniVLA runs on a Modal GPU and its weights live in a Modal volume. Only two stand-ins, `fan` and `straight`, run here.
-- **Every model sits behind one interface**, `Driver.propose()` in [`fsd_ml/drivers.py`](fsd_ml/drivers.py), wherever it runs.
+It imports nothing from `service/`. The laptop must be on the team Tailscale to reach the board (`WHEELCHAIR_HOST`, default `wheelchair-unoq`).
 
 ## Layout
 
 ```
 fsd_ml/
-  pipeline/      sensor data in, drive command out
-    loop.py        one pass: gate, localize, goal, model, choose path, control
-    route.py       a route and the chair's progress along it
-    footprint.py   pick a path the chair fits along
-    control.py     path to speed and turn rate
-    outputs.py     the chair command, iPad state and decision record
-  sim/           a virtual chair and scenarios to drive the pipeline through
-  drivers.py     the Driver interface; "straight" and "fan" stand-ins
-  omnivla.py     OmniVLA, the model for everything; runs on a GPU
-  viewer/        a page for watching a model decide on a video
+  console/       the page and its server: watch a model, drive the chair, the bench
+  chair_link.py   the one sender of stick commands; the 30% stick cap lives here
+  moves.py     supervised runs: a straight, a turn, the pilot's moves
+  pilot.py       Claude Sonnet picks moves from the camera picture (pilot_prompt.md)
+  bench.py       the bench's runs, and the settings every way of driving reads
+  runlog.py      the record of a run: every command with its camera frame
+  live.py        the phone's camera, gyro and iPad goal, from the driving service
+  obstacles.py   optional: obstacles from a depth model, current frame only
+  pipeline/      model path -> footprint check -> speed and turn rate
+  drivers.py     the Driver interface, and the "fan" stand-in
+  omnivla.py     OmniVLA; runs on a GPU
+  remote.py      call a model on another machine over HTTP
+  chair.py       where the camera sits and how big the chair is (chair.json)
   video.py       put any video into the form the models are fed
-  chair.py       where the camera sits on the chair, and the chair's size
-  live.py        the chair's phone, live, by way of the driving service
-  remote.py      call a driver on another machine over HTTP; serve one
-  latency.py     measure the round trip to a served driver
-  recording.py   read a recorded drive
-  bakeoff.py     run a driver over a recording
+  recording.py   read a drive recorded by the driving service
 modal_omnivla.py serve OmniVLA from a Modal GPU
-tests/
-runs/            output (ignored)
+runs/            output (ignored by git)
 ```
 
 ## Setup
@@ -46,110 +43,21 @@ cd ml && uv sync
 uv run pytest
 ```
 
-## Simulate
-
-Runs the whole pipeline against a virtual chair and phone. Nine scenarios: clear, pedestrian, crossing, stuck, dropout, joystick, estop, slow-model, dead-model.
+The obstacle sense needs torch and is optional. Without it the console runs the same and nothing checks for obstacles.
 
 ```bash
-uv run python -m fsd_ml.sim.run
+uv sync --group detect
 ```
-
-```bash
-uv run python -m fsd_ml.sim.run crossing
-```
-
-Each run prints a timeline and writes to `runs/sim/<scenario>/`:
-
-| File | What |
-|------|------|
-| `commands.jsonl` | what would go to the chair |
-| `drive_state.jsonl` | what would go to the iPad |
-| `decisions.jsonl` | the decision record |
-| `track.png` | top-down picture of the drive |
-
-The simulated camera is blank. The default `fan` driver ignores the camera and heads for the route, so the simulator tests the pipeline: data flow, stops, timing, path choice. It does not test how well a model drives: a real model fed blank frames wanders off.
-
-## Watch a model on a video
-
-Open the viewer. It needs `ffmpeg`.
-
-```bash
-uv run python -m fsd_ml.viewer
-```
-
-It starts on the `fan` stand-in. Pick OmniVLA from the Model menu, or start on it with `--driver remote:https://<your-url>` ([OmniVLA on Modal](#omnivla-on-modal)).
-
-Drop a forward-facing video on the page, or pass its path on the command line. For each frame it shows every path the model proposes, the one the footprint check chose drawn at the chair's width, and the speed and turn rate that would go to the chair. Space plays and pauses; the arrow keys step one decision.
-
-- **Any video is converted first** to what the models are fed: 20 frames a second, 16:9 landscape, 640×360, upright. A taller or wider picture has its middle cut out rather than being squashed. The page shows what was done, and warns about portrait or low-frame-rate clips. The step is [`fsd_ml/video.py`](fsd_ml/video.py).
-- **The video does not react to the decisions.** You see what the model wants, not what would happen.
-- **Nothing is rejected yet.** With no obstacle model, the chosen path is always the model's top one.
-- **The goal is a point you set** with the sliders, since a video has no GPS.
-- **The camera sliders only line up the drawing.** They do not change what the model sees.
-- **The Model menu at the top** shows the model in use and where it is running, and switches between hosted models without losing your place in the video. Its last entry, "Add a hosted model…", takes a hosted model's address. Those are remembered in `runs/viewer/hosted.json`.
-- **Goal given as** switches between a point, a typed instruction, and a photo. For a photo, scrub to the place you want to reach and choose "Use this frame as the goal photo". Only OmniVLA reads instructions and photos.
-
-## Watch a model on the chair's live camera
-
-The viewer can also show the phone's stream as it arrives. It reads the driving service's model feed (`/ws/model`), which pushes every frame the moment it lands, with its capture time, so the model sees each frame as soon as it can and picks frames by when they were taken. The service allows two model feeds at once, apart from the iPad's viewers.
-
-1. Start the viewer and choose **Live from chair**.
-2. Enter the driving service's address and press Connect: `http://127.0.0.1:8000` if the service runs on this machine, or its Tailscale `https://…ts.net` address if it runs on another.
-
-A banner at the top of the live view shows what the rider asked for on the iPad, in their words or as a map destination, and whether the model is following it.
-
-A new request on the iPad goes to the model straight away: an indoor instruction is passed as words, and an outdoor trip becomes a point 10 m further along the route Google planned, worked out from the chair's GPS and heading. To try something else, set **Goal given as** to another type; the next request from the iPad takes over again.
-
-The same overlays appear on the live picture, plus **Camera delay** (phone to service) and how many decisions a second the model is managing. Frames go through the same conversion as uploaded videos. The feed is 10 frames a second, so a model that wants a 20-per-second history gets the nearest frames instead.
-
-To try it with no phone, run the service and its fake phone from `service/`:
-
-```bash
-uv run python -m drive_service
-```
-
-```bash
-uv run python -m scripts.fake_phone --seconds 120
-```
-
-The code is [`fsd_ml/live.py`](fsd_ml/live.py). Its `to_sensors()` turns the same feed into the pipeline's input, which is the first half of driving for real.
-
-**Send to chair** passes each live decision (speed and turn rate only) to the chair through `Wheelchair().set(x, y)` ([hardware/README.md](../hardware/README.md)); the viewer's machine must be on the team Tailscale. A decision is held for 600 ms, so if the model stops deciding, the chair stops. Unticking, reconnecting or leaving the live view stops it at once, and a joystick takeover or Wi-Fi dropout unticks it. Code: [`fsd_ml/chair_out.py`](fsd_ml/chair_out.py).
-
-## Camera and chair measurements
-
-The model is never told where the camera is; it only gets the picture. The measurements are for the code around it, and live in [`chair.json`](chair.json):
-
-- **The model's paths start at the lens.** They are shifted to start at the middle of the chair before the footprint check, so a camera on a front corner does not make the chair hug one side.
-- **The viewer draws paths through the same camera**, so the overlay lands on the floor where it should.
-- **The footprint check uses the chair's real width and length.**
-
-With the camera mounted and someone sitting in the chair on a flat floor, measure in centimetres and run:
-
-```bash
-uv run python -m fsd_ml.chair --height 32 --offset 27 --side left --from-rear 90 --tilt 3 --wall-width 190 --chair-width 62 --chair-length 105
-```
-
-| Option | Measure |
-|--------|---------|
-| `--height` | Floor to the centre of the lens |
-| `--offset`, `--side` | From the chair's centre line (midway between the big wheels) to the lens, and which side |
-| `--from-rear` | From the chair's rearmost point forward to the lens |
-| `--tilt` | Degrees below level; rest a phone's level on top of the camera |
-| `--wall-width` | From exactly 1 m, square to a wall: how wide a stretch of wall the picture shows |
-| `--chair-width`, `--chair-length` | Widest point across; footplate tip to rearmost point |
-
-Any one can be changed alone later. Run it with no options to see what is saved; it questions numbers that look like a wrong unit. Restart the viewer afterwards. Until this is run the file holds placeholders.
 
 ## OmniVLA on Modal
 
-OmniVLA is 8B parameters and 16 GB, too large for a laptop, so it runs on a Modal GPU and is used as a remote driver. Measured on a 24 GB NVIDIA A10 from a laptop: about 255 ms per decision there and back, of which about 200 ms is the model and about 55 ms the network. A stopped container takes about 16 seconds to wake.
+OmniVLA is too large for a laptop, so it runs on a Modal GPU.
 
 ```bash
 uv run --with modal modal setup
 ```
 
-Fetch the 16 GB checkpoint once (about three minutes, no GPU), then deploy:
+Fetch the 16 GB checkpoint once (no GPU), then deploy:
 
 ```bash
 uv run --with modal modal run modal_omnivla.py::download
@@ -159,58 +67,97 @@ uv run --with modal modal run modal_omnivla.py::download
 uv run --with modal modal deploy modal_omnivla.py
 ```
 
-Then, with the address it prints:
+Deploy prints the model's address. Each Modal account gets its own. To require a token, see the top of [`modal_omnivla.py`](modal_omnivla.py) and set `FSD_DRIVER_TOKEN` where the console runs.
+
+A decision that takes longer than 1.5 s is given up, and one whose frame is over 1 s old by the time the reply lands is not driven on. A sleeping container therefore shows "the model did not answer in time" until it has woken.
+
+## Run the console
 
 ```bash
-uv run python -m fsd_ml.latency https://<your-url>
+uv run --env-file .env python -m fsd_ml.console --driver remote:https://<your-modal-url>
 ```
+
+`.env` holds `ANTHROPIC_API_KEY=...` for the pilot (git ignores it). Without the pilot, leave `--env-file .env` out. The console remembers the model and the driving service it last used, so later starts need no options. It needs `ffmpeg` only for video files.
+
+On the page (`http://127.0.0.1:8200`):
+
+1. Choose **Live from chair**, enter the driving service's address (`http://127.0.0.1:8000`, or its Tailscale address) and Connect.
+2. Pick the goal: a point, a typed instruction, a photo, or whatever the rider set on the iPad.
+3. **Send to chair** sends each decision to the chair, optionally for a set number of steps. **Drive with W A S D** drives by hand. **STOP** or Esc stops everything.
+
+What keeps it safe:
+
+- **A command lasts 600 ms.** If the model, the page or the laptop stops, the chair stops.
+- **Old pictures are not driven on.** A frame over 500 ms old stops the chair.
+- **The joystick wins.** Pushing the chair's own joystick, or a Wi-Fi dropout, switches sending off until a person switches it on again.
+- **Only the console's own page can move the chair.** Requests from other sites, or from scripts, are refused.
+- **The stick is capped at 30%**, and the model never reverses.
+
+### How a model's path becomes a stick
+
+One route, in this order: the model's path, the footprint check ([`pipeline/footprint.py`](fsd_ml/pipeline/footprint.py)), `follow` ([`pipeline/control.py`](fsd_ml/pipeline/control.py)), `to_stick` and `send_stick` ([`chair_link.py`](fsd_ml/chair_link.py)).
+
+- **Speed is the model's own.** As in OmniVLA's script, it is how far ahead the fifth waypoint is, per third of a second, up to 0.5 m/s. Nothing ramps it here: the board eases the stick itself.
+- **Steering has a 4° dead zone.** The joystick's own dead zone makes the smallest turn a real one, so a target nearly straight ahead is driven straight at.
+- **With the obstacle sense on**, a path that meets something slows or stops the chair, and no sight of the floor stops it.
+
+### A video file
+
+To check a model away from the chair, drop a forward-facing video on the page or pass its path:
 
 ```bash
-uv run python -m fsd_ml.viewer --driver remote:https://<your-url>
+uv run python -m fsd_ml.console path/to/video.mp4
 ```
 
-Each Modal account that deploys this gets its own address and downloads the checkpoint once. To use a teammate's account, log in as them (or switch Modal profile), deploy, and add the new address in the viewer. At about $1.40 an hour for this GPU, $30 of credit is roughly 21 hours.
+It shows what the model wants on each frame. The video does not react to the decisions.
 
-What to expect, from OmniVLA's own script:
+## The bench
 
-- **It decides about 3 times a second** and looks at one frame, not a history.
-- **Its paths are short**, around a metre, and its script caps speed at 0.3 m/s. Our controller's 1 m/s cruise is likely too fast for it until we have seen its real output.
-- **One path per decision**, so the footprint check can slow or stop the chair but not pick a way round.
+`http://127.0.0.1:8200/bench` has the set runs and the settings.
 
-## Try the remote interface without a GPU
+- **Straight** and **quarter turns** drive a fixed move. A turn is measured by the phone's gyro and stops if the gyro stops reporting.
+- **Claude drives to a named thing** is the pilot: Claude Sonnet sees the camera's picture and answers with moves (forward up to 1 m, back up to 0.4 m, turns up to 120°), which are carried out as the same straights and turns. Its instructions are in [`pilot_prompt.md`](pilot_prompt.md), read afresh for every look.
+- **A run needs the bench page open.** If the page has not asked after the run for 2 s (closed, asleep, laptop lid shut), the run ends and the chair stops.
+- **Settings** are on that page and in `runs/console/bench/settings.json`: stick strengths, ramp, braking, what full stick gives in m/s and rad/s (`v_full_mps`, `w_full_radps`), and how much of the model's stick is sent (`model_speed_pct`). They apply to every way of driving, at once.
 
-Serve a stand-in locally, measure it, and drive through it:
+## Run logs
+
+Each connection to the driving service makes a folder, `runs/console/live/<date-time>/`, with `log.jsonl` and `frames/`. Every way of driving writes one `command` line per stick command or decision:
+
+| Field | What |
+|-------|------|
+| `t` | when the line was written, unix seconds |
+| `mode` | `manual`, `bench`, `model` or `pilot` |
+| `frame`, `frame_n`, `frame_t` | the camera's own JPEG the command was given on (path in the run folder), its number, and when the phone took it |
+| `stick` | `[x, y]` percent sent, x right, y forward; `null` if nothing was sent |
+| `sent`, `problem` | whether it reached the chair, and why not |
+| `model` | what the model said: its path, speed and goal, or the pilot's tool call |
+| `board` | the board's telemetry at that moment |
+
+- **Keyboard and bench moves** send a command about ten times a second; their frames are saved at most ten times a second, so neighbouring lines can share one.
+- **While a person drives with the live view open**, the model's decisions are recorded too (`mode: model`, `sent: false`), so what it would have done sits beside what they did.
+- **Other lines** (`connected`, `sending on`, `stop`, `waiting`, `run`, `run finished`) mark what happened around the commands.
+
+To sum up the newest run:
 
 ```bash
-uv run python -m fsd_ml.remote --driver fan --port 8100
+uv run python -m fsd_ml.runlog
 ```
 
-```bash
-uv run python -m fsd_ml.latency http://127.0.0.1:8100
-```
+## Camera and chair measurements
 
-```bash
-uv run python -m fsd_ml.sim.run clear --driver remote:http://127.0.0.1:8100 --real-timing
-```
+[`chair.json`](chair.json) holds where the camera sits and how big the chair is, in metres. The model is never told any of it; it is for the code around the model: paths are shifted from the lens to the middle of the chair before the footprint check, and the page draws paths through the same camera. Edit the file and restart the console.
 
-## Run a model over a recording
+## Environment variables
 
-```bash
-uv run python -m fsd_ml.bakeoff ../recordings/20261114T150000Z --driver straight
-```
+| Variable | For |
+|----------|-----|
+| `ANTHROPIC_API_KEY` | the pilot; put it in `ml/.env` and start with `uv run --env-file .env` |
+| `FSD_DRIVER_TOKEN` | only if the Modal endpoint was deployed with a token |
+| `WHEELCHAIR_HOST` | the board's address, if not `wheelchair-unoq` |
 
 ## Adding a model
 
-1. Write a class with `name`, `context_frames`, `frame_hz` and `propose()` that wraps the model. See [`fsd_ml/omnivla.py`](fsd_ml/omnivla.py).
+1. Write a class with `name`, `context_frames`, `frame_hz` and `propose()`. See [`fsd_ml/omnivla.py`](fsd_ml/omnivla.py).
 2. Serve it from a GPU with `remote.info()` and `remote.handle()`, as [`modal_omnivla.py`](modal_omnivla.py) does.
-3. Use it as `remote:<url>`. Its runtime is installed where it is served, not here.
-
-## Known gaps
-
-- **No obstacle model.** The simulator hands the pipeline perfect obstacle positions. Stage 6 is still unchosen.
-- **No realistic camera in the simulator**, so model quality is untested.
-- **Position is trusted as given.** There is no filtering of GPS or heading noise yet.
-- **Chair and camera measurements are placeholders** until `fsd_ml.chair` is run with real ones.
-- **The baseline driver cuts corners.** It aims straight at a point 6 m along the route.
-- **A path's "going around" label can flicker** for a few passes while the chair passes an obstacle.
-- **OmniVLA's driving quality is unjudged.** It runs and answers every goal type, but has only been looked at briefly on live frames.
+3. Use it as `remote:<url>`.

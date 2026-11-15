@@ -9,8 +9,9 @@ It decides where to go. It is never trusted to stop the chair: every move it ask
 carried out by the same runner as the other tests, which stops for obstacles, for STOP, and
 for the joystick, whatever the model wanted.
 
-Its instructions are in ``ml/pilot_prompt.md`` and are read afresh for every run, so they can
-be changed between runs without restarting anything.
+Its instructions are in ``ml/pilot_prompt.md`` and are read afresh for every look, so they
+can be changed between runs without restarting anything. The API key comes from the
+environment (``ANTHROPIC_API_KEY``; ``uv run --env-file .env`` sets it from ml/.env).
 """
 
 from __future__ import annotations
@@ -22,7 +23,9 @@ from pathlib import Path
 from typing import Any
 
 MODEL = "claude-sonnet-5-5"
-PROMPT_FILE = Path("pilot_prompt.md")
+PROMPT_FILE = Path(__file__).resolve().parent.parent / "pilot_prompt.md"
+# What an earlier picture is replaced with once a newer one has been sent.
+OLD_PICTURE = {"type": "text", "text": "[An earlier picture from the camera, no longer shown.]"}
 # The most any one call may ask for. Longer moves are cut to these, and the model is told.
 MAX_FORWARD_M = 1.0
 MAX_BACKWARD_M = 0.4
@@ -103,12 +106,11 @@ class Pilot:
     """One task's conversation with the model."""
 
     task: str
-    api_key: str | None = None
     model: str = MODEL
     effort: str = "low"
     client: Any = None
     messages: list[dict[str, Any]] = field(default_factory=list)
-    # What the last reply cost, for the record.
+    # How the last reply went, for the record.
     last: dict[str, Any] = field(default_factory=dict)
 
     def _prompt(self) -> str:
@@ -121,11 +123,20 @@ class Pilot:
 
         ``results`` is (tool call id, what happened, whether it failed) for every call in
         its previous reply. Returns no calls if the model would not or could not answer.
+
+        Only the newest picture is sent: older ones are replaced with a line of text, since
+        the chair has moved on from them and they are most of what a request costs.
         """
         if self.client is None:
             import anthropic
 
-            self.client = anthropic.Anthropic(api_key=self.api_key, timeout=40.0, max_retries=1)
+            self.client = anthropic.Anthropic(timeout=40.0, max_retries=1)
+        for message in self.messages:
+            if message["role"] == "user":
+                message["content"] = [
+                    OLD_PICTURE if block["type"] == "image" else block
+                    for block in message["content"]
+                ]
         content: list[dict[str, Any]] = [
             {"type": "tool_result", "tool_use_id": call_id, "content": text, "is_error": failed}
             for call_id, text, failed in results or []
@@ -149,18 +160,18 @@ class Pilot:
             # A quick decision about once every few seconds, not a long think.
             thinking={"type": "between_tools"},
             output_config={"effort": self.effort},
-            # The pictures already sent do not change: reuse them from the cache each turn.
-            cache_control={"type": "ephemeral"},
             messages=self.messages,
         )
-        # The whole reply goes back next turn, unchanged, as the API expects.
-        self.messages.append({"role": "assistant", "content": response.content})
+        # The reply goes back next turn without its thinking blocks: those are only valid
+        # while everything before them is unchanged, and the picture before them is swapped
+        # for a line of text on the next look.
+        kept = [b for b in response.content if b.type not in ("thinking", "redacted_thinking")]
+        self.messages.append({"role": "assistant", "content": kept})
         usage = response.usage
         self.last = {
             "ms": round((time.perf_counter() - started) * 1000.0),
             "stop_reason": response.stop_reason,
             "input_tokens": usage.input_tokens,
-            "cached_tokens": getattr(usage, "cache_read_input_tokens", None),
             "output_tokens": usage.output_tokens,
             "text": " ".join(b.text for b in response.content if b.type == "text").strip(),
         }

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Model viewer</title>
+<title>Driving console</title>
 <style>
   :root {
     --bg: #0d1014; --panel: #161b22; --line: #2a313b; --text: #e6edf3; --muted: #8b949e;
@@ -84,10 +84,6 @@
     border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; }
   .livebar .note { margin: 0; }
   .livebar input[type=checkbox] { width: auto; }
-  .target { margin-left: auto; padding: 3px 10px; border-radius: 999px; font-weight: 600;
-    border: 1px solid #ffd54f; color: #ffd54f; white-space: nowrap; }
-  .target.found { background: #ffd54f; color: #111; }
-  .target.locked { background: #4cd964; border-color: #4cd964; color: #06210c; }
   .livebar .chair.on { color: var(--text); font-weight: 600; }
   .livebar input[type=number] { width: 64px; }
   .livebar input[type=range] { width: 120px; padding: 0; vertical-align: middle; accent-color: var(--chosen); }
@@ -108,7 +104,7 @@
 </head>
 <body>
 <header>
-  <h1>Model viewer</h1>
+  <h1>Driving console</h1>
   <label class="pick">Model <select id="models" aria-label="Model in use"></select></label>
   <span class="hosted" id="hosted" hidden>
     <input type="text" id="hostedUrl" placeholder="Model address, e.g. https://…modal.run" aria-label="Hosted model address">
@@ -126,8 +122,6 @@
   <span class="ipadLabel">From the iPad</span>
   <span class="ipadText" id="ipadText"></span>
   <span class="note" id="ipadUse"></span>
-  <span class="target" id="target" hidden></span>
-  <button id="relook" hidden title="Drop the lock and find the target again">Find again</button>
 </div>
 <div class="livebar" id="livebar" hidden>
   <label>Chair's driving service <input type="text" id="service" value="http://127.0.0.1:8000" aria-label="Driving service address"></label>
@@ -135,17 +129,13 @@
   <button id="liveStop">Back to video</button>
   <label class="chair" id="toChairLabel"><input type="checkbox" id="toChair"> Send to chair</label>
   <label>for <input type="number" id="chairSteps" value="5" min="0" step="1" aria-label="Number of steps to send"> steps</label>
-  <label>at <input type="number" id="chairSpeed" value="40" min="10" max="100" step="5" aria-label="Percent of the model's speed to send"> % speed</label>
-  <label>brake <input type="number" id="chairBrake" value="10" min="0" max="25" step="1" aria-label="Reverse stick percent used to brake on a stop"> % for <input type="number" id="chairBrakeMs" value="200" min="0" max="500" step="50" aria-label="Milliseconds of reverse braking"> ms</label>
   <button class="estop" id="estop" title="Stops the chair now (Esc)">STOP</button>
   <label class="chair" id="wasdLabel" title="Hold W A S D (or the arrow keys) to drive. Let go to stop."><input type="checkbox" id="wasd"> Drive with W A S D</label>
   <label title="How hard the keys push the stick. The chair's cap is 30%.">speed <input type="range" id="wasdSpeed" min="4" max="30" step="1" value="12" aria-label="Keyboard driving speed, as stick percent"> <output id="wasdSpeedOut">12%</output></label>
-  <label class="chair" id="armLabel" title="Allows Claude to start and stop runs on its own. STOP, Esc or the joystick ends it."><input type="checkbox" id="arm"> Let Claude drive</label>
-  <span class="note" id="episodeNote"></span>
   <span class="note" id="liveNote"></span>
   <span class="note" id="chairNote"></span>
   <span class="note" id="boardNote"></span>
-  <span class="note" id="seenNote"></span>
+  <span class="note">Speed and braking are set on the <a href="/bench" style="color:var(--chosen)">test bench</a>.</span>
 </div>
 <div class="error" id="error" role="alert" hidden></div>
 <div class="notice" id="notice" hidden></div>
@@ -163,12 +153,10 @@
         <li><i style="color:var(--chosen)">●</i>Model's path</li>
         <li><i style="color:var(--projected)">┄</i>Projection (ours, not the model's)</li>
         <li><i style="color:#ff5252">●</i>Obstacle seen now</li>
-        <li><i style="color:#ffa726">○</i>Obstacle remembered</li>
         <li><i>◎</i>Goal</li>
         <li><i style="color:var(--slowing)">●</i>Camera</li>
       </ul>
       <p class="note"><span id="pathNote"></span><span id="sightNote"></span></p>
-      <button id="forget" title="Empty the obstacle map; it fills again from what is in view">Forget obstacles</button>
     </div>
     <div class="panel" hidden>
       <h2>Decision</h2>
@@ -224,11 +212,10 @@
   </div>
   <p class="note">Instructions and photos are read by OmniVLA only; other models use just the point.</p>
   <p class="note" id="cameraNote"></p>
-  <p class="note">The video does not react to the decisions: this shows what the model wants at each
+  <p class="note">A video does not react to the decisions: it shows what the model wants at each
     frame. The camera sliders only change how paths are drawn on the video, not what the model sees.</p>
 </div>
 <script>
-const SHOW_ROUTE = false;  // the white route line, off for now
 const $ = (id) => document.getElementById(id);
 const view = $("view"), vctx = view.getContext("2d");
 const topc = $("top"), tctx = topc.getContext("2d");
@@ -346,26 +333,18 @@ function drawPaths(ctx, map, lineWidth) {
   });
   // What the depth model sees standing on the floor.
   if (decision.obstacles) {
-    for (const [ahead, left, radius, seenNow] of decision.obstacles) {
+    for (const [ahead, left, radius] of decision.obstacles) {
       const at = map(ahead, left), edge = map(ahead + radius, left);
       if (!at || !edge) continue;
       const size = Math.max(2, Math.abs(at[1] - edge[1]));
       ctx.beginPath(); ctx.arc(at[0], at[1], size, 0, Math.PI * 2);
-      if (seenNow) { ctx.fillStyle = "rgba(255, 82, 82, 0.85)"; ctx.fill(); }
-      // Remembered: out of view now, kept on the map from when it was seen.
-      else { ctx.strokeStyle = "#ffa726"; ctx.lineWidth = 1.5; ctx.stroke(); }
+      ctx.fillStyle = "rgba(255, 82, 82, 0.85)"; ctx.fill();
     }
-  }
-  // The way the chair will go once obstacles are allowed for: ours, not the model's.
-  if (SHOW_ROUTE && decision.route && decision.route.length > 1) {
-    ctx.beginPath(); trace(ctx, [[0, 0], ...decision.route], map);
-    ctx.strokeStyle = decision.status === "blocked" ? "#ff5252" : "#ffffff";
-    ctx.lineWidth = lineWidth * 1.3; ctx.stroke();
   }
   const chosen = decision.candidates[decision.chosen];
   if (!chosen) return;
   // The projection: thin, dashed and grey, with no width, so it cannot be mistaken for the model.
-  const arc = decision.route ? [] : commandArc(decision.v_mps, decision.w_radps);
+  const arc = commandArc(decision.v_mps, decision.w_radps);
   if (arc.length > 1) {
     ctx.beginPath(); trace(ctx, arc, map);
     ctx.setLineDash([4, 6]); ctx.strokeStyle = css("--projected"); ctx.lineWidth = lineWidth; ctx.stroke();
@@ -400,7 +379,7 @@ function drawTop() {
   const sight = state.decision && state.decision.sight;
   $("sightNote").textContent = !sight ? "" : sight.problem ? ` Obstacles: ${sight.problem}`
     : !sight.floor ? " Obstacles: cannot see the floor."
-    : ` Obstacles: ${sight.seen} seen, ${sight.remembered} remembered.${sight.note ? " " + sight.note : ""}`;
+    : ` Obstacles: ${state.decision.obstacles.length} in view.`;
   const map = (ahead, left) => [size / 2 - left * scale, size - 24 - ahead * scale];
   tctx.fillStyle = "#0d1014"; tctx.fillRect(0, 0, size, size);
   tctx.strokeStyle = css("--line"); tctx.lineWidth = 1;
@@ -683,51 +662,6 @@ function showBoard(board) {
   const flags = [board.chair_listening === false ? "CHAIR IS NOT LISTENING: IS IT SWITCHED ON?" : "", board.takeover ? "RIDER TOOK OVER" : "", board.dropout_latched ? "WI-FI DROPOUT" : ""].filter(Boolean).join(" · ");
   $("boardNote").textContent = `Board: feeding chair x ${board.sent[0]}%, y ${board.sent[1]}% · real stick ${board.stick ? board.stick.join(", ") : "?"} · heard ${board.age != null ? Math.round(board.age * 1000) : "?"} ms ago${flags ? " · " + flags : ""}`;
 }
-// Boxes from the detector: where the thing the instruction names is in the picture.
-function drawSeen(seen) {
-  // The chip at the top says what is being looked for, before anything is sent to the chair.
-  const chip = $("target");
-  chip.hidden = !(seen && seen.target);
-  if (seen && seen.target) {
-    const best = seen.boxes[0];
-    chip.classList.toggle("found", Boolean(best) && !seen.locked);
-    chip.classList.toggle("locked", Boolean(best) && Boolean(seen.locked));
-    const far = best && best.distance_m != null ? `, about ${best.distance_m.toFixed(1)} m` : "";
-    chip.textContent = !best ? `Target: ${seen.target} · not in view`
-      : seen.locked ? `Target: ${seen.target} · LOCKED${far}`
-      : `Target: ${seen.target} · in view, not sure enough to lock${far}`;
-  }
-  $("relook").hidden = !(seen && seen.target);
-  if (!seen) { $("seenNote").textContent = "Detector: not installed"; return; }
-  if (seen.problem) { $("seenNote").textContent = `Detector: ${seen.problem}`; return; }
-  if (!seen.target) { $("seenNote").textContent = "Detector: no named target (give an instruction)"; return; }
-  const said = seen.note ? ` · ${seen.note}` : "";
-  if (!seen.boxes.length) { $("seenNote").textContent = `User: “${seen.target}” not in view${said}`; return; }
-  const best = seen.boxes[0];
-  const far = best.distance_m != null ? `, about ${best.distance_m.toFixed(1)} m away` : "";
-  const how = seen.locked ? `locked for ${Math.round(seen.locked_for_s || 0)} s, tracking match ${Math.round((seen.track_score || 0) * 100)}%` : `found, ${Math.round(best.score * 100)}%`;
-  $("seenNote").textContent = `User: “${seen.target}” ${how}${far}${said}`;
-  seen.boxes.forEach((box, index) => {
-    const x = box.x0 * view.width, y = box.y0 * view.height;
-    const w = (box.x1 - box.x0) * view.width, h = (box.y1 - box.y0) * view.height;
-    vctx.save();
-    const colour = seen.locked ? "#4cd964" : "#ffd54f";
-    vctx.strokeStyle = colour;
-    vctx.globalAlpha = index === 0 ? 1 : 0.45;
-    vctx.lineWidth = index === 0 ? 3 : 1.5;
-    vctx.strokeRect(x, y, w, h);
-    if (index === 0) {
-      const label = `${seen.locked ? "LOCKED · " : ""}${box.label} ${Math.round(box.score * 100)}%${box.distance_m != null ? ` · ${box.distance_m.toFixed(1)} m` : ""}`;
-      vctx.font = "600 13px system-ui, sans-serif";
-      const wide = vctx.measureText(label).width + 10;
-      const top = y > 20 ? y - 20 : y + h;
-      vctx.fillStyle = colour; vctx.fillRect(x, top, wide, 20);
-      vctx.fillStyle = "#111"; vctx.fillText(label, x + 5, top + 14);
-    }
-    vctx.restore();
-  });
-}
-
 // Sending to the chair is always switched off again by leaving or reconnecting.
 function showChair(chair) {
   showBoard(chair && chair.board);
@@ -751,37 +685,13 @@ async function setToChair(on) {
   $("toChair").checked = on;
   try {
     const steps = Math.max(0, Math.floor(Number($("chairSteps").value) || 0));
-    await api(`/api/live/chair?on=${on ? 1 : 0}${on && steps ? `&steps=${steps}` : ""}${on ? `&speed=${Math.round(Number($("chairSpeed").value) || 40)}&brake=${Math.round(Number($("chairBrake").value) || 0)}&brake_ms=${Math.round(Number($("chairBrakeMs").value) || 0)}` : ""}`, { method: "POST" });
+    await api(`/api/live/chair?on=${on ? 1 : 0}${on && steps ? `&steps=${steps}` : ""}`, { method: "POST" });
     showError("");
   } catch (error) {
     $("toChair").checked = false;
     showError(error.message);
   }
   showChair(null);
-}
-// What an autonomous episode is doing, and whether the chair may be driven without a tick.
-function showEpisode(episode) {
-  if (!episode) return;
-  $("arm").checked = Boolean(episode.armed);
-  $("armLabel").classList.toggle("on", Boolean(episode.armed));
-  const what = episode.kind === "turn" ? `turn ${episode.degrees_left}°` : episode.say ? `“${episode.say}”` : "";
-  if (episode.running) {
-    $("episodeNote").textContent = `Episode ${episode.id} ${what}: ${episode.phase}${episode.steps ? `, step ${episode.steps}` : ""}${episode.reason ? ` (${episode.reason})` : ""}`;
-  } else if (episode.outcome) {
-    $("episodeNote").textContent = `Episode ${episode.id} ${what}: ${episode.outcome.toUpperCase()} · ${episode.reason} · ${episode.seconds} s`;
-  } else {
-    $("episodeNote").textContent = episode.armed ? "Armed: Claude may start a run." : "";
-  }
-}
-async function setArmed(on) {
-  const n = (name) => Math.round(Number($(name).value) || 0);
-  try {
-    await api(`/api/episode/arm?on=${on ? 1 : 0}&speed=${n("chairSpeed") || 40}&brake=${n("chairBrake")}&brake_ms=${n("chairBrakeMs")}`, { method: "POST" });
-    showError("");
-  } catch (error) {
-    $("arm").checked = false;
-    showError(error.message);
-  }
 }
 // Driving by hand: hold W A S D or the arrow keys. The stick strength is the speed box.
 const KEYS = { w: [0, 1], arrowup: [0, 1], s: [0, -1], arrowdown: [0, -1], a: [-1, 0], arrowleft: [-1, 0], d: [1, 0], arrowright: [1, 0] };
@@ -839,15 +749,13 @@ window.addEventListener("blur", () => { if (held.size) { held.clear(); sendDrive
 async function emergencyStop() {
   held.clear(); clearInterval(driveTimer); driveTimer = null;
   $("wasd").checked = false; $("wasdLabel").classList.remove("on");
-  $("arm").checked = false;
-  $("armLabel").classList.remove("on");
   $("toChair").checked = false;
   $("toChairLabel").classList.remove("on");
   try {
     await api("/api/live/chair?on=0", { method: "POST" });
     $("chairNote").textContent = "Chair: STOPPED. Sending is off.";
   } catch (error) {
-    $("chairNote").textContent = "Chair: the stop did not reach the viewer. Use the chair's power button.";
+    $("chairNote").textContent = "Chair: the stop did not reach the console. Use the chair's power button.";
     showError(error.message);
   }
 }
@@ -887,10 +795,10 @@ async function liveLoop() {
     const query = new URLSearchParams({ gx: g.x, gy: g.y, speed: $("sp").value, kind: $("kind").value, say: $("say").value });
     let d;
     try {
-      d = await api(`/api/live/decide?${query}`);
+      d = await api(`/api/live/decide?${query}`, { method: "POST" });
       showError("");
     } catch (error) {
-      // The viewer was restarted or lost its feed: connect again rather than stall.
+      // The console was restarted or lost its feed: connect again rather than stall.
       if (/not connected/.test(error.message)) {
         $("liveNote").textContent = "Reconnecting to the driving service…";
         try { await api(`/api/live?service=${encodeURIComponent($("service").value.trim())}`, { method: "POST" }); continue; } catch (again) { showError(again.message); }
@@ -904,7 +812,6 @@ async function liveLoop() {
     const feed = link.fps != null ? ` · camera ${Number(link.fps).toFixed(0)} fps` : "";
     const from = d.goal_note ? ` · ${d.goal_note}` : "";
     showChair(d.chair);
-    showEpisode(d.episode);
     $("liveNote").textContent = d.waiting ? `Waiting: ${d.waiting}` : `Connected${feed}${link.sensors_ok ? "" : " · sensors not all fresh"}${from}`;
     if (d.waiting) {
       $("empty").hidden = false;
@@ -917,7 +824,6 @@ async function liveLoop() {
     state.decision = { ...d, cached: false };
     camLoop();
     drawPaths(vctx, project, 2);
-    drawSeen(d.seen);
     drawTop();
     showDecision();
     const now = performance.now();
@@ -983,17 +889,6 @@ try {
   const saved = Number(localStorage.getItem("wasdSpeed"));
   if (saved >= 4 && saved <= 30) { $("wasdSpeed").value = saved; $("wasdSpeedOut").textContent = `${saved}%`; }
 } catch (error) { /* private window */ }
-$("arm").addEventListener("change", (event) => setArmed(event.target.checked));
-$("forget").addEventListener("click", () => api("/api/live/forget", { method: "POST" }).catch((error) => showError(error.message)));
-$("relook").addEventListener("click", () => api("/api/live/relook", { method: "POST" }).catch((error) => showError(error.message)));
-// Speed and braking can be changed while sending; the step count carries on.
-for (const id of ["chairSpeed", "chairBrake", "chairBrakeMs"]) {
-  $(id).addEventListener("change", () => {
-    if (!$("toChair").checked) return;
-    const n = (name) => Math.round(Number($(name).value) || 0);
-    api(`/api/live/chair/settings?speed=${n("chairSpeed") || 40}&brake=${n("chairBrake")}&brake_ms=${n("chairBrakeMs")}`, { method: "POST" }).catch((error) => showError(error.message));
-  });
-}
 document.addEventListener("keydown", (event) => { if (event.key === "Escape" && state.live) emergencyStop(); });
 $("service").addEventListener("keydown", (event) => { if (event.key === "Enter") connectLive(); });
 $("kind").addEventListener("change", redecide);

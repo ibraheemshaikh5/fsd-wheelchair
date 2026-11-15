@@ -1,6 +1,6 @@
 """Serve OmniVLA from a Modal GPU.
 
-Not yet run against Modal. The first start downloads a 16 GB checkpoint into a
+The first start downloads a 16 GB checkpoint into a
 Modal volume, which takes several minutes; later starts reuse it.
 
     uv run --with modal modal setup                    # once, to log in
@@ -9,12 +9,11 @@ Modal volume, which takes several minutes; later starts reuse it.
 
 Then, from this folder:
 
-    uv run python -m fsd_ml.latency https://<your-url>
-    uv run python -m fsd_ml.viewer video.mp4 --driver remote:https://<your-url>
+    uv run python -m fsd_ml.console video.mp4 --driver remote:https://<your-url>
 
 The URL is public. To require a token, create a Modal secret named
 ``fsd-driver`` holding FSD_DRIVER_TOKEN, add ``secrets=[modal.Secret.from_name("fsd-driver")]``
-below, and set the same variable where the pipeline runs.
+below, and set the same variable where the viewer runs.
 """
 
 import modal

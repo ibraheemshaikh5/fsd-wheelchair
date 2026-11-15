@@ -1,4 +1,4 @@
-"""Pick a path the chair physically fits along (pipeline stage 7).
+"""Pick a path the chair physically fits along.
 
 The driver model only proposes paths. This sweeps the chair's rectangle along
 each one and takes the best-scored path that touches nothing. It is plain
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from fsd_ml.chair import Body
 from fsd_ml.drivers import Candidate
 from fsd_ml.pipeline.types import Obstacle, PathStatus
 
@@ -19,18 +20,9 @@ SAMPLE_SPACING_M = 0.1
 
 
 @dataclass(frozen=True, slots=True)
-class ChairShape:
-    """Placeholder dimensions until the WOLF is measured."""
-
-    width_m: float = 0.65
-    length_m: float = 1.10
-    # Kept clear on every side.
-    margin_m: float = 0.15
-
-
-@dataclass(frozen=True, slots=True)
 class FootprintConfig:
-    shape: ChairShape = ChairShape()
+    # The chair's size and the space kept clear round it (ml/chair.json).
+    shape: Body = Body()
     # An obstacle this much outside the margin slows the chair without blocking it.
     caution_m: float = 0.4
     # Obstacles further along the path than this do not change the speed yet.
@@ -71,7 +63,7 @@ def _resample(path_xy: np.ndarray) -> np.ndarray:
 
 
 def first_hit(
-    path_xy: np.ndarray, obstacles: Sequence[Obstacle], shape: ChairShape, extra_m: float = 0.0
+    path_xy: np.ndarray, obstacles: Sequence[Obstacle], shape: Body, extra_m: float = 0.0
 ) -> tuple[float, Obstacle] | None:
     """Distance along the path at which the chair first touches an obstacle, and which one."""
     if not obstacles:

@@ -1,11 +1,8 @@
 """Run a driver on another machine and call it over HTTP.
 
-The model sits behind the same ``propose()`` as a local one, so the pipeline
-does not know where it runs. The server side is ``handle()``; it is served by
-Modal (modal_omnivla.py) or, for trying it out with a stand-in, locally:
-
-    uv run python -m fsd_ml.remote --driver fan --port 8100
-    uv run python -m fsd_ml.sim.run clear --driver remote:http://127.0.0.1:8100
+The model sits behind the same ``propose()`` as a local one, so the console does not know
+where it runs. The server side is ``info()`` and ``handle()``, served by Modal
+(modal_omnivla.py).
 
 Each request carries every frame the model needs, as JPEG, so the server keeps
 no state between calls.
@@ -13,25 +10,24 @@ no state between calls.
 
 from __future__ import annotations
 
-import argparse
 import base64
 import io
-import json
 import os
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import httpx
 import numpy as np
 from PIL import Image
 
-from fsd_ml.drivers import Candidate, Driver, Goal, Motion, make_driver
+from fsd_ml.drivers import Candidate, Driver, Goal, Motion
 
 TOKEN_ENV = "FSD_DRIVER_TOKEN"
 # Frames are shrunk to this width before sending; the models take less.
 SEND_WIDTH = 384
 JPEG_QUALITY = 80
+# A decision that takes longer than this is too old to drive on; the call is given up.
+DECISION_TIMEOUT_S = 1.5
 
 
 def _encode(frame: np.ndarray) -> str:
@@ -102,7 +98,7 @@ class RemoteDriver:
         self,
         url: str,
         token: str | None = None,
-        timeout_s: float = 30.0,
+        timeout_s: float = DECISION_TIMEOUT_S,
         start_timeout_s: float = 1800.0,
     ) -> None:
         token = token or os.environ.get(TOKEN_ENV)
@@ -146,59 +142,3 @@ class RemoteDriver:
 
     def close(self) -> None:
         self._client.close()
-
-
-def make_server(driver: Driver, host: str = "127.0.0.1", port: int = 8100) -> ThreadingHTTPServer:
-    """A small local server for the same two routes Modal serves."""
-
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def _send(self, status: int, body: dict[str, Any]) -> None:
-            data = json.dumps(body).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def _allowed(self) -> bool:
-            if authorized(self.headers.get("Authorization")):
-                return True
-            self._send(401, {"error": "bad or missing token"})
-            return False
-
-        def do_GET(self) -> None:  # noqa: N802
-            if self._allowed():
-                self._send(200, info(driver)) if self.path == "/info" else self._send(404, {})
-
-        def do_POST(self) -> None:  # noqa: N802
-            length = int(self.headers.get("Content-Length", 0))
-            payload = self.rfile.read(length)
-            if not self._allowed():
-                return
-            if self.path != "/propose":
-                self._send(404, {})
-                return
-            self._send(200, handle(driver, json.loads(payload)))
-
-        def log_message(self, *args: object) -> None:
-            pass
-
-    return ThreadingHTTPServer((host, port), Handler)
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--driver", default="fan")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8100)
-    args = parser.parse_args(argv)
-
-    server = make_server(make_driver(args.driver), args.host, args.port)
-    print(f"serving {args.driver} on http://{args.host}:{args.port}")
-    server.serve_forever()
-
-
-if __name__ == "__main__":
-    main()

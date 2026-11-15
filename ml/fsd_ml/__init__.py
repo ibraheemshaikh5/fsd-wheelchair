@@ -1,1 +1,1 @@
-"""The model side of the FSD wheelchair: pipeline, simulator, models and their tools."""
+"""The model side of the FSD wheelchair: the console that drives it, the models, their tools."""
