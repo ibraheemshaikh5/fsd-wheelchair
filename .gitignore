@@ -24,9 +24,12 @@ recordings/
 
 .DS_Store
 
-# Model work (large downloads and generated output)
-ml/weights/
+# Model work (generated output)
 ml/runs/
 
 # TypeScript build cache
 *.tsbuildinfo
+
+# Detector weights fetched at run time
+/weights/
+*.pt
