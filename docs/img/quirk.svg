@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="300" viewBox="0 0 520 300" role="img" aria-label="The chair's quirk: after each byte it releases the data line during the acknowledge slot. The real chip ignores this; the Arduino's I2C hardware treats it as end of message and returns FF FF."><style>
+text{font-family:-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;font-size:12px;fill:#1d2327}
+.mono{font-family:Menlo,Consolas,monospace;font-size:11px}.small{font-size:11px}
+.title{font-weight:700;font-size:13px}
+.box{fill:#fff;stroke:#1d2327;stroke-width:1.4}.soft{fill:#f4f5f2;stroke:#d6dad6;stroke-width:1.2}
+.wire{fill:none;stroke:#1d2327;stroke-width:1.5}.acc{stroke:#1f6fb2}.accfill{fill:#1f6fb2}
+.wrongc{stroke:#c2410c}.wrongfill{fill:#c2410c}.okfill{fill:#2f7d4a}.mutedtxt{fill:#5d676d}
+</style><rect width="520" height="300" fill="#fff"/>
+        <text x="20" y="26" class="title">The quirk behind the beeps</text>
+        <text x="20" y="62" class="mono">SCL</text>
+        <path d="M60,70 L80,70 L80,46 L96,46 L96,70 L112,70 L112,46 L128,46 L128,70 L144,70 L144,46 L160,46 L160,70 L176,70 L176,46 L192,46 L192,70 L240,70 L240,46 L262,46 L262,70 L300,70 L300,46 L316,46 L316,70 L332,70 L332,46 L348,46 L348,70 L380,70" class="wire"/>
+        <text x="20" y="122" class="mono">SDA</text>
+        <path d="M60,110 L84,110 L84,130 L118,130 L118,110 L150,110 L150,130 L196,130 L222,130" class="wire"/>
+        <path d="M222,130 L232,106 L270,106" class="wire wrongc" stroke-width="2.4"/>
+        <path d="M270,106 L280,130 L380,130" class="wire"/>
+        <rect x="226" y="36" width="50" height="104" fill="none" stroke-dasharray="4 3" class="wrongc"/>
+        <text x="251" y="156" text-anchor="middle" class="small" style="fill:#c2410c">ACK slot</text>
+        <text x="120" y="156" text-anchor="middle" class="small mutedtxt">data byte</text>
+        <text x="20" y="190" class="small">Chair lets go of SDA here after every byte (looks like a STOP).</text>
+        <rect x="20" y="206" width="230" height="70" rx="6" class="box"/>
+        <text x="34" y="228" class="title">Real chip</text>
+        <text x="34" y="248" class="small">ignores it, keeps sending X, Y</text>
+        <text x="34" y="266" class="small" style="fill:#2f7d4a">chair happy</text>
+        <rect x="270" y="206" width="230" height="70" rx="6" class="box"/>
+        <text x="284" y="228" class="title">Arduino I2C hardware</text>
+        <text x="284" y="248" class="small">ends the message, sends FF FF</text>
+        <text x="284" y="266" class="small" style="fill:#c2410c">chair beeps → fix: I2C in software</text>
+      </svg>

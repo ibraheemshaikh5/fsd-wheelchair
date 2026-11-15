@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="400" viewBox="0 0 1000 400" role="img" aria-label="Final wiring: the chair's joystick cable plugs into the Grove shield with red to SDA, white to SCL, black to ground and yellow left empty. The real joystick sensor connects by Grove cable to port D2. The UNO Q runs from a USB-C power bank."><style>
+text{font-family:-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;font-size:12px;fill:#1d2327}
+.mono{font-family:Menlo,Consolas,monospace;font-size:11px}.small{font-size:11px}
+.title{font-weight:700;font-size:13px}
+.box{fill:#fff;stroke:#1d2327;stroke-width:1.4}.soft{fill:#f4f5f2;stroke:#d6dad6;stroke-width:1.2}
+.wire{fill:none;stroke:#1d2327;stroke-width:1.5}.acc{stroke:#1f6fb2}.accfill{fill:#1f6fb2}
+.wrongc{stroke:#c2410c}.wrongfill{fill:#c2410c}.okfill{fill:#2f7d4a}.mutedtxt{fill:#5d676d}
+</style><rect width="1000" height="400" fill="#fff"/>
+      <!-- chair controller -->
+      <rect x="20" y="40" width="200" height="130" rx="8" class="box"/>
+      <text x="120" y="66" text-anchor="middle" class="title">Chair controller</text>
+      <text x="120" y="84" text-anchor="middle" class="small">board OM_RF_A, in joystick box</text>
+      <rect x="150" y="100" width="70" height="52" rx="4" class="soft"/>
+      <text x="185" y="130" text-anchor="middle" class="mono">J6 plug</text>
+      <!-- wires -->
+      <g stroke-width="3" fill="none">
+        <path d="M220,108 L470,108" stroke="#d62828"/>
+        <path d="M220,120 L470,120" stroke="#9aa0a6"/>
+        <path d="M220,132 L470,132" stroke="#222"/>
+        <path d="M220,144 L330,144" stroke="#e9b308" stroke-dasharray="6 4"/>
+      </g>
+      <text x="250" y="102" class="small">red</text>
+      <text x="300" y="102" class="small mutedtxt">4-wire stick cable</text>
+      <text x="340" y="148" class="small" style="fill:#c2410c">yellow: leave empty</text>
+      <!-- shield -->
+      <rect x="470" y="30" width="300" height="250" rx="10" class="box"/>
+      <text x="620" y="54" text-anchor="middle" class="title">UNO Q + Grove Base Shield</text>
+      <text x="620" y="72" text-anchor="middle" class="small">shield switch on 3V3</text>
+      <g class="mono">
+        <rect x="484" y="98" width="70" height="20" rx="3" class="soft"/><text x="519" y="112" text-anchor="middle">SDA</text>
+        <rect x="484" y="122" width="70" height="20" rx="3" class="soft"/><text x="519" y="136" text-anchor="middle">SCL</text>
+        <rect x="484" y="146" width="70" height="20" rx="3" class="soft"/><text x="519" y="160" text-anchor="middle">GND</text>
+      </g>
+      <path d="M470,108 L484,108 M470,120 Q478,120 478,132 L484,132 M470,132 Q474,132 474,150 L484,156" class="wire"/>
+      <text x="570" y="112" class="small">fake sensor (software I2C target)</text>
+      <text x="570" y="128" class="small mutedtxt">PB11 / PB10</text>
+      <rect x="640" y="200" width="110" height="34" rx="4" class="soft"/>
+      <text x="695" y="222" text-anchor="middle" class="mono">Grove D2</text>
+      <text x="584" y="256" class="small mutedtxt">real stick read here (software I2C, 50 kHz)</text>
+      <rect x="484" y="200" width="120" height="34" rx="4" class="soft"/>
+      <text x="544" y="222" text-anchor="middle" class="mono">USB-C</text>
+      <!-- sensor -->
+      <rect x="800" y="180" width="180" height="76" rx="8" class="box"/>
+      <text x="890" y="206" text-anchor="middle" class="title">Real joystick sensor</text>
+      <text x="890" y="224" text-anchor="middle" class="small mono">MLX90393 · 0x0C</text>
+      <text x="890" y="242" text-anchor="middle" class="small">its own plug socket</text>
+      <path d="M750,217 L800,217" stroke-width="3" class="wire acc"/>
+      <text x="756" y="210" class="small">Grove cable</text>
+      <!-- power -->
+      <rect x="470" y="320" width="200" height="54" rx="8" class="box"/>
+      <text x="570" y="344" text-anchor="middle" class="title">Power bank</text>
+      <text x="570" y="362" text-anchor="middle" class="small">5 V / 3 A, USB-C</text>
+      <path d="M544,234 L544,318" class="wire"/>
+      <!-- rule -->
+      <rect x="20" y="300" width="400" height="76" rx="8" fill="none" stroke-width="1.6" class="wrongc"/>
+      <text x="36" y="326" class="title" style="fill:#c2410c">Never put the real sensor on SDA/SCL</text>
+      <text x="36" y="346" class="small">Two 0x0C chips on one bus = garbage and beeping.</text>
+      <text x="36" y="364" class="small">Back to stock in 10 s: plug the cable back into the sensor.</text>
+    </svg>
