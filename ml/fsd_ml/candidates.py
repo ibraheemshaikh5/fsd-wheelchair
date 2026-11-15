@@ -4,8 +4,8 @@ A model that sees is poor at judging metres and degrees, and good at pointing. S
 asked for a distance or an angle: a fan of paths is drawn on the floor of the picture, each
 with a number at its far end, and it answers with a number.
 
-    paths = fan(obstacles, setup, 0.25, stop_m)  # {"1": path, ...}, blocked ones left out
-    picture = draw(jpeg, paths, setup, tilt)  # the JPEG with the paths and their numbers on it
+    paths = fan(obstacles, setup, 0.2)   # {"1": path, ... "7": path}, blocked ones left out
+    picture = draw(jpeg, paths, setup)   # the JPEG with the paths and their numbers on it
     listed = options(paths)                   # {"1": "path 1: curving left ...", ..., "L": ...}
 
 Each path is an arc from the middle of the chair, leaving straight ahead and ending AIM_M
@@ -38,10 +38,11 @@ BEARINGS_DEG = (60, 40, 20, 0, -20, -40, -60)
 AIM_M = 2.5
 # A path is not offered past where it comes this close to the side of the camera's view.
 VIEW_EDGE_DEG = 3.0
-# The camera cannot see the floor for about this far along a path, from the chair's middle.
-BLIND_POINTS = 9
+# The nearest floor in the picture is about this far ahead of the lens: nearer than that a
+# path is under the picture, not beside it.
+NEAR_M = 0.4
 # A path with less clear floor than this is not offered.
-MIN_M = 0.5
+MIN_M = 0.3
 # What can be picked besides a path: turns on the spot (degrees to the left), and the ends.
 TURNS = {"L": 60.0, "R": -60.0, "B": 180.0}
 OTHERS = {
@@ -70,13 +71,13 @@ def arc(bearing_deg: float) -> np.ndarray:
     return radius * np.column_stack([np.sin(turned), 1 - np.cos(turned)])
 
 
-def fan(
-    obstacles: Sequence[Obstacle], setup: ChairSetup, margin_m: float, stop_m: float = 0.0
-) -> dict[str, np.ndarray]:
+def fan(obstacles: Sequence[Obstacle], setup: ChairSetup, margin_m: float) -> dict[str, np.ndarray]:
     """The paths the chair fits along, by number.
 
-    Each is cut ``stop_m`` short of what the chair, with ``margin_m`` kept clear round it,
-    would meet; and where it leaves the camera's view, since nothing is sensed out there.
+    Each is cut where the chair's body would come within ``margin_m`` of an obstacle, and
+    where it leaves the camera's view, since nothing is sensed out there. This is planning:
+    how close a path may be laid. Stopping for what turns up while driving is the runner's
+    own check (Session.blocked), which is stricter straight ahead and may end a path early.
     """
     shape = Body(setup.chair.width_m, setup.chair.length_m, margin_m)
     paths = {}
@@ -84,12 +85,11 @@ def fan(
         path = arc(bearing)
         ahead, left = (path - setup.lens_xy).T
         aside = np.abs(np.degrees(np.arctan2(left, ahead)))
-        unseen = aside > setup.camera.hfov_deg / 2 - VIEW_EDGE_DEG
-        unseen[:BLIND_POINTS] = False  # the floor just in front is under the picture, not beside it
+        unseen = (ahead > NEAR_M) & (aside > setup.camera.hfov_deg / 2 - VIEW_EDGE_DEG)
         clear = int(np.argmax(unseen)) if unseen.any() else len(path)
         hit = first_hit(path, obstacles, shape)
         if hit is not None:
-            clear = min(clear, round((hit[0] - stop_m) / SAMPLE_SPACING_M))
+            clear = min(clear, round(hit[0] / SAMPLE_SPACING_M) - 1)
         if clear * SAMPLE_SPACING_M >= MIN_M:
             paths[str(n)] = path[:clear]
     return paths
@@ -109,26 +109,28 @@ def options(paths: dict[str, np.ndarray]) -> dict[str, str]:
 
 
 def _in_view(pixels: np.ndarray, width: int, height: int) -> np.ndarray:
-    """The pixels that are in the picture: not behind the lens, below it, or off a side."""
+    """The pixels that are in the picture: not behind the lens, far below it, or off a side.
+
+    A little below the bottom edge is kept, so a line starts at the edge and not at the
+    first point above it.
+    """
     x, y = pixels.T
-    return pixels[~np.isnan(x) & (x >= 0) & (x < width) & (y < height)]
+    return pixels[~np.isnan(x) & (x >= 0) & (x < width) & (y < height * 1.3)]
 
 
-def _guides(
-    pen: ImageDraw.ImageDraw, setup: ChairSetup, size: tuple[int, int], tilt: float | None
-) -> None:
+def _guides(pen: ImageDraw.ImageDraw, setup: ChairSetup, size: tuple[int, int]) -> None:
     """Thin lines where the chair's sides pass if it drives straight, with distance marks."""
     front, half = setup.chair.length_m / 2, setup.chair.width_m / 2
     ahead = front + np.arange(0.0, MARKS_M[-1] + 0.5 + 1e-9, SAMPLE_SPACING_M)
     for side in (half, -half):
         rail = _in_view(
-            setup.to_pixels(np.column_stack([ahead, np.full_like(ahead, side)]), *size, tilt), *size
+            setup.to_pixels(np.column_stack([ahead, np.full_like(ahead, side)]), *size), *size
         )
         if len(rail) > 1:
             pen.line([tuple(p) for p in rail], fill=GUIDE, width=2)
     font = ImageFont.load_default(size=round(size[0] * 0.017))
     for mark in MARKS_M:
-        ends = setup.to_pixels([[front + mark, half], [front + mark, -half]], *size, tilt)
+        ends = setup.to_pixels([[front + mark, half], [front + mark, -half]], *size)
         if len(_in_view(ends, *size)) == 2:
             pen.line([tuple(p) for p in ends], fill=GUIDE, width=2)
             pen.text(
@@ -142,17 +144,13 @@ def _guides(
             )
 
 
-def draw(
-    jpeg: bytes, paths: dict[str, np.ndarray], setup: ChairSetup, tilt_down_deg: float | None = None
-) -> bytes:
+def draw(jpeg: bytes, paths: dict[str, np.ndarray], setup: ChairSetup) -> bytes:
     """The camera's JPEG with the guide lines and each path on the floor, numbered.
 
     A path is solid as far as the chair's front gets along it, and faintly dashed from there
     to its end, so it shows both how far the chair can go and where that way leads. Its
-    number is at its far end, or where it leaves the picture.
-
-    ``tilt_down_deg`` is the camera's tilt as the obstacle sense fitted it in this picture, if
-    it did; without it the saved tilt (ml/chair.json) is used.
+    number is at its far end, or where it leaves the picture. With no paths, only the guide
+    lines are drawn.
     """
     image = Image.open(io.BytesIO(jpeg)).convert("RGB")
     if image.width < DRAW_WIDTH:
@@ -160,7 +158,7 @@ def draw(
         image = image.resize((DRAW_WIDTH, round(image.height * scale)), Image.Resampling.LANCZOS)
     width, height = image.size
     pen = ImageDraw.Draw(image, "RGBA")
-    _guides(pen, setup, image.size, tilt_down_deg)
+    _guides(pen, setup, image.size)
     radius = round(width * 0.022)
     font = ImageFont.load_default(size=round(radius * 1.5))
     front = round(setup.chair.length_m / 2 / SAMPLE_SPACING_M)
@@ -168,12 +166,8 @@ def draw(
     for label, path in paths.items():
         whole = arc(BEARINGS_DEG[int(label) - 1])
         reach = min(len(whole), len(path) + front)  # the chair's front is ahead of its middle
-        solid = _in_view(
-            setup.to_pixels(whole[:reach], width, height, tilt_down_deg), width, height
-        )
-        rest = _in_view(
-            setup.to_pixels(whole[reach - 1 :], width, height, tilt_down_deg), width, height
-        )
+        solid = _in_view(setup.to_pixels(whole[:reach], width, height), width, height)
+        rest = _in_view(setup.to_pixels(whole[reach - 1 :], width, height), width, height)
         colour = COLOURS[int(label) - 1]
         if len(solid) > 1:
             line = [tuple(p) for p in solid]

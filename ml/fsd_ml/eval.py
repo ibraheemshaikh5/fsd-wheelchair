@@ -6,10 +6,12 @@
 Every Nth frame a driver actually used in those sessions (with ``--looks``, only the frames a
 pilot stood still and decided on) is shown, with the instruction, to each candidate: OmniVLA
 (``--driver``) and the pilots in ``--models``. Those are the Claude pilot's variants and two
-ways of asking Gemini: ``gemini-moves`` (the raw picture and the Claude pilot's move tools)
-and ``gemini-paths`` (the picture with numbered paths drawn on it, fsd_ml/gemini_pilot.py;
-its drawn picture is saved beside the frame as ``NNN.picks.jpg``). Each answer is reduced to
-one first action in plain words and saved under ``runs/eval/<name>/``:
+ways of asking Gemini, both on the picture with the parking guide lines drawn
+(``NNN.guides.jpg``, which is also the image the judge is given): ``gemini-moves`` is free
+to turn by degrees and drive by metres with the Claude pilot's move tools, and
+``gemini-paths`` picks from numbered paths drawn on top (fsd_ml/gemini_pilot.py; what it was
+shown is saved as ``NNN.picks.jpg``). Each answer is reduced to one first action in the same
+plain words, whoever gave it, and saved under ``runs/eval/<name>/``:
 
 - ``answers.jsonl``: per frame, every model's action, latency and raw output (for us).
 - ``judge.md``: per frame, the image path and the actions as A, B, C in a shuffled order,
@@ -33,7 +35,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from fsd_ml import candidates, gemini_pilot, obstacles
+from fsd_ml import candidates, chair, gemini_pilot, obstacles
 from fsd_ml.drivers import Goal, Motion, make_driver
 from fsd_ml.pilot import PROMPT_FILE, TOOLS, Call, Pilot
 
@@ -47,6 +49,15 @@ PILOTS = {
 
 
 GEMINI = ("gemini-moves", "gemini-paths")
+# Added to the Claude pilot's instructions when the picture has the guide lines on it.
+GUIDES_SAID = """
+
+## Guide lines
+
+Thin white lines are drawn on the picture, as on a parking camera: the two long ones are
+where the chair's left and right sides would pass if it drove straight ahead, and the cross
+lines are 0.5 m, 1 m and 2 m in front of the chair. Use them to judge distances and gaps.
+"""
 
 
 def frames_used(sessions: list[Path], every: int, looks: bool = False) -> list[Path]:
@@ -87,11 +98,19 @@ def first_action(calls: list[Call]) -> tuple[str, str]:
         return (
             "stop: says it has arrived" if call.input.get("arrived") else "stop: gives up"
         ), call.why
-    return call.says(), call.why
+    amount = float(call.input.get("distance_m" if call.name.startswith("move_") else "degrees", 0))
+    said = {
+        "move_forward": f"drive {amount:.1f} m straight ahead",
+        "move_backward": f"back up {amount:.1f} m",
+        "turn_left": f"turn left {amount:.0f}°",
+        "turn_right": f"turn right {amount:.0f}°",
+    }
+    return said.get(call.name, call.name), call.why
 
 
 def gemini_moves(jpeg: bytes, say: str) -> dict:
-    """Gemini asked the way the Claude pilot is: the raw picture, its prompt, its move tools."""
+    """Gemini free to move as the Claude pilot is: that pilot's prompt and move tools, on the
+    picture with the guide lines."""
     from google.genai import types
 
     tools = [
@@ -113,7 +132,7 @@ def gemini_moves(jpeg: bytes, say: str) -> dict:
             f"Your task: {say}",
         ],
         config=types.GenerateContentConfig(
-            system_instruction=PROMPT_FILE.read_text(),
+            system_instruction=PROMPT_FILE.read_text() + GUIDES_SAID,
             thinking_config=types.ThinkingConfig(thinking_level=gemini_pilot.THINKING),
             tools=[types.Tool(function_declarations=tools)],
             tool_config=types.ToolConfig(
@@ -133,9 +152,23 @@ def gemini_paths(jpeg: bytes, say: str, depth: obstacles.DepthObstacles | None) 
     offered = candidates.options(paths)
     pilot = gemini_pilot.GeminiPilot(say)
     choice = pilot.next(picture, offered, "none yet: this is the first look.", 0.0)
-    action = {None: "no answer", "S": "stop: says it has arrived", "X": "stop: gives up"}.get(
-        choice, offered.get(choice, "").removesuffix(" on the spot")
-    )
+    if choice in paths:
+        bearing, metres = candidates.BEARINGS_DEG[int(choice) - 1], len(paths[choice]) * 0.1
+        side = "left" if bearing > 0 else "right"
+        action = f"drive {metres:.1f} m " + (
+            f"along a curve to the {side}, heading for {abs(bearing)}° {side} of straight ahead"
+            if bearing
+            else "straight ahead"
+        )
+    else:
+        action = {
+            None: "no answer",
+            "L": "turn left 60°",
+            "R": "turn right 60°",
+            "B": "turn around (180°)",
+            "S": "stop: says it has arrived",
+            "X": "stop: gives up",
+        }[choice]
     return {
         "action": action,
         "ms": pilot.last.get("ms"),
@@ -171,14 +204,18 @@ def ask(args: argparse.Namespace) -> None:
                 "ms": round((time.perf_counter() - started) * 1000),
                 "path": np.round(path, 2).tolist(),
             }
-        drawn = None
+        if set(GEMINI) & set(args.models):
+            # What the judge looks at too: the guide lines, and no paths to lead the eye.
+            image = image.with_suffix(".guides.jpg")
+            image.write_bytes(candidates.draw(jpeg, {}, chair.load()))
         for name in args.models:
             if name == "gemini-moves":
-                row[name] = gemini_moves(jpeg, args.say)
+                row[name] = gemini_moves(image.read_bytes(), args.say)
             elif name == "gemini-paths":
                 row[name] = gemini_paths(jpeg, args.say, depth)
-                drawn = image.with_suffix(".picks.jpg")
-                drawn.write_bytes(row[name].pop("picture"))
+                image.with_suffix("").with_suffix(".picks.jpg").write_bytes(
+                    row[name].pop("picture")
+                )
             else:
                 model, thinking = PILOTS[name]
                 pilot = Pilot(args.say, model=model, thinking=thinking)
@@ -190,11 +227,6 @@ def ask(args: argparse.Namespace) -> None:
         key[f"{n:03d}"] = letters
         answers.append({"frame": f"{n:03d}", "source": str(source), **row})
         pack.append(f"## Frame {n:03d}\nImage: {image.resolve()}\n")
-        if drawn:
-            pack.append(
-                f"The same image with guide lines and numbered paths drawn (solid: what would"
-                f" be driven; dashed: where it leads): {drawn.resolve()}\n"
-            )
         pack += [f"- {letter}: {row[name]['action']}" for letter, name in letters.items()]
         pack.append("")
         print(n, {k: v["action"] for k, v in row.items()})

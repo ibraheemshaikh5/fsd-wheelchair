@@ -129,8 +129,8 @@ class Runner:
             frame, _ = self._look()
             if frame is None:
                 return "failed", NO_PICTURE
-            paths, tilt = self._chair.candidates()
-            picture = candidates.draw(frame.jpeg, paths, self._chair.setup, tilt)
+            paths = self._chair.candidates()
+            picture = candidates.draw(frame.jpeg, paths, self._chair.setup)
             heading = math.degrees(self._chair.yaw_rad() - start)
             self._phase(f"look {look}: Gemini is thinking", steps=look)
             choice = pilot.next(picture, candidates.options(paths), outcome, heading)

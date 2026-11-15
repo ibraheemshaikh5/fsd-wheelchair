@@ -690,18 +690,13 @@ class Session:
             ]
         )
 
-    def candidates(self) -> tuple[dict[str, np.ndarray], float | None]:
-        """The paths on offer now (fsd_ml/candidates.py), each ending where ``blocked`` would
-        stop the chair, and the camera's tilt as the obstacle sense fitted it. No paths when
-        the obstacle sense is on but cannot see the floor."""
-        clearance = self.setting("clearance_m")
-        if self.sight is None:
-            return candidates.fan((), self.setup, clearance), None
-        seen = self.sight.fresh()
+    def candidates(self) -> dict[str, np.ndarray]:
+        """The paths on offer now (fsd_ml/candidates.py), laid ``path_clearance_m`` clear of
+        what the obstacle sense sees. No paths when it is on but cannot see the floor."""
+        seen = self.sight.fresh() if self.sight else ()
         if seen is None:
-            return {}, None
-        tilt = self.sight.info.get("tilt_deg")
-        return candidates.fan(seen, self.setup, clearance, STOP_M), tilt
+            return {}
+        return candidates.fan(seen, self.setup, self.setting("path_clearance_m"))
 
     def blocked(self) -> str | None:
         """Why the chair must not go on: what stands in the next metre straight ahead, and

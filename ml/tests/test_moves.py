@@ -80,7 +80,7 @@ class FakeChair:
         return type("Frame", (), {"jpeg": jpeg.getvalue()})(), "nothing sensed"
 
     def candidates(self):
-        return candidates.fan((), self.setup, 0.25), None
+        return candidates.fan((), self.setup, 0.25)
 
     def note(self, event, **fields):
         pass
@@ -296,7 +296,7 @@ def test_gemini_follows_the_path_it_picks_and_is_told_how_it_went():
 
 def test_gemini_run_ends_on_a_pick_that_was_not_offered():
     chair = FakeChair()
-    chair.candidates = lambda: ({}, None)  # everything blocked: only turns and ends on offer
+    chair.candidates = dict  # everything blocked: only turns and ends on offer
     done = runner(chair)[0].gemini("go to the door", Picks("4"), background=False)
     assert done["outcome"] == "failed" and not chair.sticks and stopped(chair)
 

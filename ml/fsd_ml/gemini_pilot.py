@@ -148,7 +148,6 @@ def drawn(jpeg: bytes, depth: Any = None) -> tuple[dict[str, Any], bytes, dict[s
     from PIL import Image
 
     from fsd_ml import bench, candidates, chair
-    from fsd_ml.console.server import STOP_M
 
     setup = chair.load()
     seen, info = [], {"floor": None}
@@ -156,13 +155,10 @@ def drawn(jpeg: bytes, depth: Any = None) -> tuple[dict[str, Any], bytes, dict[s
         rgb = np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
         camera = setup.camera
         seen, info = depth.find(rgb, camera.hfov_deg, camera.height_m, setup.lens_xy)
-    # The space kept clear and the stop distance of a live run (Session.candidates).
-    paths = (
-        candidates.fan(seen, setup, bench.DEFAULTS["clearance_m"], STOP_M)
-        if info["floor"] is not False
-        else {}
-    )
-    return paths, candidates.draw(jpeg, paths, setup, info.get("tilt_deg")), info
+    # As a live run lays them (Session.candidates).
+    clearance = bench.DEFAULTS["path_clearance_m"]
+    paths = candidates.fan(seen, setup, clearance) if info["floor"] is not False else {}
+    return paths, candidates.draw(jpeg, paths, setup), info
 
 
 def main() -> None:
