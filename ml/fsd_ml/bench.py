@@ -36,9 +36,10 @@ DEFAULTS: dict[str, float] = {
     # start line, 4 s and 1.8 s runs). Only valid near those settings: speed isn't linear in stick.
     "v_full_mps": 7.5,
     "w_full_radps": 1.5,
-    # Space kept around the chair (front and sides) on a set or pilot move. Depth reads
-    # 10-25% long up close, so this is generous.
-    "clearance_m": 0.25,
+    # Space kept around the chair (front and sides) on a set move or a step pilot's move.
+    # It was 0.25 m when depth read 10-25% long; with the camera calibrated depth is right
+    # to a few centimetres, and 0.25 m refused gaps the chair fits through.
+    "clearance_m": 0.10,
     # Space kept between the chair's body and obstacles along a path a Gemini pilot picks or
     # draws: both where the path is cut when offered and where the chair stops while driving
     # it (one rule, with the stop distance on top). clearance_m above is for set moves only.
