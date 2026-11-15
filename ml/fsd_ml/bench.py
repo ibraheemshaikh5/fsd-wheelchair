@@ -30,7 +30,8 @@ DEFAULTS: dict[str, float] = {
     # What full stick is believed to give. Correct these from measured runs.
     "v_full_mps": 1.5,
     "w_full_radps": 1.5,
-    # Space kept beside the chair on a set move.
+    # Space kept around the chair (front and sides) on a set or pilot move. Depth reads
+    # 10-25% long up close, so this is generous.
     "clearance_m": 0.25,
     # How much of the driving model's stick is sent: 100 is all of it.
     "model_speed_pct": 40.0,
