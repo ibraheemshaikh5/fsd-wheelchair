@@ -2,19 +2,24 @@
 
 A run is one connection of the console to the chair's driving service. Its folder,
 ``runs/console/live/<date-time>/``, holds ``log.jsonl`` and ``frames/``. Every way of driving
-(keyboard, bench moves, the driving model, the pilot) writes one ``command`` line per stick
+(keyboard, bench moves, the driving model, the pilots) writes one ``command`` line per stick
 command or decision::
 
     {"t": 1794650000.123,            # when the line was written, unix seconds
      "event": "command",
-     "mode": "manual" | "bench" | "model" | "pilot",
+     "mode": "manual" | "bench" | "model" | "pilot" | "gemini",
      "frame": "frames/0001234.jpg",  # the camera's own JPEG the command was given on
      "frame_n": 1234,                # the feed's count of that frame
      "frame_t": 1794650000.051,      # when the phone took it, unix seconds
      "stick": [x, y],                # percent sent, x right, y forward; null if none was
      "sent": true, "problem": null,  # whether it reached the chair, and why not
      "model": {...},                 # what the model said: its path, or the pilot's tool call
+     "picture": "frames/0001234.picks.jpg",  # gemini only: the frame as the model was shown it
      "board": {...}}                 # the board's telemetry at that moment
+
+A ``gemini`` decision's ``model`` holds what a training sample needs: ``say`` (the task),
+``paths`` (every path offered, by number, as [ahead, left] metres for the chair's middle, a
+point every 0.1 m), ``choice``, ``scene``, ``note``, ``ms`` and the token counts.
 
 Other lines (``connected``, ``sending on``, ``stop``, ``waiting``, ``run finished`` ...) mark
 what happened around them.

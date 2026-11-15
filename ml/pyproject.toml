@@ -11,6 +11,7 @@ dependencies = [
     "websockets>=13",
     # The Claude pilot (fsd_ml/pilot.py).
     "anthropic>=0.70",
+    "google-genai>=1.0",
 ]
 
 [dependency-groups]

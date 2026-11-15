@@ -4,6 +4,7 @@
     runner.straight(0.76)                  # returns at once; the work happens on a thread
     runner.turn(90)                        # degrees to the left, by the phone's gyro
     runner.pilot("go to the door", pilot)  # a model picks straights and turns; see pilot.py
+    runner.gemini("go to the door", pilot) # a model picks drawn paths; see gemini_pilot.py
     runner.state()                         # what it is doing, for the page
     runner.abort("why")                    # stops the chair now
 
@@ -20,7 +21,13 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
+from fsd_ml import candidates
+from fsd_ml.chair_link import to_stick
+from fsd_ml.gemini_pilot import GeminiPilot
 from fsd_ml.pilot import MAX_BACKWARD_M, MAX_FORWARD_M, MAX_TURN_DEG, Call, Pilot
+from fsd_ml.pipeline.control import follow
 
 if TYPE_CHECKING:
     from fsd_ml.console.server import Session
@@ -32,6 +39,9 @@ TURN_TIMEOUT_S_PER_DEG = 0.12
 
 # Longest a straight or backing move may drive, however slow the chair is believed to be.
 MAX_MOVE_S = 4.0
+# Longest one picked path may be driven. Its distance is believed too, but the gyro steers
+# it and each pick is meant to cover ground, so it gets longer than a blind straight.
+MAX_PATH_S = 12.0
 
 
 class Runner:
@@ -78,18 +88,142 @@ class Runner:
         """
         return self._start("pilot", lambda: self._pilot(pilot, max_turns), background, say=say)
 
+    def gemini(
+        self, say: str, pilot: GeminiPilot, max_looks: int = 30, background: bool = True
+    ) -> dict[str, Any]:
+        """Let a model drive by picking from the paths drawn on the picture, one per look.
+
+        Stop and go: the chair stands still while the model looks and decides.
+        """
+        return self._start("gemini", lambda: self._gemini(pilot, max_looks), background, say=say)
+
+    def _gemini(self, pilot: GeminiPilot, max_looks: int) -> tuple[str, str]:
+        start = self._chair.yaw_rad()
+        outcome = "none yet: this is the first look."
+        for look in range(1, max_looks + 1):
+            if why := self._stopped():
+                return "aborted", why
+            frame, _ = self._look()
+            if frame is None:
+                return "failed", "no fresh camera picture to show Gemini"
+            paths, tilt = self._chair.candidates()
+            picture = candidates.draw(frame.jpeg, paths, self._chair.setup, tilt)
+            heading = math.degrees(self._chair.yaw_rad() - start)
+            self._phase(f"look {look}: Gemini is thinking", steps=look)
+            choice = pilot.next(picture, candidates.options(paths), outcome, heading)
+            # Enough to make a training sample later: the picture, the task, the path picked.
+            self._chair.record(
+                "gemini",
+                frame,
+                model={
+                    "look": look,
+                    "say": pilot.task,
+                    "paths": {label: np.round(path, 2).tolist() for label, path in paths.items()},
+                    "last_pick": outcome,
+                    "heading_deg": round(heading, 1),
+                    **pilot.last,
+                },
+                picture=picture,
+            )
+            if why := self._stopped():
+                return "aborted", why
+            scene, note = pilot.last.get("scene") or "", pilot.last.get("note") or ""
+            if choice is None:
+                return "failed", f"Gemini gave no pick it was offered ({pilot.last.get('choice')})"
+            if choice in ("S", "X"):
+                return ("arrived" if choice == "S" else "failed"), f"Gemini said: {scene} {note}"
+            words = candidates.options(paths)[choice]
+            # ``call`` rides along in every command recorded while the pick is driven.
+            self._phase(
+                f"look {look}: {words} · {note}", steps=look, call={"look": look, "choice": choice}
+            )
+            if choice in candidates.TURNS:
+                result, text = self._turn(candidates.TURNS[choice])
+            else:
+                result, text = self._follow(paths[choice])
+            self._phase(self._state["phase"], call=None)
+            if result == "aborted":
+                return result, text
+            ended = "done" if result == "finished" else "cut short"
+            outcome = f"{choice} ({words}), {ended}: {text}."
+        return "failed", f"not done after {max_looks} looks"
+
+    def _follow(self, path_xy: np.ndarray) -> tuple[str, str]:
+        """Drive along a path laid on the floor from where the chair stands now.
+
+        The heading is measured (the gyro); how far it has gone is believed (speed x time, as
+        in a straight). Each tick the rest of the path is seen from where the chair is thought
+        to be, and the path follower (pipeline/control.py) steers for it. It stops for an
+        obstacle ahead, and never drives longer than MAX_PATH_S.
+        """
+        if not self._chair.gyro_fresh():
+            return "failed", "the gyro is not reporting, so a path cannot be followed"
+        stick = self._chair.setting("drive_stick_pct")
+        ramp = max(0.0, self._chair.setting("ramp_s"))
+        speed = self._chair.speed_for(stick)
+        if speed <= 0:
+            return "failed", "no speed is known for that stick"
+        path = np.asarray(path_xy, dtype=np.float64).reshape(-1, 2)
+        along = np.cumsum(np.linalg.norm(np.diff(path, axis=0, prepend=[[0.0, 0.0]]), axis=1))
+        length = float(along[-1])
+        seconds = min(length / speed + ramp, MAX_PATH_S)
+        yaw, x, y, gone, v = self._chair.yaw_rad(), 0.0, 0.0, 0.0, 0.0
+        started = last = self._clock()
+        while (now := self._clock() - started) < seconds:
+            if why := self._stopped():
+                return "aborted", why
+            if why := self._chair.blocked():
+                self._chair.hold()
+                self._chair.note("stopped for an obstacle", why=why)
+                return "failed", f"stopped for an obstacle after about {gone:.1f} m: {why}"
+            if not self._chair.gyro_fresh():
+                self._chair.hold()
+                return "failed", f"the gyro stopped reporting after about {gone:.1f} m"
+            heading = self._chair.yaw_rad() - yaw
+            step = v * (self._clock() - last)
+            last = self._clock()
+            x, y, gone = x + step * math.cos(heading), y + step * math.sin(heading), gone + step
+            # What is left of the path, as seen from the chair now.
+            ahead, left = (path[np.searchsorted(along, min(gone, length)) :] - [x, y]).T
+            rest = np.column_stack(
+                [
+                    ahead * math.cos(heading) + left * math.sin(heading),
+                    -ahead * math.sin(heading) + left * math.cos(heading),
+                ]
+            )
+            eased = min(1.0, now / ramp, (seconds - now) / ramp) if ramp > 0 else 1.0
+            v, w = follow(rest, max(eased, 1.0 / stick), speed_limit_mps=speed)
+            if length - gone < 0.3:
+                w = 0.0  # too near the end to aim at it: the aim swings wide as it closes
+            turn, forward = to_stick(
+                v, w, self._chair.setting("v_full_mps"), self._chair.setting("w_full_radps")
+            )
+            # Never a harder turn than a turn on the spot is given.
+            most = self._chair.setting("turn_stick_pct")
+            if problem := self._chair.drive(max(-most, min(most, turn)), forward):
+                return "aborted", problem
+            self._sleep(0.1)
+        self._chair.hold()
+        self._chair.note("path", asked_m=round(length, 2), believed_m=round(gone, 2))
+        return "finished", f"drove about {gone:.1f} m of {length:.1f} m along it"
+
+    def _look(self) -> tuple[Any, str]:
+        """Stand still, then a fresh camera frame and the obstacle report; no frame if none came."""
+        self._settle(0.4)  # so the picture is sharp and shows where the chair ended up
+        frame, report = self._chair.observe()
+        waited = 0.0
+        while frame is None and waited < 5.0 and not self._stopped():
+            self._sleep(0.25)
+            waited += 0.25
+            frame, report = self._chair.observe()
+        return frame, report
+
     def _pilot(self, pilot: Pilot, max_turns: int) -> tuple[str, str]:
         results: list[tuple[str, str, bool]] | None = None
         for turn in range(1, max_turns + 1):
             if why := self._stopped():
                 return "aborted", why
-            self._settle(0.4)  # stand still, so the picture is sharp and shows where it ended
-            frame, report = self._chair.observe()
-            waited = 0.0
-            while frame is None and waited < 5.0 and not self._stopped():
-                self._sleep(0.25)
-                waited += 0.25
-                frame, report = self._chair.observe()
+            frame, report = self._look()
             if frame is None:
                 return "failed", "no fresh camera picture to show the pilot"
             self._phase(f"look {turn}: the pilot is thinking", steps=turn)

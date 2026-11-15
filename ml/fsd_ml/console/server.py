@@ -31,9 +31,10 @@ import httpx
 import numpy as np
 from PIL import Image
 
-from fsd_ml import bench, chair, obstacles
+from fsd_ml import bench, candidates, chair, obstacles
 from fsd_ml.chair_link import ChairOutError, ChairSender, SendResult, to_stick
 from fsd_ml.drivers import Candidate, Driver, FanDriver, Goal, Motion, make_driver
+from fsd_ml.gemini_pilot import GeminiPilot
 from fsd_ml.live import MAX_FRAME_AGE_S, ChairGoal, LiveFeed, LiveFrame, ipad_message
 from fsd_ml.moves import Runner
 from fsd_ml.pilot import Pilot
@@ -420,14 +421,26 @@ class Session:
         result: SendResult | None = None,
         model: dict[str, Any] | None = None,
         frame_gap_s: float = 0.0,
+        picture: bytes | None = None,
     ) -> None:
-        """Write one command line: the frame it was given on, the stick sent, the model's say."""
+        """Write one command line: the frame it was given on, the stick sent, the model's say.
+
+        ``picture`` is the frame as the model was shown it (paths drawn on): saved beside the
+        frame as ``<frame>.picks.jpg``.
+        """
         if self.runlog is None:
             return
+        named = self.runlog.frame(frame, frame_gap_s)
+        if picture and named["frame"]:
+            named["picture"] = str(Path(named["frame"]).with_suffix(".picks.jpg"))
+            try:
+                (self.runlog.folder / named["picture"]).write_bytes(picture)
+            except OSError:
+                named["picture"] = None
         self.runlog.write(
             "command",
             mode=mode,
-            **self.runlog.frame(frame, frame_gap_s),
+            **named,
             stick=[result.x, result.y] if result else None,
             sent=bool(result and result.sent),
             problem=result.problem if result else None,
@@ -517,7 +530,8 @@ class Session:
         if self._manual:
             return "manual"
         if self.runner.running():
-            return "pilot" if self.runner.state().get("kind") == "pilot" else "bench"
+            kind = self.runner.state().get("kind")
+            return kind if kind in ("pilot", "gemini") else "bench"
         return "model"
 
     def drive(self, x_pct: float, y_pct: float, reverse: bool = False) -> str | None:
@@ -676,6 +690,23 @@ class Session:
             ]
         )
 
+    def _watched_shape(self) -> chair.Body:
+        """The chair with the space a run keeps clear: a run is short and watched, so it keeps
+        a hand's width (the bench's ``clearance_m``), not the full margin of ml/chair.json."""
+        body = self.setup.chair
+        return chair.Body(body.width_m, body.length_m, self.setting("clearance_m"))
+
+    def candidates(self) -> tuple[dict[str, np.ndarray], float | None]:
+        """The paths on offer now (fsd_ml/candidates.py), each ending where ``blocked`` would
+        stop the chair, and the camera's tilt as the obstacle sense fitted it. No paths when
+        the obstacle sense is on but cannot see the floor."""
+        if self.sight is None:
+            return candidates.fan((), self._watched_shape()), None
+        seen = self.sight.fresh()
+        if seen is None:
+            return {}, None
+        return candidates.fan(seen, self._watched_shape(), STOP_M), self.sight.info.get("tilt_deg")
+
     def blocked(self) -> str | None:
         """Whether the next metre straight ahead meets an obstacle. None when it is clear,
         and when no obstacle sense is installed."""
@@ -685,12 +716,8 @@ class Session:
         if seen is None:
             return "cannot see the floor ahead"
         ahead = np.arange(0.1, 1.0 + 1e-9, 0.1)
-        # A set move is short and watched, so it keeps a hand's width clear, not the full
-        # clearance used when a model picks its own way.
         tight = FootprintConfig(
-            shape=chair.Body(
-                self.setup.chair.width_m, self.setup.chair.length_m, self.setting("clearance_m")
-            ),
+            shape=self._watched_shape(),
             caution_m=0.05,
             slow_distance_m=2.0,
             stop_distance_m=STOP_M,
@@ -731,6 +758,11 @@ class Session:
                 "no Claude API key: put ANTHROPIC_API_KEY in ml/.env and start the console"
                 " with uv run --env-file .env"
             )
+        if chosen["kind"] == "gemini" and not os.environ.get("GEMINI_API_KEY"):
+            raise ConsoleError(
+                "no Gemini API key: put GEMINI_API_KEY in ml/.env and start the console"
+                " with uv run --env-file .env"
+            )
         if self.sending:
             self.stop_chair()  # whoever was driving (keyboard or model) gives way to the run
         self._armed, self._page_at = True, time.monotonic()
@@ -740,6 +772,12 @@ class Session:
                 self.runner.straight(params["distance_m"])
             elif chosen["kind"] == "turn":
                 self.runner.turn(params["degrees_left"])
+            elif chosen["kind"] == "gemini":
+                self.runner.gemini(
+                    params["say"],
+                    GeminiPilot(params["say"]),
+                    max_looks=max(1, round(self.setting("pilot_max_looks"))),
+                )
             else:
                 self.runner.pilot(
                     params["say"],

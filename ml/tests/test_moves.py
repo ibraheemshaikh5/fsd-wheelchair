@@ -1,9 +1,13 @@
 """A run always leaves the chair stopped, whatever ends it."""
 
+import io
 import math
 
 import pytest
+from PIL import Image
 
+from fsd_ml import candidates
+from fsd_ml.chair import ChairSetup
 from fsd_ml.moves import Runner
 from fsd_ml.pilot import Call
 
@@ -31,7 +35,11 @@ class FakeChair:
             "turn_done_deg": 5.0,
             "turn_passes": 4.0,
             "settle_s": 0.3,
+            "v_full_mps": 1.5,
+            "w_full_radps": 1.5,
         }
+        self.setup = ChairSetup()
+        self.pictures: list[bytes] = []
 
     def armed(self):
         return self.is_armed
@@ -66,13 +74,19 @@ class FakeChair:
         return self.obstacle
 
     def observe(self):
-        return type("Frame", (), {"jpeg": b"jpeg"})(), "nothing sensed"
+        jpeg = io.BytesIO()
+        Image.new("RGB", (480, 270)).save(jpeg, "JPEG")
+        return type("Frame", (), {"jpeg": jpeg.getvalue()})(), "nothing sensed"
+
+    def candidates(self):
+        return candidates.fan((), self.setup.chair), None
 
     def note(self, event, **fields):
         pass
 
-    def record(self, mode, frame, result=None, model=None):
-        pass
+    def record(self, mode, frame, result=None, model=None, picture=None):
+        if picture:
+            self.pictures.append(picture)
 
     def finished(self, record):
         pass
@@ -243,3 +257,36 @@ def test_an_obstacle_cuts_a_move_short_and_the_rest_of_the_reply_is_not_run():
     assert first[2] and "obstacle" in first[1]
     assert second[2] and "Not run" in second[1]
     assert chair.sticks == [] and stopped(chair)  # neither move happened
+
+
+class Picks:
+    """Stands in for GeminiPilot: gives the picks it was made with, in order."""
+
+    task = "go to the door"
+
+    def __init__(self, *picks):
+        self.picks, self.last, self.told = list(picks), {}, []
+
+    def next(self, picture, options, outcome, heading_deg):
+        self.told.append((outcome, heading_deg))
+        self.last = {"choice": self.picks.pop(0)}
+        return self.last["choice"] if self.last["choice"] in options else None
+
+
+def test_gemini_follows_the_path_it_picks_and_is_told_how_it_went():
+    chair = FakeChair()
+    chair.settings["drive_stick_pct"] = 20.0  # fast enough to finish the path inside its cap
+    pilot = Picks("1", "S")
+    done = runner(chair)[0].gemini("go to the door", pilot, background=False)
+    assert done["outcome"] == "arrived" and stopped(chair)
+    # Path 1 curves left: the chair steered left along it, and the next look was told so.
+    assert chair.yaw > math.radians(15) and all(y > 0 for _, y in chair.sticks)
+    assert "done" in pilot.told[1][0] and pilot.told[1][1] > 15
+    assert len(chair.pictures) == 2  # every look's drawn picture goes to the record
+
+
+def test_gemini_run_ends_on_a_pick_that_was_not_offered():
+    chair = FakeChair()
+    chair.candidates = lambda: ({}, None)  # everything blocked: only turns and ends on offer
+    done = runner(chair)[0].gemini("go to the door", Picks("4"), background=False)
+    assert done["outcome"] == "failed" and not chair.sticks and stopped(chair)

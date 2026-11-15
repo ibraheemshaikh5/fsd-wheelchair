@@ -15,6 +15,7 @@ sitting in the chair. Edit that file and restart the console.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -64,6 +65,27 @@ class ChairSetup:
         The camera looks straight ahead, so this is a plain shift.
         """
         return np.asarray(path_xy, dtype=np.float64).reshape(-1, 2) + self.lens_xy
+
+    def to_pixels(
+        self, floor_xy: np.ndarray, width: int, height: int, tilt_down_deg: float | None = None
+    ) -> np.ndarray:
+        """Points on the floor (chair frame) as pixels in the camera's picture.
+
+        Points behind the lens come back as NaN. This is the arithmetic of ``project`` in
+        console/page.html (its normal lens), so a path is drawn in the same place by both.
+        ``tilt_down_deg`` is the tilt to use instead of the saved one: the obstacle sense
+        fits the floor in every picture, and its tilt puts a path where its obstacles are.
+        """
+        camera = self.camera
+        ahead, left = (np.asarray(floor_xy, dtype=np.float64).reshape(-1, 2) - self.lens_xy).T
+        tilt = math.radians(camera.tilt_down_deg if tilt_down_deg is None else tilt_down_deg)
+        depth = ahead * math.cos(tilt) + camera.height_m * math.sin(tilt)
+        below = -ahead * math.sin(tilt) + camera.height_m * math.cos(tilt)
+        depth = np.where(depth < 0.05, np.nan, depth)
+        focal = (width / 2) / math.tan(math.radians(camera.hfov_deg) / 2)
+        return np.column_stack(
+            [width / 2 - focal * left / depth, height / 2 + focal * below / depth]
+        )
 
     def as_dict(self) -> dict:
         ahead, left = self.lens_xy
