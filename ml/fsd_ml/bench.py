@@ -27,8 +27,9 @@ DEFAULTS: dict[str, float] = {
     # A reverse pull to stop harder. Off: it is the harshest thing the chair can be asked for.
     "brake_pct": 0.0,
     "brake_ms": 0.0,
-    # What full stick is believed to give. Correct these from measured runs.
-    "v_full_mps": 1.5,
+    # Measured on the chair: the 6% drive setting goes ~0.45 m/s and 10% ~0.75 m/s (taped
+    # start line, 4 s and 1.8 s runs). Only valid near those settings: speed isn't linear in stick.
+    "v_full_mps": 7.5,
     "w_full_radps": 1.5,
     # Space kept around the chair (front and sides) on a set or pilot move. Depth reads
     # 10-25% long up close, so this is generous.
