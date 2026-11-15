@@ -118,24 +118,11 @@ class FanDriver:
         return candidates
 
 
-def _s2e() -> Driver:
-    from fsd_ml.s2e import S2EDriver
-
-    return S2EDriver()
-
-
-def _flowpilot() -> Driver:
-    from fsd_ml.flowpilot import FlowPilotDriver
-
-    return FlowPilotDriver()
-
-
-# Built on demand, so a model's runtime is only imported when that model is used.
+# The stand-ins that run here. Real models run on another machine and are reached
+# as ``remote:<url>``.
 DRIVERS: dict[str, Callable[[], Driver]] = {
     StraightDriver.name: StraightDriver,
     FanDriver.name: FanDriver,
-    "s2e": _s2e,
-    "flowpilot": _flowpilot,
 }
 
 

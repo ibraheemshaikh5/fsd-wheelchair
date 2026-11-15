@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from conftest import FRAME_COUNT
-from fsd_ml import bakeoff, weights
+from fsd_ml import bakeoff
 from fsd_ml.drivers import make_driver
 from fsd_ml.recording import Recording
 
@@ -36,11 +36,3 @@ def test_command_line_runs_and_honours_stride(
 def test_unknown_names_are_rejected() -> None:
     with pytest.raises(KeyError, match="unknown driver"):
         make_driver("nope")
-    with pytest.raises(KeyError, match="unknown checkpoint"):
-        weights.download("nope")
-
-
-def test_listing_weights_needs_no_download_library(capsys: pytest.CaptureFixture[str]) -> None:
-    weights.main([])
-
-    assert "omnivla-edge" in capsys.readouterr().out

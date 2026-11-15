@@ -8,7 +8,7 @@ Start from open-weight models that already navigate well from a single camera, t
 
 Decided 2026-11-14: use OmniVLA both outdoors and indoors, hosted on a Modal GPU, with latency as the constraint to watch. One model takes a GPS-style point outdoors and an instruction or photo indoors, so there is no hand-off between models, one thing to host and one model to post-train.
 
-FlowPilot stays wrapped as an outdoor fallback behind the same interface. The two-layer plan below is what this replaced; its reasoning and the benchmark still explain the trade-off: OmniVLA's sidewalk driving is unmeasured and its nearest relative did markedly worse than FlowPilot there.
+No other model is kept in the repo: the FlowPilot and S2E wrappers that ran on a laptop were removed. The two-layer plan below is what this replaced; its reasoning and the benchmark still explain the trade-off: OmniVLA's sidewalk driving is unmeasured and its nearest relative did markedly worse than FlowPilot there.
 
 The driver and Modal app for OmniVLA are written but not yet run ([`ml/README.md`](../ml/README.md#omnivla-on-modal)).
 
@@ -80,7 +80,7 @@ The mount height and pitch the phone already reports feed the footprint check. T
 
 Record chair footage on sidewalks and indoors, then run FlowPilot, OmniVLA, OmniVLA-edge, S2E, and NoMaD on it offline. UCLA's Navigation Model Zoo puts most of these behind one interface, so this is cheap. Pick the driver from the result, not from this doc.
 
-The harness is in [`ml/`](../ml): it reads a recording, runs a driver over it and saves what the driver proposed. FlowPilot (small variant) and S2E are wrapped and run: about 400 ms and 240 ms per call on a Mac CPU. OmniVLA and the rest still need wrappers. A [viewer](../ml/README.md#watch-a-model-on-a-video) shows either model's proposals on any video.
+The harness is in [`ml/`](../ml): it reads a recording, runs a driver over it and saves what the driver proposed. FlowPilot (small variant) and S2E were wrapped and run for this, at about 400 ms and 240 ms per call on a Mac CPU, and have since been removed; only OmniVLA is wrapped now. A [viewer](../ml/README.md#watch-a-model-on-a-video) shows a model's proposals on any video.
 
 ## What wrapping FlowPilot showed
 

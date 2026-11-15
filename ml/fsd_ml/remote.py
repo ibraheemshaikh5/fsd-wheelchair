@@ -2,9 +2,9 @@
 
 The model sits behind the same ``propose()`` as a local one, so the pipeline
 does not know where it runs. The server side is ``handle()``; it is served by
-Modal (modal_app.py) or, for trying it out, locally:
+Modal (modal_omnivla.py) or, for trying it out with a stand-in, locally:
 
-    uv run --group onnx python -m fsd_ml.remote --driver s2e --port 8100
+    uv run python -m fsd_ml.remote --driver fan --port 8100
     uv run python -m fsd_ml.sim.run clear --driver remote:http://127.0.0.1:8100
 
 Each request carries every frame the model needs, as JPEG, so the server keeps
@@ -190,7 +190,7 @@ def make_server(driver: Driver, host: str = "127.0.0.1", port: int = 8100) -> Th
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--driver", default="s2e")
+    parser.add_argument("--driver", default="fan")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8100)
     args = parser.parse_args(argv)
