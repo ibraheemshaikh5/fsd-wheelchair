@@ -72,6 +72,9 @@ HEADING_PCT_PER_DEG = 2.5
 HEADING_PCT_PER_DEG_S = 1.0
 HEADING_MAX_PCT = 10.0
 HEADING_VEER_MAX_PCT = 3.0
+# How long a turn stick is held with no rotation before it is raised (the chair always
+# takes a moment to start), and
+RAISE_AFTER_S = 0.7
 # How fast a stick that is not turning the chair is raised.
 RAISE_PCT_PER_S = 6.0
 
@@ -609,6 +612,7 @@ class Runner:
         cap_s = 6.0 + abs(degrees_left) * TURN_TIMEOUT_S_PER_DEG
         most = self._chair.setting("turn_stick_pct")
         least = min(most, self._chair.setting("turn_min_pct"))
+        hardest = max(most, self._chair.setting("turn_max_pct"))
         slow = max(1.0, self._chair.setting("turn_slow_deg"))
         close_enough = self._chair.setting("turn_done_deg")
         coast_s = self._chair.setting("turn_coast_s")
@@ -663,18 +667,26 @@ class Runner:
                     self._chair.hold()
                     pushing, still_since, let_go = None, None, (yaw, rate)
                 else:
-                    if now - pushing[0] >= STUCK_S:
-                        if abs(math.degrees(yaw - pushing[1])) < STUCK_DEG:
+                    # From rest the casters may be trailing the wrong way, and the usual
+                    # stick does not always break them free: one that is not turning the
+                    # chair is raised, up to turn_max_pct, before it is called stuck; and
+                    # brought back down once the chair is turning.
+                    held = now - pushing[0]
+                    if abs(rate) < STILL_DEG_PER_S and held > RAISE_AFTER_S:
+                        raised = min(hardest - least, raised + RAISE_PCT_PER_S * TURN_TICK_S)
+                    elif abs(rate) >= STILL_DEG_PER_S:
+                        raised = max(0.0, raised - 2 * RAISE_PCT_PER_S * TURN_TICK_S)
+                    stick = min(hardest, min(most, max(least, most * to_go / slow)) + raised)
+                    if held >= STUCK_S:
+                        if abs(math.degrees(yaw - pushing[1])) >= STUCK_DEG:
+                            pushing = (now, yaw)
+                        elif stick >= hardest - 0.01 and held >= STUCK_S + RAISE_AFTER_S + 1.0:
                             self._chair.hold()
                             return ended(
                                 "stuck",
                                 "failed",
                                 f": {STUCK} (up to {top:.0f}% stick, the gyro shows no rotation)",
                             )
-                        pushing = (now, yaw)
-                    if abs(rate) < STILL_DEG_PER_S:
-                        raised = min(most, raised + RAISE_PCT_PER_S * TURN_TICK_S)
-                    stick = min(most, max(least, most * to_go / slow) + raised)
                     top = max(top, stick)
                     # Stick right is positive; a left turn is stick left.
                     if problem := self._chair.drive(-way * stick, 0.0):

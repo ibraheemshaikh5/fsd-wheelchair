@@ -59,6 +59,7 @@ from fsd_ml.pipeline.footprint import (
     BESIDE_M,
     SAMPLE_SPACING_M,
     beside,
+    first_hit,
     first_hit_from_here,
     turn_room_deg,
 )
@@ -91,11 +92,12 @@ SCHEMA = {
         "scene": {"type": "string"},
         "goal_visible": {"type": "boolean"},
         "goal": _POINT,
+        "stop_short_m": {"type": "number"},
         "action": {"type": "string", "enum": list(ACTIONS)},
         "route": {"type": "array", "items": _POINT, "maxItems": 8},
         "note": {"type": "string"},
     },
-    "required": ["scene", "goal_visible", "goal", "action", "route", "note"],
+    "required": ["scene", "goal_visible", "goal", "stop_short_m", "action", "route", "note"],
 }
 
 
@@ -106,6 +108,8 @@ class Plan:
     action: str
     points: tuple[tuple[float, float], ...] = ()
     goal: tuple[float, float] | None = None
+    # How far in front of the goal the chair's front should stop, as the model reads the task.
+    stop_short_m: float = 0.3
     scene: str = ""
     note: str = ""
 
@@ -117,6 +121,14 @@ def _fraction(point: Any) -> tuple[float, float] | None:
     except (TypeError, ValueError):
         return None
     return (across, down) if 0 <= across <= 1 and 0 <= down <= 1 else None
+
+
+def _stop_short(asked: Any) -> float:
+    """The model's stop-short distance, kept to what makes sense for a chair."""
+    try:
+        return min(1.5, max(0.1, float(asked)))
+    except (TypeError, ValueError):
+        return 0.3
 
 
 @dataclass(slots=True)
@@ -178,6 +190,7 @@ class RoutePilot:
             action=answer["action"],
             points=tuple(point for point in points if point),
             goal=_fraction(answer.get("goal")) if answer.get("goal_visible") else None,
+            stop_short_m=_stop_short(answer.get("stop_short_m")),
             scene=str(answer.get("scene") or ""),
             note=str(answer.get("note") or ""),
         )
@@ -193,6 +206,8 @@ class Route:
     path: np.ndarray
     # What to tell the model about how its route was read; "" when all of it is driven.
     said: str = ""
+    # Whether the path ends because the chair's front has got as near the goal as was asked.
+    at_goal: bool = False
 
 
 def place(
@@ -225,6 +240,38 @@ def smooth(points: Sequence[tuple[float, float]]) -> np.ndarray:
     return path[1:]
 
 
+# What the chair's sense finds within this far of where the model marked the goal is the
+# goal itself, not something in the way of it.
+GOAL_NEAR_M = 0.4
+# A route that ends this near the goal is carried on to it: the model has said where the
+# goal is and how far short of it to stop, and that last stretch is the harness's to do.
+GOAL_REACH_M = 1.2
+# The chair has arrived when its front is no further than this past the distance asked.
+ARRIVED_WITHIN_M = 0.15
+
+
+def goal_parts(
+    goal: tuple[float, float] | None, obstacles: Sequence[Obstacle]
+) -> tuple[list[Obstacle], list[Obstacle]]:
+    """The obstacles that are the goal itself, and the rest. With a goal that nothing stands
+    at (a place on the floor), the goal is that place."""
+    if goal is None:
+        return [], list(obstacles)
+    near = [o for o in obstacles if math.hypot(o.x - goal[0], o.y - goal[1]) <= GOAL_NEAR_M]
+    known = {id(o) for o in near}
+    rest = [o for o in obstacles if id(o) not in known]
+    return near or [Obstacle("goal", "object", goal[0], goal[1], radius_m=0.0)], rest
+
+
+def goal_gap(parts: Sequence[Obstacle], body: Body) -> float:
+    """How far the chair's front is from the nearest part of the goal (chair's frame)."""
+    front, half = body.length_m / 2, body.width_m / 2
+    return min(
+        max(0.0, math.hypot(max(o.x - front, 0.0), max(abs(o.y) - half, 0.0)) - o.radius_m)
+        for o in parts
+    )
+
+
 def interpret(
     plan: Plan,
     ground: Ground | None,
@@ -232,12 +279,17 @@ def interpret(
     setup: ChairSetup,
     margin_m: float,
     stop_m: float,
+    goal: tuple[float, float] | None = None,
 ) -> Route:
     """Turn a drawn route into the path the chair can drive, and say what was left out.
 
     Kept: the points up to the first that is not on floor the camera can see. Cut: where the
     chair's body would come within ``margin_m`` of an obstacle, less ``stop_m`` (so it ends
     where the chair would stop anyway). Never moved sideways or re-routed.
+
+    The goal (``goal``, where the model marked it, in the chair's frame) is not an obstacle
+    in the way: what stands there is what the chair is going to. A route that ends near it
+    is carried on to it, and ends where the chair's front is ``plan.stop_short_m`` from it.
     """
     points = tuple(place(point, ground, setup) for point in plan.points)
     kept: list[tuple[float, float]] = []
@@ -254,8 +306,19 @@ def interpret(
             break
         if math.hypot(ahead, left) >= NEAR_M and ahead > 0:
             kept.append((ahead, left))
+    parts, obstacles = goal_parts(goal, obstacles)
+    if goal is not None and kept and math.dist(kept[-1], goal) <= GOAL_REACH_M and not left_out:
+        kept.append(goal)
     path = smooth(kept)
     shape = Body(setup.chair.width_m, setup.chair.length_m, margin_m)
+    at_goal = False
+    if parts:
+        # Up to the goal, and no nearer than was asked: no stop distance, it is where to stop.
+        near = first_hit(
+            path, parts, Body(shape.width_m, shape.length_m, plan.stop_short_m), from_chair=True
+        )
+        if near is not None:
+            path, at_goal = path[: max(0, round(near[0] / SAMPLE_SPACING_M) - 1)], True
     hit = first_hit_from_here(path, obstacles, shape)
     blocked = ""
     if hit is not None:
@@ -269,12 +332,19 @@ def interpret(
                 f" ahead of the chair's front and {abs(hit[1].y):.1f} m to the {side}"
                 " (as seen when the picture was taken)."
             )
-            path = path[:clear]
+            path, at_goal = path[:clear], False
+    if at_goal and len(path) * SAMPLE_SPACING_M < MIN_ROUTE_M:
+        return Route(points, np.empty((0, 2)), "", at_goal=True)
     if len(path) * SAMPLE_SPACING_M < MIN_ROUTE_M:
         why = " ".join(part for part in (left_out, blocked) if part) or "it has no floor points."
         return Route(points, np.empty((0, 2)), f"None of your route could be driven: {why}")
     said = " ".join(part[0].upper() + part[1:] for part in (left_out, blocked) if part)
-    return Route(points, path, said)
+    if at_goal:
+        said = (
+            f"{said} The route ends where the chair's front is {plan.stop_short_m:.2f} m from"
+            " the goal as you marked it."
+        ).strip()
+    return Route(points, path, said, at_goal)
 
 
 # The chair's place in a run: metres ahead and left of where the run began, and its heading

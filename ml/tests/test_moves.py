@@ -32,6 +32,7 @@ class FakeChair:
             "ramp_s": 0.0,
             "turn_stick_pct": 3.0,
             "turn_min_pct": 1.0,
+            "turn_max_pct": 3.0,
             "turn_slow_deg": 15.0,
             "turn_coast_s": 0.0,
             "turn_done_deg": 3.0,

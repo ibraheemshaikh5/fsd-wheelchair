@@ -24,6 +24,10 @@ DEFAULTS: dict[str, float] = {
     # done within turn_done_deg.
     "turn_stick_pct": 12.0,
     "turn_min_pct": 6.0,
+    # A turn stick that is not turning the chair is raised as far as this before the chair is
+    # called stuck: 12% is barely past the chair's own turn dead zone, and from rest (most of
+    # all after backing, with the casters trailing) it sometimes does not break free.
+    "turn_max_pct": 20.0,
     "turn_slow_deg": 15.0,
     "turn_coast_s": 0.5,
     "turn_done_deg": 3.0,

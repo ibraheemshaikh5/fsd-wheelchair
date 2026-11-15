@@ -50,6 +50,13 @@ REPLAN_M = 0.1
 REASK_S = 6.0
 # A route in hand that the chair has not been driven along for this long is given up.
 STALLED_S = 2.0
+# The goal counts as in front of the chair within this much of straight ahead.
+FACING_DEG = 40.0
+# An "arrived" from further than this beyond the distance asked is questioned once.
+FAR_FROM_GOAL_M = 0.4
+# The last stretch to the goal: this far of it is driven at this share of the speed, and the
+# chair stops if it finds itself this much nearer than asked.
+GOAL_SLOW_M, GOAL_SLOW, GOAL_STOP_SLACK_M = 0.8, 0.6, 0.1
 # A route ends this much short of where the stop rule would stop a standing chair.
 END_SLACK_M = 0.05
 # Standing still this long before a look, so the picture is sharp and from after the move.
@@ -115,6 +122,11 @@ class RouteRun:
         self._notes: list[str] = []
         self._happened: list[str] = []
         self._goal: tuple[float, float] | None = None
+        # How far short of the goal the model asked to stop, whether the route in hand ends
+        # at the goal, and whether an "arrived" from far off has been questioned once.
+        self._stop_short = 0.3
+        self._to_goal = False
+        self._doubted = False
         self._remembered = Remembered(self._setup, (0.0, 0.0, 0.0))
         self._seen_s = 0.0
 
@@ -215,6 +227,11 @@ class RouteRun:
         goal = None if self._goal is None else tuple(into(pose, [self._goal])[0])
         self._looks += 1
         happened = [*self._happened, *self._remembered.beside(pose, self._driven)]
+        if (gap := self._goal_gap()) is not None and gap[0] < 3.0:
+            happened.append(
+                f"The chair's front is {gap[0]:.1f} m from the goal as you marked it; you asked"
+                f" to stop {self._stop_short:.2f} m short of it."
+            )
         if self._undriven >= 2:
             happened.append(
                 f"{self._undriven} routes in a row could not be driven at all. Drawing the"
@@ -283,6 +300,7 @@ class RouteRun:
             ahead, left, _ = route_pilot.place(plan.goal, ground, self._setup)
             if math.isfinite(ahead) and 0 < math.hypot(ahead, left) < 8:
                 self._goal = tuple(out_of(pose, [[ahead, left]])[0])
+        self._stop_short = plan.stop_short_m
         route = None
         if plan.action == "route":
             # A route ends where the chair would stop for what it meets. The chair eases
@@ -296,8 +314,9 @@ class RouteRun:
                 self._setup,
                 self._chair.setting("path_clearance_m"),
                 stop_distance_m(0.0) + END_SLACK_M,
+                None if self._goal is None else tuple(into(pose, [self._goal])[0]),
             )
-            if not len(route.path):
+            if not len(route.path) and not route.at_goal:
                 self._undriven += 1
             else:
                 self._undriven = 0
@@ -308,11 +327,32 @@ class RouteRun:
             }
         self._chair.record("route", answer["frame"], model=record, picture=answer["shown"])
         self._runner._phase(f"look {answer['look']}: {plan.action} · {plan.note}")
+        gap = self._goal_gap() if plan.action == "arrived" else None
+        # Arrival is measured, not taken on the model's word, where it can be: once.
+        if gap and gap[0] > self._stop_short + FAR_FROM_GOAL_M and not self._doubted:
+            self._doubted = True
+            self._happened.append(
+                f"You answered arrived, but the chair's front is {gap[0]:.1f} m from the goal"
+                f" as you marked it, and you asked to stop {self._stop_short:.2f} m short of"
+                " it. Draw the route on to the goal; or, if the mark is wrong, mark the goal"
+                " again; or answer arrived again if this is the place."
+            )
+            return None
         if plan.action in ("arrived", "give_up"):
             self._drop("replaced", f"the pilot answered {plan.action}")
             outcome = "arrived" if plan.action == "arrived" else "failed"
             return outcome, f"the pilot said: {plan.scene} {plan.note}"
+        self._doubted = False
+        if route is not None and route.at_goal and not len(route.path):
+            if done := self._arrival():
+                return done
+            self._happened.append(
+                "You drew a route to the goal, but the chair is already as near it as you asked,"
+                " though not facing it: draw a route that ends facing the goal, or answer arrived."
+            )
+            return None
         if route is not None:
+            self._to_goal = route.at_goal
             return self._adopt(route, pose)
         self._drop("replaced", f"the pilot answered {plan.action}")
         if plan.action == "back_up":
@@ -387,6 +427,28 @@ class RouteRun:
             text += f" (you asked for {_degrees(degrees_left)}; further round, {why})"
         return outcome, text
 
+    def _goal_gap(self) -> tuple[float, bool] | None:
+        """How far the chair's front is from the goal as marked (what stands there, or the
+        place itself), and whether the goal is in front of the chair. None with no goal."""
+        if self._goal is None:
+            return None
+        here = self._pose()
+        goal = tuple(into(here, [self._goal])[0])
+        parts, _ = route_pilot.goal_parts(goal, self._remembered.around(here, self._driven))
+        facing = goal[0] > 0 and abs(math.degrees(math.atan2(goal[1], goal[0]))) < FACING_DEG
+        return route_pilot.goal_gap(parts, self._setup.chair), facing
+
+    def _arrival(self) -> tuple[str, str] | None:
+        """The run's end, if the chair now stands as near the goal as the model asked,
+        facing it: measured by the chair's own sense, not declared."""
+        gap = self._goal_gap()
+        if gap is None or not gap[1] or gap[0] > self._stop_short + route_pilot.ARRIVED_WITHIN_M:
+            return None
+        return "arrived", (
+            f"measured: the chair stopped with its front {gap[0]:.2f} m from the goal as the"
+            f" pilot marked it (it asked for {self._stop_short:.2f} m)"
+        )
+
     def _end_route(self, reason: str, outcome: str, why: str = "") -> str:
         """Close the record of the route in hand; says how it went, for the model."""
         driven = math.dist(self._xy, self._started_xy)
@@ -432,7 +494,7 @@ class RouteRun:
             chair.hold()
             self._happened.append(f"The chair {self._end_route('finished', 'finished')}.")
             self._v, self._moving_since, self._stood_since = 0.0, None, now
-            return None
+            return self._arrival()
         # Nothing may wait for ever: a route the chair is not being driven along is given
         # up, said so, and looked at afresh.
         if self._v > 0.01 or self._moving_since is None:
@@ -445,7 +507,18 @@ class RouteRun:
             )
             return None
         ahead = into(here, self._path[self._along :])
-        if why := chair.blocked(self._v, ahead, self._remembered.around(here, self._driven)):
+        # What stands at the goal is where the chair is going, not something in its way: it
+        # is not stopped for by the obstacle rule, but by how near the model asked to get.
+        around = self._remembered.around(here, self._driven)
+        goal = None if self._goal is None else tuple(into(here, [self._goal])[0])
+        parts, others = route_pilot.goal_parts(goal, around)
+        near_enough = max(0.05, self._stop_short - GOAL_STOP_SLACK_M)
+        if parts and goal[0] > 0 and route_pilot.goal_gap(parts, self._setup.chair) <= near_enough:
+            chair.hold()
+            self._happened.append(f"The chair {self._end_route('finished', 'finished')}.")
+            self._v, self._moving_since, self._stood_since = 0.0, None, now
+            return self._arrival()
+        if why := chair.blocked(self._v, ahead, others):
             self._drop("obstacle" if why.startswith("obstacle") else "no_floor", why)
             return None
         if not chair.gyro_fresh():
@@ -466,6 +539,8 @@ class RouteRun:
         eased = 1.0
         if ramp > 0:
             eased = min(1.0, (now - self._moving_since) / ramp, left_m / (speed * ramp))
+        if self._to_goal and left_m < GOAL_SLOW_M:
+            eased = min(eased, GOAL_SLOW)  # the last stretch up to the goal, gently
         v, w = follow(rest, max(eased, 1.0 / stick), speed_limit_mps=speed)
         if left_m < 0.3:
             w = 0.0  # too near the end to aim at it: the aim swings wide as it closes

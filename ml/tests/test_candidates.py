@@ -98,3 +98,33 @@ def test_a_turn_on_the_spot_needs_floor_known_to_be_clear_and_nothing_is_forgott
     blind = Remembered(setup, start)
     room, why = blind.turn_room((6.0, 4.0, 1.0), 30.0, 0.0)
     assert room == 0 and "not seen" in why
+
+
+def test_the_goal_is_driven_up_to_and_not_kept_clear_of():
+    from fsd_ml import route_pilot
+
+    setup = ChairSetup()
+    pixels = setup.to_pixels(np.array([(1.0, 0.0), (2.0, 0.0)]), 1000, 1000)
+    plan = route_pilot.Plan(
+        "route", points=tuple((x / 1000, y / 1000) for x, y in pixels), stop_short_m=0.5
+    )
+    # Someone standing 3 m ahead, and something else well off to the side.
+    person = [
+        Obstacle(f"leg{n}", "object", 3.0, side, radius_m=0.03)
+        for n, side in enumerate((-0.1, 0.1))
+    ]
+    other = [Obstacle("box", "object", 1.5, 1.5, radius_m=0.03)]
+    # The route was drawn only 2 m of the way, but ends near the goal: it is carried on, and
+    # ends with the chair's front half a metre from the person, as asked.
+    to_goal = route_pilot.interpret(plan, None, person + other, setup, 0.08, 0.2, goal=(3.0, 0.0))
+    front = to_goal.path[-1][0] + setup.chair.length_m / 2
+    assert to_goal.at_goal and 3.0 - front == pytest.approx(0.5 + 0.03, abs=0.15)
+    # Asked to stop right in front, it goes nearer than it would to an obstacle in its way.
+    close = route_pilot.Plan("route", points=plan.points, stop_short_m=0.15)
+    nearer = route_pilot.interpret(close, None, person + other, setup, 0.08, 0.2, goal=(3.0, 0.0))
+    plain = route_pilot.interpret(
+        route_pilot.Plan("route", points=(*plan.points, (0.5, 0.5))), None, person, setup, 0.08, 0.2
+    )
+    assert len(nearer.path) > len(to_goal.path) and len(nearer.path) >= len(plain.path)
+    parts, rest = route_pilot.goal_parts((3.0, 0.0), person + other)
+    assert len(parts) == 2 and rest == other
