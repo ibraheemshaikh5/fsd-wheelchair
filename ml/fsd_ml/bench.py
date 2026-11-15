@@ -31,7 +31,7 @@ DEFAULTS: dict[str, float] = {
     "v_full_mps": 1.5,
     "w_full_radps": 1.5,
     # Space kept beside the chair on a set move.
-    "clearance_m": 0.10,
+    "clearance_m": 0.25,
     # How much of the driving model's stick is sent: 100 is all of it.
     "model_speed_pct": 40.0,
     # How many times the model pilot may look and decide before the run is called off.
