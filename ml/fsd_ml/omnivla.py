@@ -146,8 +146,8 @@ class OmniVLADriver:
         # One extra token carries the goal position.
         self._patches = backbone.get_num_patches() * backbone.get_num_images_in_input() + 1
 
-    def _batch(self, current: Image.Image, goal_image: Image.Image, instruction: str):
-        """The prompt, with placeholder action tokens for the model to fill in."""
+    def tokens(self, instruction: str):
+        """The prompt as (input_ids, labels), with placeholder action tokens to fill in."""
         from prismatic.models.backbones.llm.prompting import PurePromptBuilder
         from prismatic.vla.constants import IGNORE_INDEX
 
@@ -169,33 +169,33 @@ class OmniVLADriver:
         input_ids = torch.tensor(tokenizer(builder.get_prompt(), add_special_tokens=True).input_ids)
         labels = input_ids.clone()
         labels[: -(len(actions) + 1)] = IGNORE_INDEX
-        transform = self._processor.image_processor.apply_transform
-        pixels = torch.cat((transform(current), transform(goal_image)), dim=0)
-        return input_ids[None], labels[None], pixels[None]
+        return input_ids, labels
 
-    def propose(self, frames: list[np.ndarray], goal: Goal, motion: Motion) -> list[Candidate]:
+    def pixels(self, current: Image.Image, goal_image: Image.Image):
+        """Both pictures as the model takes them: the view now, then the goal photo."""
+        transform = self._processor.image_processor.apply_transform
+        return self._torch.cat((transform(current), transform(goal_image)), dim=0)
+
+    def predict(self, input_ids, attention_mask, labels, pixels, modality, pose):
+        """One forward pass over a batch: (B, 8, 4) waypoints in the model's units.
+
+        Driving and training (posttrain.py) both go through here, so what is
+        trained is exactly what later drives.
+        """
         from prismatic.training.train_utils import get_current_action_mask, get_next_actions_mask
         from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
 
         torch, device = self._torch, self._device
-        current = Image.fromarray(frames[-1])
-        # A goal the model is told to ignore still needs something in its slot.
-        goal_image = Image.fromarray(goal.image) if goal.image is not None else current
-        input_ids, labels, pixels = self._batch(
-            current, goal_image, goal.instruction or NO_INSTRUCTION
-        )
-        modality = torch.as_tensor([modality_id(goal)], dtype=torch.bfloat16, device=device)
-        pose = torch.from_numpy(goal_pose(goal.point_xy))[None].to(torch.bfloat16).to(device)
-
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        modality = modality.to(torch.bfloat16).to(device)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
             output = self._vla(
                 input_ids=input_ids.to(device),
-                attention_mask=torch.ones_like(input_ids, dtype=torch.bool).to(device),
+                attention_mask=attention_mask.to(device),
                 pixel_values=pixels.to(torch.bfloat16).to(device),
                 modality_id=modality,
                 labels=labels.to(device),
                 output_hidden_states=True,
-                proprio=pose,
+                proprio=pose.to(torch.bfloat16).to(device),
                 proprio_projector=self._pose_projector,
                 noisy_actions=None,
                 noisy_action_projector=None,
@@ -206,9 +206,27 @@ class OmniVLADriver:
             mask = get_current_action_mask(truth) | get_next_actions_mask(truth)
             text_states = output.hidden_states[-1][:, self._patches : -1]
             action_states = (
-                text_states[mask].reshape(1, NUM_ACTIONS_CHUNK * ACTION_DIM, -1).to(torch.bfloat16)
+                text_states[mask]
+                .reshape(len(input_ids), NUM_ACTIONS_CHUNK * ACTION_DIM, -1)
+                .to(torch.bfloat16)
             )
-            waypoints = self._action_head.predict_action(action_states, modality)
+            return self._action_head.predict_action(action_states, modality)
+
+    def propose(self, frames: list[np.ndarray], goal: Goal, motion: Motion) -> list[Candidate]:
+        torch = self._torch
+        current = Image.fromarray(frames[-1])
+        # A goal the model is told to ignore still needs something in its slot.
+        goal_image = Image.fromarray(goal.image) if goal.image is not None else current
+        input_ids, labels = self.tokens(goal.instruction or NO_INSTRUCTION)
+        with torch.no_grad():
+            waypoints = self.predict(
+                input_ids[None],
+                torch.ones_like(input_ids, dtype=torch.bool)[None],
+                labels[None],
+                self.pixels(current, goal_image)[None],
+                torch.as_tensor([modality_id(goal)]),
+                torch.from_numpy(goal_pose(goal.point_xy))[None],
+            )
 
         path = waypoints_to_path(waypoints.float().cpu().numpy()[0])
         return [Candidate(path, score=1.0, speed_mps=implied_speed(path))]
