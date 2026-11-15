@@ -46,8 +46,8 @@ class Body:
     # Kept clear on every side.
     margin_m: float = 0.15
     # From the chair's rearmost point forward to the middle of its big drive wheels: the
-    # point it turns about. NOT MEASURED yet: a guess from the chair's shape.
-    axle_from_rear_m: float = 0.26
+    # point it turns about. Measured: the hubs are 0.711 m behind the lens.
+    axle_from_rear_m: float = 0.083
 
     @property
     def pivot_behind_m(self) -> float:
