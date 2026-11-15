@@ -50,6 +50,15 @@ REPLAN_M = 0.1
 REASK_S = 6.0
 # A route in hand that the chair has not been driven along for this long is given up.
 STALLED_S = 2.0
+# How far the harness backs off to get itself room, and how many times it tries that for
+# one route before asking the model for another way.
+BACK_OFF_M = 0.3
+MAX_BACK_OFFS = 2
+# How many times a route that the chair had to stop on is fitted again before the model is asked.
+MAX_REFITS = 2
+# A goal mark counts as sure (to drive up to, and to measure arrival by) when it was made
+# from no further off than this: from further, a marked point is metres out.
+GOAL_SURE_M = 2.5
 # The goal counts as in front of the chair within this much of straight ahead.
 FACING_DEG = 40.0
 # An "arrived" from further than this beyond the distance asked is questioned once.
@@ -114,8 +123,8 @@ class RouteRun:
         self._looks = 0
         self._bad = 0
         # Routes in a row of which nothing could be driven, and what the model answered.
-        self._undriven = 0
-        self._answers: list[str] = []
+        self._wanted: np.ndarray | None = None
+        self._refits = 0
         self._no_picture_since: float | None = None
         # What the model is given back: its notes, what has happened since its last answer,
         # and where it last marked the goal (run's frame).
@@ -125,6 +134,7 @@ class RouteRun:
         # How far short of the goal the model asked to stop, whether the route in hand ends
         # at the goal, and whether an "arrived" from far off has been questioned once.
         self._stop_short = 0.3
+        self._goal_sure = False
         self._to_goal = False
         self._doubted = False
         self._remembered = Remembered(self._setup, (0.0, 0.0, 0.0))
@@ -212,40 +222,16 @@ class RouteRun:
                 )
             return None
         self._no_picture_since = None
-        taken_s = now - frame.age_s(now)
-        pose = self._pose_at(taken_s)
-        rest = self._rest(pose)
-        if self._path is None:
-            moving = "The chair is standing still, waiting for your answer."
-        else:
-            left_m = len(rest) * SAMPLE_SPACING_M
-            moving = (
-                f"The chair is driving your last route ({left_m:.1f} m of it is left, the dashed"
-                " cyan line) and will keep to it until your answer comes. Your new route"
-                " replaces it."
-            )
+        pose = self._pose_at(now - frame.age_s(now))
+        moving = "The chair is standing still."
+        if self._path is not None:
+            moving = "The chair is driving your last route, and keeps to it until you answer."
         goal = None if self._goal is None else tuple(into(pose, [self._goal])[0])
+        gap = self._goal_gap()
         self._looks += 1
-        happened = [*self._happened, *self._remembered.beside(pose, self._driven)]
-        if (gap := self._goal_gap()) is not None and gap[0] < 3.0:
-            happened.append(
-                f"The chair's front is {gap[0]:.1f} m from the goal as you marked it; you asked"
-                f" to stop {self._stop_short:.2f} m short of it."
-            )
-        if self._undriven >= 2:
-            happened.append(
-                f"{self._undriven} routes in a row could not be driven at all. Drawing the"
-                " same way again will be cut the same way: look left or right for open"
-                " floor, back up, or start the route on the other side."
-            )
-        if self._answers:
-            happened.append(
-                "Your answers so far, oldest first: " + ", ".join(self._answers[-8:]) + "."
-            )
-        self._happened = []
+        happened, self._happened = self._happened, []
         self._asked_xy, self._asked_s = (self._xy[0], self._xy[1]), now
         self._runner._phase(f"look {self._looks}: the pilot is thinking", steps=self._looks)
-        obstacles = self._remembered.around(pose)
         look = {"look": self._looks, "frame": frame, "pose": pose}
         notes, half_view = list(self._notes), self._setup.camera.hfov_deg / 2
 
@@ -254,16 +240,17 @@ class RouteRun:
                 ground = self._chair.ground(frame)
                 behind = goal is not None and route_pilot.hidden(goal, ground, self._setup)
                 said = route_pilot.report(
-                    look["look"], moving, happened, pose, goal, notes, half_view, behind
+                    look["look"],
+                    moving,
+                    happened,
+                    pose,
+                    goal,
+                    notes,
+                    half_view,
+                    behind,
+                    None if gap is None or gap[0] > 3.0 else gap[0],
                 )
-                shown = route_pilot.picture(
-                    frame.jpeg,
-                    self._setup,
-                    obstacles,
-                    self._chair.setting("path_clearance_m"),
-                    rest if len(rest) > 1 else None,
-                    None if behind else goal,
-                )
+                shown = route_pilot.picture(frame.jpeg, self._setup, None if behind else goal)
                 plan = self._pilot.next(shown, said)
                 self._answer = {**look, "shown": shown, "plan": plan, "ground": ground}
             except Exception as error:  # noqa: BLE001  a failed look must not end the driving
@@ -272,6 +259,21 @@ class RouteRun:
         self._asking = threading.Thread(target=ask, daemon=True)
         self._asking.start()
         return None
+
+    def _fit(self, kept: list[tuple[float, float]], pose: Pose) -> tuple[np.ndarray, bool]:
+        """The path for a route through ``kept`` (chair's frame at ``pose``), fitted past
+        everything the run has seen, and whether it ends at the goal."""
+        # A route ends where the chair would stop for what it meets. The chair eases down to
+        # the end of a route, so that is the stop distance of a chair nearly standing.
+        return route_pilot.fit(
+            kept,
+            self._remembered.around(pose, self._driven),
+            self._setup,
+            self._chair.setting("path_clearance_m"),
+            stop_distance_m(0.0) + END_SLACK_M,
+            tuple(into(pose, [self._goal])[0]) if self._goal_sure else None,
+            self._stop_short,
+        )
 
     def _take(self, answer: dict[str, Any]) -> tuple[str, str] | None:
         """Act on the pilot's answer. Returns how the run ended, if this ends it."""
@@ -287,55 +289,42 @@ class RouteRun:
             self._bad += 1
             why = answer.get("error") or "the answer was not one of the actions"
             self._chair.record("route", answer["frame"], model={**record, "error": why})
-            self._happened.append(f"Your last answer could not be used ({why}).")
             if self._bad >= MAX_BAD_ANSWERS:
                 self._drop("stopped", "the pilot gave no usable answer")
                 return "failed", f"{self._bad} answers in a row could not be used: {why}"
             return None
         self._bad = 0
         self._notes.append(plan.note)
-        self._answers.append(plan.action)
         ground = answer.get("ground")
         if plan.goal is not None:
             ahead, left, _ = route_pilot.place(plan.goal, ground, self._setup)
             if math.isfinite(ahead) and 0 < math.hypot(ahead, left) < 8:
                 self._goal = tuple(out_of(pose, [[ahead, left]])[0])
+                # A mark made from far off is metres out: good for which way the goal is,
+                # not for driving up to it or for saying the chair has arrived.
+                self._goal_sure = math.hypot(ahead, left) <= GOAL_SURE_M
         self._stop_short = plan.stop_short_m
-        route = None
+        kept: list[tuple[float, float]] = []
+        path, at_goal = np.empty((0, 2)), False
         if plan.action == "route":
-            # A route ends where the chair would stop for what it meets. The chair eases
-            # down to the end of a route, so that is the stop distance of a chair nearly
-            # standing, not of one at full speed: cutting by the full-speed distance threw
-            # away 0.3 m of every route, and all of a short one.
-            route = route_pilot.interpret(
-                plan,
-                ground,
-                self._remembered.around(pose),
-                self._setup,
-                self._chair.setting("path_clearance_m"),
-                stop_distance_m(0.0) + END_SLACK_M,
-                None if self._goal is None else tuple(into(pose, [self._goal])[0]),
-            )
-            if not len(route.path) and not route.at_goal:
-                self._undriven += 1
-            else:
-                self._undriven = 0
+            points, kept = route_pilot.read(plan, ground, self._setup)
+            path, at_goal = self._fit(kept, pose)
             record["route"] = {
-                "points": [[round(a, 2), round(b, 2), floor] for a, b, floor in route.points],
-                "path": np.round(route.path, 2).tolist(),
-                "said": route.said,
+                "points": [[round(a, 2), round(b, 2), floor] for a, b, floor in points],
+                "path": np.round(path, 2).tolist(),
+                "at_goal": at_goal,
             }
         self._chair.record("route", answer["frame"], model=record, picture=answer["shown"])
         self._runner._phase(f"look {answer['look']}: {plan.action} · {plan.note}")
-        gap = self._goal_gap() if plan.action == "arrived" else None
+        gap = self._goal_gap() if plan.action == "arrived" and self._goal_sure else None
         # Arrival is measured, not taken on the model's word, where it can be: once.
         if gap and gap[0] > self._stop_short + FAR_FROM_GOAL_M and not self._doubted:
             self._doubted = True
             self._happened.append(
                 f"You answered arrived, but the chair's front is {gap[0]:.1f} m from the goal"
-                f" as you marked it, and you asked to stop {self._stop_short:.2f} m short of"
-                " it. Draw the route on to the goal; or, if the mark is wrong, mark the goal"
-                " again; or answer arrived again if this is the place."
+                f" as you marked it and you asked to stop {self._stop_short:.2f} m short of it."
+                " Draw the route on to the goal, or mark the goal again if the ring is on the"
+                " wrong thing, or answer arrived again if this is the place."
             )
             return None
         if plan.action in ("arrived", "give_up"):
@@ -343,73 +332,101 @@ class RouteRun:
             outcome = "arrived" if plan.action == "arrived" else "failed"
             return outcome, f"the pilot said: {plan.scene} {plan.note}"
         self._doubted = False
-        if route is not None and route.at_goal and not len(route.path):
-            if done := self._arrival():
+        if plan.action == "route":
+            if at_goal and not len(path) and (done := self._arrival()):
                 return done
-            self._happened.append(
-                "You drew a route to the goal, but the chair is already as near it as you asked,"
-                " though not facing it: draw a route that ends facing the goal, or answer arrived."
-            )
-            return None
-        if route is not None:
-            self._to_goal = route.at_goal
-            return self._adopt(route, pose)
+            wanted = out_of(pose, kept) if kept else None
+            if len(path):
+                self._wanted, self._refits = wanted, 0
+                return self._adopt(out_of(pose, path), at_goal)
+            if self._path is not None:
+                return None  # nothing new to drive: the chair keeps to the route in hand
+            return self._another_way(wanted)
         self._drop("replaced", f"the pilot answered {plan.action}")
-        if plan.action == "back_up":
-            outcome, text = self._runner._back(route_pilot.BACK_UP_M)
-            backed = float(self._runner.achieved.get("believed_m", 0.0))
-            yaw = self._heading()
-            self._axle[0] -= backed * math.cos(yaw)
-            self._axle[1] -= backed * math.sin(yaw)
-        else:
-            outcome, text = self._turn(route_pilot.TURNS[plan.action])
+        asked = route_pilot.TURNS[plan.action]
+        outcome, text = self._turn(asked)
+        if outcome == "failed" and "did not turn" in text and self._back_off():
+            outcome, text = self._turn(asked)  # the harness's own second try, with more room
         self._move_on(self._clock())
         self._stood_since = self._clock()
-        self._happened.append(f"You answered {plan.action}: {text}.")
-        return ("aborted", text) if outcome == "aborted" else None
+        if outcome == "aborted":
+            return "aborted", text
+        side = "left" if asked > 0 else "right"
+        turned = math.degrees(self._heading() - pose[2])
+        self._happened.append(
+            f"The chair could not turn {side} from where it stands."
+            if outcome == "failed" and "did not turn" in text
+            else f"The chair turned {abs(turned):.0f}° to the {'left' if turned > 0 else 'right'}."
+        )
+        return None
 
-    def _adopt(self, route: route_pilot.Route, pose: Pose) -> tuple[str, str] | None:
-        """Take up a new route, placed where the chair was when its picture was taken."""
-        if not len(route.path):
-            keeps = " The chair keeps to your earlier route." if self._path is not None else ""
-            self._happened.append(f"You drew a route. {route.said}{keeps}")
-            return None
-        path = out_of(pose, route.path)
+    def _back_off(self) -> bool:
+        """Back straight up a little, if the floor behind is known to be clear. This is the
+        harness getting itself room, not something the model is asked about."""
+        if not self._remembered.room_to_back(self._pose(), BACK_OFF_M, self._driven):
+            return False
+        outcome, _ = self._runner._back(BACK_OFF_M)
+        backed = float(self._runner.achieved.get("believed_m", 0.0))
+        yaw = self._heading()
+        self._axle[0] -= backed * math.cos(yaw)
+        self._axle[1] -= backed * math.sin(yaw)
+        self._move_on(self._clock())
+        self._stood_since = self._clock()
+        return outcome == "finished"
+
+    def _another_way(self, wanted: np.ndarray | None) -> tuple[str, str] | None:
+        """No path could be fitted to the route the model drew from where the chair stands.
+        Before asking it again, the harness tries for itself: back off, and fit the same
+        route from there, up to MAX_BACK_OFFS times."""
+        for _ in range(MAX_BACK_OFFS if wanted is not None else 0):
+            if not self._back_off():
+                break
+            if self._runner._stopped():
+                return None
+            here = self._pose()
+            kept = [tuple(point) for point in into(here, wanted) if point[0] > 0]
+            path, at_goal = self._fit(kept, here)
+            if len(path):
+                return self._adopt(out_of(here, path), at_goal)
+        self._happened.append(
+            "The chair found no way to drive the route you drew. Try another way."
+        )
+        return None
+
+    def _adopt(self, path: np.ndarray, at_goal: bool) -> tuple[str, str] | None:
+        """Take up a new path (run's frame) from wherever on it the chair has got to."""
         here = self._pose()
         gaps = np.linalg.norm(path - self._xy, axis=1)
         nearest = int(np.argmin(gaps))
         ahead = into(here, path[nearest : nearest + 6])
         if len(ahead) < 2:
-            self._happened.append(
-                "You drew a route, but the chair had already driven past its end when your"
-                " answer came."
-            )
-            return None
+            return None  # the chair has already driven past its end
         # Which way the route runs from where the chair joins it, against the chair's heading.
         to, start = ahead[min(len(ahead) - 1, 4)], (0.0, 0.0) if nearest == 0 else ahead[0]
         bearing = math.degrees(math.atan2(to[1] - start[1], to[0] - start[0]))
-        said = f"You drew a route. {route.said}".strip()
         joins = self._path is not None and gaps[nearest] <= JOIN_M and abs(bearing) <= JOIN_DEG
         if joins:
             self._end_route("replaced", "finished")  # and drive on, onto the new one
         else:
-            self._drop("replaced", "your new route starts away from where the chair was heading")
+            self._drop("replaced", "the new route starts away from where the chair was heading")
             if abs(bearing) > PIVOT_DEG:
                 outcome, text = self._turn(bearing)
                 self._move_on(self._clock())
                 self._stood_since = self._clock()
-                said += f" To face its start: {text}."
                 if outcome == "aborted":
                     return "aborted", text
                 if outcome == "failed":
-                    self._happened.append(f"{said} The route was not driven.")
+                    side = "left" if bearing > 0 else "right"
+                    self._happened.append(
+                        f"The chair could not turn {side} to face the route you drew."
+                    )
                     return None
-        self._happened.append(said)
-        self._path, self._along = path, nearest
+        self._path, self._along, self._to_goal = path, nearest, at_goal
         self._runner._begin(
             "route",
             length_m=round((len(path) - nearest) * SAMPLE_SPACING_M, 2),
             path=np.round(path, 2).tolist(),
+            to_goal=at_goal,
         )
         self._started_xy = (self._xy[0], self._xy[1])
         return None
@@ -442,7 +459,9 @@ class RouteRun:
         """The run's end, if the chair now stands as near the goal as the model asked,
         facing it: measured by the chair's own sense, not declared."""
         gap = self._goal_gap()
-        if gap is None or not gap[1] or gap[0] > self._stop_short + route_pilot.ARRIVED_WITHIN_M:
+        if not self._goal_sure or gap is None or not gap[1]:
+            return None
+        if gap[0] > self._stop_short + route_pilot.ARRIVED_WITHIN_M:
             return None
         return "arrived", (
             f"measured: the chair stopped with its front {gap[0]:.2f} m from the goal as the"
@@ -450,14 +469,15 @@ class RouteRun:
         )
 
     def _end_route(self, reason: str, outcome: str, why: str = "") -> str:
-        """Close the record of the route in hand; says how it went, for the model."""
+        """Close the record of the route in hand, with exactly why it ended; and give the
+        few words of it the model is told."""
         driven = math.dist(self._xy, self._started_xy)
         left_m = (
             max(0, len(self._path) - self._along) * SAMPLE_SPACING_M
             if self._path is not None
             else 0.0
         )
-        text = f"drove about {driven:.1f} m along your route ({left_m:.1f} m of it was left)"
+        text = f"drove about {driven:.1f} m along the route ({left_m:.1f} m of it was left)"
         text += f", then stopped: {why}" if why else ""
         self._runner._end(
             reason,
@@ -468,7 +488,7 @@ class RouteRun:
             believed_pose=[round(self._xy[0], 2), round(self._xy[1], 2)],
         )
         self._path = None
-        return text
+        return f"drove {driven:.1f} m along your route"
 
     def _drop(self, reason: str, why: str) -> None:
         """Stop driving the route in hand, if there is one, and stand."""
@@ -476,9 +496,25 @@ class RouteRun:
             self._chair.hold()
             outcome = {"stopped": "aborted", "replaced": "finished"}.get(reason, "failed")
             text = self._end_route(reason, outcome, why)
-            self._happened.append(f"The chair {text}.")
+            if reason != "replaced":
+                self._happened.append(f"The chair {text}, then had to stop.")
         self._v, self._moving_since = 0.0, None
         self._stood_since = self._clock()
+
+    def _stopped_short(self, reason: str, why: str) -> tuple[str, str] | None:
+        """The chair has had to stop on its route. Before the model is asked, the harness
+        looks for a way on by itself: the same route fitted again from here, then from a
+        little further back."""
+        wanted, self._refits = self._wanted, self._refits + 1
+        self._drop(reason, why)
+        if wanted is None or self._refits > MAX_REFITS:
+            return None
+        here = self._pose()
+        kept = [tuple(point) for point in into(here, wanted) if point[0] > 0]
+        path, at_goal = self._fit(kept, here)
+        if len(path):
+            return self._adopt(out_of(here, path), at_goal)
+        return self._another_way(wanted)
 
     def _drive(self, now: float) -> tuple[str, str] | None:
         """One tick of following the route in hand."""
@@ -510,7 +546,7 @@ class RouteRun:
         # What stands at the goal is where the chair is going, not something in its way: it
         # is not stopped for by the obstacle rule, but by how near the model asked to get.
         around = self._remembered.around(here, self._driven)
-        goal = None if self._goal is None else tuple(into(here, [self._goal])[0])
+        goal = tuple(into(here, [self._goal])[0]) if self._goal_sure else None
         parts, others = route_pilot.goal_parts(goal, around)
         near_enough = max(0.05, self._stop_short - GOAL_STOP_SLACK_M)
         if parts and goal[0] > 0 and route_pilot.goal_gap(parts, self._setup.chair) <= near_enough:
@@ -519,8 +555,9 @@ class RouteRun:
             self._v, self._moving_since, self._stood_since = 0.0, None, now
             return self._arrival()
         if why := chair.blocked(self._v, ahead, others):
-            self._drop("obstacle" if why.startswith("obstacle") else "no_floor", why)
-            return None
+            return self._stopped_short(
+                "obstacle" if why.startswith("obstacle") else "no_floor", why
+            )
         if not chair.gyro_fresh():
             self._drop("stale_gyro", "the gyro stopped reporting")
             return None

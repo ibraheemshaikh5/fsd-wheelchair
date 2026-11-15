@@ -1,26 +1,28 @@
 """Gemini drives the chair by drawing its route on the camera's picture.
 
 A model that sees is poor at metres and degrees, and at picking among ready-made moves one
-small step at a time; it is good at pointing. So each look it is shown the picture (with
-parking-camera guide lines) and draws the way the chair should go as a few points on the
-floor, or chooses to look round, back up, or stop. It decides where to go, which way round
-things, when to search and when it has arrived.
+small step at a time; it is good at pointing. So each look it is shown the picture and
+draws the way the chair should go as a few points on the floor, marks the goal, and says
+how far in front of it to stop; or chooses to look round. That is all it decides: where to
+go. It is shown a clean picture and told only what the chair did and where its goal is.
 
-The harness makes that happen and says honestly how it went:
+Getting there is the harness's work, done quietly:
 
-- ``interpret`` turns the drawn points into a path in metres. Each point is placed by the
-  depth model's own fit of the floor (the frame the obstacles are in), so a route and what
-  it must clear are measured the same way. A route is kept only as far as it is on floor
-  the camera can see: the first point that lies on a thing, or beyond what depth can be
-  trusted for, ends it. Then it is cut where the chair would stop for an obstacle anyway
-  (the one stop rule, pipeline/footprint.stop_distance_m). Nothing is moved or re-routed:
-  what was cut, and why, is told to the model with its next picture.
-- The runner (moves.Runner.route) follows the path without stopping, asks for the next
-  route while still driving, and carries the new one over to where the chair has got to.
+- ``read`` places the drawn points by the depth model's own fit of the floor (the frame the
+  obstacles are in) and keeps the route as far as it is on floor the camera can see.
+- ``fit`` makes the path the chair's body can drive: the route as drawn if it clears
+  everything, else slid a little to one side or the other until it does, and ending where
+  the chair would stop for what it meets (pipeline/footprint.stop_distance_m).
+- The goal is not an obstacle: a route that ends near the model's mark is carried on to it,
+  and ends with the chair's front as far from it as the model asked. Arrival is measured.
+- The runner (route_run.py) follows the path without stopping, asks for the next route
+  while still driving, remembers what it has seen, and when it has to stop looks for a way
+  on by itself (the same route fitted again, then from a little further back) before it
+  asks the model for another.
 
 Each look is asked afresh, with no earlier pictures: what the model needs to remember is
-given to it in words (its own notes, what the chair did, how far it has turned and moved)
-and drawn on the picture (what is left of its last route, and where it last marked the goal).
+given to it in words (its own notes, what the chair did, where the goal is) and as a ring on
+the picture where it last marked the goal.
 
 Its instructions are in ``ml/route_pilot_prompt.md``, read afresh for every look. The key
 comes from the environment (``GEMINI_API_KEY``; ``uv run --env-file .env`` sets it).
@@ -58,7 +60,6 @@ from fsd_ml.obstacles import Ground
 from fsd_ml.pipeline.footprint import (
     BESIDE_M,
     SAMPLE_SPACING_M,
-    beside,
     first_hit,
     first_hit_from_here,
     turn_room_deg,
@@ -71,9 +72,8 @@ THINKING = os.environ.get("GEMINI_PILOT_THINKING", "low")
 PROMPT_FILE = Path(__file__).resolve().parent.parent / "route_pilot_prompt.md"
 
 # What the model may answer with, and the turns among them (degrees to the left).
-ACTIONS = ("route", "look_left", "look_right", "look_behind", "back_up", "arrived", "give_up")
+ACTIONS = ("route", "look_left", "look_right", "look_behind", "arrived", "give_up")
 TURNS = {"look_left": 30.0, "look_right": -30.0, "look_behind": 180.0}
-BACK_UP_M = 0.3
 # A route point nearer than this is under the chair: the path starts at its middle anyway.
 NEAR_M = 0.5
 # No more of a route than this is taken at once: further off, a drawn point is too rough
@@ -81,8 +81,6 @@ NEAR_M = 0.5
 MAX_ROUTE_M = 3.5
 # A route with less to drive than this is not worth setting off for.
 MIN_ROUTE_M = 0.2
-KEEP_OUT = (255, 40, 40)
-PREVIOUS = (60, 220, 255, 230)
 GOAL = (255, 60, 220, 255)
 
 _POINT = {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}
@@ -204,8 +202,8 @@ class Route:
     points: tuple[tuple[float, float, bool], ...]
     # The path to drive: a point every 0.1 m from the chair's middle. Empty if none can be.
     path: np.ndarray
-    # What to tell the model about how its route was read; "" when all of it is driven.
-    said: str = ""
+    # The drawn points the path goes through (those on floor the camera sees).
+    kept: tuple[tuple[float, float], ...] = ()
     # Whether the path ends because the chair's front has got as near the goal as was asked.
     at_goal: bool = False
 
@@ -272,6 +270,95 @@ def goal_gap(parts: Sequence[Obstacle], body: Body) -> float:
     )
 
 
+# How far a route may be moved to one side to get the chair's body past things, in the order
+# tried: as drawn first, then a little either way, then more.
+SLIDES_M = (0.0, 0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4, 0.5, -0.5, 0.6, -0.6)
+# A slide comes on over this much of the route from the chair, which is where it is.
+SLIDE_OVER_M = 0.6
+
+
+def read(
+    plan: Plan, ground: Ground | None, setup: ChairSetup
+) -> tuple[tuple[tuple[float, float, bool], ...], list[tuple[float, float]]]:
+    """Where the drawn points are (chair's frame, with whether each is on floor), and the
+    ones to drive through: up to the first that is not on floor the camera can see, or is
+    too far off to place."""
+    points = tuple(place(point, ground, setup) for point in plan.points)
+    kept: list[tuple[float, float]] = []
+    for ahead, left, floor in points:
+        if not floor or math.hypot(ahead, left) > MAX_ROUTE_M:
+            break
+        if math.hypot(ahead, left) >= NEAR_M and ahead > 0:
+            kept.append((ahead, left))
+    return points, kept
+
+
+def slid(path: np.ndarray, by_m: float) -> np.ndarray:
+    """A path moved ``by_m`` to its left (negative: right), coming on from nothing at the
+    chair, so it still starts where the chair is."""
+    if not len(path) or by_m == 0:
+        return path
+    step = np.gradient(np.vstack([[0.0, 0.0], path]), axis=0)[1:]
+    across = np.column_stack([-step[:, 1], step[:, 0]])
+    across /= np.maximum(np.linalg.norm(across, axis=1, keepdims=True), 1e-9)
+    along = np.arange(1, len(path) + 1) * SAMPLE_SPACING_M
+    moved = path + across * (by_m * np.minimum(1.0, along / SLIDE_OVER_M))[:, None]
+    # Spaced evenly again, a point every 0.1 m: a distance along it is then a count of points.
+    line = np.vstack([[0.0, 0.0], moved])
+    gone = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))])
+    at = np.arange(SAMPLE_SPACING_M, gone[-1] + 1e-9, SAMPLE_SPACING_M)
+    return np.column_stack([np.interp(at, gone, line[:, 0]), np.interp(at, gone, line[:, 1])])
+
+
+def fit(
+    kept: Sequence[tuple[float, float]],
+    obstacles: Sequence[Obstacle],
+    setup: ChairSetup,
+    margin_m: float,
+    stop_m: float,
+    goal: tuple[float, float] | None = None,
+    stop_short_m: float = 0.3,
+) -> tuple[np.ndarray, bool]:
+    """The path the chair drives for a route through ``kept`` (chair's frame), and whether
+    it ends at the goal.
+
+    Where the model wants to go is the model's business; getting the chair's body past
+    things on the way there is the harness's. So the route is tried as drawn, and if the
+    body would not clear something, slid a little to one side and then the other (SLIDES_M)
+    until it does, taking the first that is clear to its end, else the one that gets
+    furthest. A path still ends where the chair would stop: ``stop_m`` short of where its
+    body, with ``margin_m`` round it, would touch.
+
+    The goal (where the model marked it) is not in the way: a route that ends near it is
+    carried on to it, and ends with the chair's front ``stop_short_m`` from what stands there.
+    """
+    parts, others = goal_parts(goal, obstacles)
+    kept = list(kept)
+    if goal is not None and kept and math.dist(kept[-1], goal) <= GOAL_REACH_M:
+        kept.append(goal)
+    base = smooth(kept)
+    shape = Body(setup.chair.width_m, setup.chair.length_m, margin_m)
+    near = Body(shape.width_m, shape.length_m, stop_short_m)
+    best: tuple[np.ndarray, bool] = (np.empty((0, 2)), False)
+    for by_m in SLIDES_M:
+        path, at_goal = slid(base, by_m), False
+        if parts and (hit := first_hit(path, parts, near)) is not None:
+            # Up to the goal and no nearer than asked: no stop distance, it is where to stop.
+            path, at_goal = path[: max(0, round(hit[0] / SAMPLE_SPACING_M) - 1)], True
+        whole = len(path)
+        if (hit := first_hit_from_here(path, others, shape)) is not None:
+            clear = max(0, round((hit[0] - stop_m) / SAMPLE_SPACING_M) - 1)
+            if clear < len(path):
+                path, at_goal = path[:clear], False
+        if len(path) > len(best[0]) or (at_goal and not len(best[0])):
+            best = (path, at_goal)
+        if len(path) == whole:
+            break
+    if len(best[0]) * SAMPLE_SPACING_M < MIN_ROUTE_M:
+        return np.empty((0, 2)), best[1]
+    return best
+
+
 def interpret(
     plan: Plan,
     ground: Ground | None,
@@ -281,70 +368,10 @@ def interpret(
     stop_m: float,
     goal: tuple[float, float] | None = None,
 ) -> Route:
-    """Turn a drawn route into the path the chair can drive, and say what was left out.
-
-    Kept: the points up to the first that is not on floor the camera can see. Cut: where the
-    chair's body would come within ``margin_m`` of an obstacle, less ``stop_m`` (so it ends
-    where the chair would stop anyway). Never moved sideways or re-routed.
-
-    The goal (``goal``, where the model marked it, in the chair's frame) is not an obstacle
-    in the way: what stands there is what the chair is going to. A route that ends near it
-    is carried on to it, and ends where the chair's front is ``plan.stop_short_m`` from it.
-    """
-    points = tuple(place(point, ground, setup) for point in plan.points)
-    kept: list[tuple[float, float]] = []
-    left_out = ""
-    for n, (ahead, left, floor) in enumerate(points):
-        if not floor or math.hypot(ahead, left) > MAX_ROUTE_M:
-            what = "is not on floor the chair can see" if not floor else "is too far to place"
-            last = n + 1 == len(points)
-            rest = f"point {n + 1}" if last else f"points {n + 1} to {len(points)}"
-            left_out = (
-                f"{rest} of your route {'was' if last else 'were'} left out: point {n + 1} {what}"
-                f" ({'it is on a thing, or hidden' if not floor else 'over 3.5 m away'})."
-            )
-            break
-        if math.hypot(ahead, left) >= NEAR_M and ahead > 0:
-            kept.append((ahead, left))
-    parts, obstacles = goal_parts(goal, obstacles)
-    if goal is not None and kept and math.dist(kept[-1], goal) <= GOAL_REACH_M and not left_out:
-        kept.append(goal)
-    path = smooth(kept)
-    shape = Body(setup.chair.width_m, setup.chair.length_m, margin_m)
-    at_goal = False
-    if parts:
-        # Up to the goal, and no nearer than was asked: no stop distance, it is where to stop.
-        near = first_hit(
-            path, parts, Body(shape.width_m, shape.length_m, plan.stop_short_m), from_chair=True
-        )
-        if near is not None:
-            path, at_goal = path[: max(0, round(near[0] / SAMPLE_SPACING_M) - 1)], True
-    hit = first_hit_from_here(path, obstacles, shape)
-    blocked = ""
-    if hit is not None:
-        clear = max(0, round((hit[0] - stop_m) / SAMPLE_SPACING_M) - 1)
-        if clear < len(path):
-            side = "left" if hit[1].y > 0 else "right"
-            gap = max(0.0, hit[1].x - setup.chair.length_m / 2)
-            blocked = (
-                f"the chair can follow it for {clear * SAMPLE_SPACING_M:.1f} m only: past that"
-                f" its body would come within {margin_m:.1f} m of something that is {gap:.1f} m"
-                f" ahead of the chair's front and {abs(hit[1].y):.1f} m to the {side}"
-                " (as seen when the picture was taken)."
-            )
-            path, at_goal = path[:clear], False
-    if at_goal and len(path) * SAMPLE_SPACING_M < MIN_ROUTE_M:
-        return Route(points, np.empty((0, 2)), "", at_goal=True)
-    if len(path) * SAMPLE_SPACING_M < MIN_ROUTE_M:
-        why = " ".join(part for part in (left_out, blocked) if part) or "it has no floor points."
-        return Route(points, np.empty((0, 2)), f"None of your route could be driven: {why}")
-    said = " ".join(part[0].upper() + part[1:] for part in (left_out, blocked) if part)
-    if at_goal:
-        said = (
-            f"{said} The route ends where the chair's front is {plan.stop_short_m:.2f} m from"
-            " the goal as you marked it."
-        ).strip()
-    return Route(points, path, said, at_goal)
+    """A drawn route as the path the chair will drive: ``read``, then ``fit``."""
+    points, kept = read(plan, ground, setup)
+    path, at_goal = fit(kept, obstacles, setup, margin_m, stop_m, goal, plan.stop_short_m)
+    return Route(points, path, kept=tuple(kept), at_goal=at_goal)
 
 
 # The chair's place in a run: metres ahead and left of where the run began, and its heading
@@ -540,27 +567,15 @@ class Remembered:
             known = min(step, abs(room))
         return room, why
 
-    def beside(self, pose: Pose, driven_m: float) -> list[str]:
-        """What is remembered close beside or behind the chair, out of the picture, in words."""
-        body, said = self._setup.chair, []
-        half = math.radians(self._setup.camera.hfov_deg / 2 - SEEN_EDGE_DEG)
-        sides: dict[str, float] = {}
-        for obstacle in self.around(pose, driven_m):
-            ahead, left = obstacle.x - self._setup.lens_xy[0], obstacle.y - self._setup.lens_xy[1]
-            if abs(math.atan2(left, ahead)) < half and ahead > SEEN_NEAR_M:
-                continue  # in the picture: the model can see it
-            if abs(obstacle.x) > body.length_m / 2 + 0.6:
-                continue
-            gap = abs(obstacle.y) - body.width_m / 2 - obstacle.radius_m
-            side = "left" if obstacle.y > 0 else "right"
-            if gap < 0.8:
-                sides[side] = min(sides.get(side, math.inf), max(0.0, gap))
-        for side, gap in sides.items():
-            said.append(
-                f"Out of the picture, remembered from earlier: something is about {gap:.1f} m"
-                f" from the chair's {side} side."
-            )
-        return said
+    def room_to_back(self, pose: Pose, metres: float, driven_m: float) -> bool:
+        """Whether the chair may back straight up ``metres`` from ``pose``: over floor known
+        to be clear (it has usually just come from there) and into nothing remembered."""
+        back = np.column_stack([-np.arange(0.1, metres + 1e-9, 0.1), np.zeros(round(metres / 0.1))])
+        body = self._setup.chair
+        tight = Body(body.width_m, body.length_m, BESIDE_M)
+        if first_hit_from_here(back, self.around(pose, driven_m), tight) is not None:
+            return False
+        return self._keys(out_of(pose, self._body + back[-1])) <= self._clear
 
 
 def hidden(goal: tuple[float, float], ground: Ground | None, setup: ChairSetup) -> bool:
@@ -598,54 +613,43 @@ def report(
     notes: Sequence[str],
     half_view_deg: float,
     goal_hidden: bool = False,
+    front_to_goal_m: float | None = None,
 ) -> str:
-    """Everything the model is told in words with a picture: what the chair is doing, what
-    happened since its last answer, where the chair and the goal it marked are believed to
-    be, and its own last notes."""
+    """What the model is told in words with a picture, kept short and to what it decides
+    by: what the chair did, where the goal it marked is believed to be, and its own notes.
+    Nothing about obstacles or clearance: getting past things is the harness's work."""
     x, y, heading = pose
     turned = math.degrees(heading)
-    lines = [f"Look {look}. {moving}", "", "What happened since your last answer:"]
-    lines += [f"- {line}" for line in happened] or ["- nothing yet."]
-    lines += [
-        "",
-        f"Since the start the chair has turned {abs(turned):.0f}° to the"
-        f" {'left' if turned >= 0 else 'right'} in all, and is {math.hypot(x, y):.1f} m from"
-        " where it started (believed, not measured).",
-    ]
+    lines = [f"Look {look}. {moving}"]
+    lines += [f"- {line}" for line in happened]
     if goal is None:
         lines.append("You have not marked the goal yet.")
     else:
         bearing = abs(math.degrees(math.atan2(goal[1], goal[0])))
-        seen = (
-            "it is the magenta ring" if bearing < half_view_deg and goal[0] > 0 else "out of view"
-        )
+        seen = "the ring in the picture"
         if goal_hidden:
-            seen = "hidden behind something nearer, so not drawn"
-        lines.append(
-            f"The goal as you last marked it is believed to be {whereabouts(*goal)} ({seen})."
+            seen = "behind something, so not drawn"
+        elif bearing >= half_view_deg or goal[0] <= 0:
+            seen = "out of the picture"
+        near = (
+            ""
+            if front_to_goal_m is None
+            else f" The chair's front is {front_to_goal_m:.1f} m from it."
         )
-    lines += ["", "Your last notes, oldest first:"]
-    lines += [f"- {note}" for note in notes[-4:]] or ["- none yet."]
+        lines.append(f"The goal as you last marked it: {whereabouts(*goal)} ({seen}).{near}")
+    lines.append(
+        f"Since the start: turned {abs(turned):.0f}° to the {'left' if turned >= 0 else 'right'},"
+        f" {math.hypot(x, y):.1f} m from where it began."
+    )
+    if notes:
+        lines += ["Your last notes:"] + [f"- {note}" for note in notes[-2:]]
     return "\n".join(lines)
 
 
-def picture(
-    jpeg: bytes,
-    setup: ChairSetup,
-    obstacles: Sequence[Obstacle] = (),
-    margin_m: float = 0.0,
-    previous: np.ndarray | None = None,
-    goal: tuple[float, float] | None = None,
-) -> bytes:
-    """The camera's JPEG as the model is shown it.
-
-    Drawn on it: the guide lines; a triangle at the chair's middle; a red tint on the floor
-    round each obstacle, half the chair's width and ``margin_m`` wide (where the chair's
-    middle cannot go without its body coming too near: the harness's own rule, shown, so a
-    route can be drawn to pass it; narrower round what the chair already stands beside, as
-    the rule is); what is left of the last route (``previous``); and where the goal was last marked
-    (``goal``), if in view. Everything is given in the chair's frame as it is now.
-    """
+def picture(jpeg: bytes, setup: ChairSetup, goal: tuple[float, float] | None = None) -> bytes:
+    """The camera's JPEG as the model is shown it: the picture, the guide lines, and a ring
+    where it last marked the goal (``goal``, in the chair's frame now), if that is in view.
+    Nothing else: no obstacles are drawn on it."""
     image = Image.open(io.BytesIO(jpeg)).convert("RGB")
     if image.width < candidates.DRAW_WIDTH:
         scale = candidates.DRAW_WIDTH / image.width
@@ -653,36 +657,8 @@ def picture(
             (candidates.DRAW_WIDTH, round(image.height * scale)), Image.Resampling.LANCZOS
         )
     width, height = image.size
-    if obstacles and margin_m > 0:
-        # Each obstacle's circle of floor, as the camera sees it; all of them tinted once.
-        tint = Image.new("L", image.size, 0)
-        fill = ImageDraw.Draw(tint)
-        ring = np.linspace(0.0, 2 * math.pi, 24, endpoint=False)
-        circle = np.column_stack([np.cos(ring), np.sin(ring)])
-        half = setup.chair.width_m / 2
-        near = {id(o) for o in beside(obstacles, Body(half * 2, setup.chair.length_m, margin_m))}
-        for obstacle in obstacles:
-            reach = half + obstacle.radius_m + (BESIDE_M if id(obstacle) in near else margin_m)
-            edge = setup.to_pixels(reach * circle + [obstacle.x, obstacle.y], width, height)
-            if not np.isnan(edge).any():
-                fill.polygon([tuple(point) for point in edge], fill=90)
-        image.paste(Image.new("RGB", image.size, KEEP_OUT), mask=tint)
     pen = ImageDraw.Draw(image, "RGBA")
     candidates.guides(pen, setup, image.size)
-    # The chair's middle: where the floor straight ahead of it meets the picture's bottom.
-    ahead = np.arange(0.3, 1.5, 0.02)
-    middle = setup.to_pixels(np.column_stack([ahead, np.zeros_like(ahead)]), width, height)
-    inside = middle[~np.isnan(middle[:, 1]) & (middle[:, 1] <= height)]
-    x = float(inside[0][0]) if len(inside) else width / 2
-    pen.polygon(
-        [(x - 16, height - 2), (x + 16, height - 2), (x, height - 30)],
-        fill=(255, 255, 255, 235),
-        outline=(0, 0, 0, 255),
-    )
-    if previous is not None and len(previous) > 1:
-        line = candidates.in_view(setup.to_pixels(previous, width, height), width, height)
-        for a, b in zip(line[:-1:2], line[1::2], strict=False):
-            pen.line([tuple(a), tuple(b)], fill=PREVIOUS, width=4)
     if goal is not None:
         spot = candidates.in_view(setup.to_pixels([goal], width, height), width, height)
         if len(spot) and spot[0][1] < height:
@@ -750,7 +726,7 @@ def main() -> None:
     camera = setup.camera
     depth = obstacles.DepthObstacles() if obstacles.available() else None
     margin = settings["path_clearance_m"]
-    stop_m = stop_distance_m(settings["drive_stick_pct"] / 100 * settings["v_full_mps"])
+    stop_m = stop_distance_m(0.0) + 0.05  # as a run cuts a route (route_run.END_SLACK_M)
     args.out.mkdir(parents=True, exist_ok=True)
     pilot = RoutePilot(args.say)
     for source in args.pictures:
@@ -762,41 +738,31 @@ def main() -> None:
             lens = (camera.hfov_deg, camera.height_m, setup.lens_xy, camera.tilt_down_deg)
             ground = obstacles.ground_from_depth(cells, *lens)
             seen, _ = obstacles.obstacles_from_depth(cells, *lens)
-        shown = picture(jpeg, setup, seen, margin)
+        shown = picture(jpeg, setup)
         name = f"{source.parent.parent.name}-{source.stem}"
         (args.out / f"{name}.shown.jpg").write_bytes(shown)
-        # Asked again and again on the same picture, each time told what the chair made of
-        # its last route: what a standing chair that could not follow a route would see.
-        happened: list[str] = []
-        notes: list[str] = []
         for n in range(args.times):
             said = report(
-                n + 1,
-                "The chair is standing still.",
-                happened,
-                (0.0, 0.0, 0.0),
-                None,
-                notes,
-                camera.hfov_deg / 2,
+                n + 1, "The chair is standing still.", [], (0.0, 0.0, 0.0), None, [], 50.0
             )
             plan = pilot.next(shown, said)
             if plan is None:
                 print(f"{source} #{n}: no usable answer: {pilot.last.get('raw')}")
                 continue
-            route = interpret(plan, ground, seen, setup, margin, stop_m)
+            goal = None
+            if plan.goal is not None:
+                ahead, left, _ = place(plan.goal, ground, setup)
+                goal = (ahead, left) if math.isfinite(ahead) else None
+            route = interpret(plan, ground, seen, setup, margin, stop_m, goal)
             saved = args.out / f"{name}.{n}.jpg"
             saved.write_bytes(answered(shown, plan, route, setup))
             print(
                 f"{source} #{n}: {plan.action}, {pilot.last['ms']} ms,"
                 f" {len(plan.points)} points, {sum(p[2] for p in route.points)} on floor,"
-                f" {len(route.path) * SAMPLE_SPACING_M:.1f} m to drive\n"
-                f"  goal: {plan.goal}  note: {plan.note}\n  told: {route.said or 'all driven'}"
-                f"\n  {saved}"
+                f" {len(route.path) * SAMPLE_SPACING_M:.1f} m to drive"
+                f"{' (to the goal)' if route.at_goal else ''}, stop short {plan.stop_short_m} m\n"
+                f"  goal: {plan.goal} -> {goal}  note: {plan.note}\n  {saved}"
             )
-            notes.append(plan.note)
-            happened = [f"You drew a route. {route.said} The chair has not moved."]
-            if len(route.path):
-                break
 
 
 if __name__ == "__main__":

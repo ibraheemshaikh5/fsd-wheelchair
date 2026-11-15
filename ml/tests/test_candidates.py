@@ -42,7 +42,7 @@ def test_floor_points_land_where_a_level_camera_sees_them():
     assert x_left < x and np.isnan(behind).all()
 
 
-def test_a_drawn_route_is_kept_only_on_floor_and_cut_short_of_what_it_meets():
+def test_a_drawn_route_is_kept_on_floor_slid_past_things_and_cut_only_when_blocked():
     from fsd_ml import route_pilot
 
     setup = ChairSetup()
@@ -57,20 +57,31 @@ def test_a_drawn_route_is_kept_only_on_floor_and_cut_short_of_what_it_meets():
     assert np.allclose(setup.to_floor(setup.to_pixels(there, 960, 540), 960, 540), there)
     # Open floor: the whole route is driven, from the chair's middle, smoothly.
     route = route_pilot.interpret(
-        drawn((1.0, 0.2), (2.0, 0.6), (3.0, 0.6)), None, [], setup, 0.2, 0.4
+        drawn((1.0, 0.2), (2.0, 0.6), (3.0, 0.6)), None, [], setup, 0.08, 0.2
     )
-    assert route.said == "" and np.hypot(*(route.path[-1] - (3.0, 0.6))) < 0.15
-    # A box on the way: the path ends short of it by the stop distance, and the model is told.
-    box = [Obstacle("box", "object", 2.5, 0.6, radius_m=0.1)]
+    assert np.hypot(*(route.path[-1] - (3.0, 0.6))) < 0.15
+    # A box beside the way: the route is slid to one side so the body clears it, not cut.
+    shape = Body(setup.chair.width_m, setup.chair.length_m, 0.08)
+    box = [Obstacle("box", "object", 2.0, 0.2, radius_m=0.03)]
+    past = route_pilot.interpret(
+        drawn((1.0, 0.6), (2.0, 0.6), (3.0, 0.6)), None, box, setup, 0.08, 0.2
+    )
+    assert len(past.path) >= 28 and first_hit(past.path, box, shape) is None
+    assert past.path[20][1] > 0.6  # moved further from the box, to the left
+    # A wall right across the way cannot be slid past: the path ends short of it.
+    wall = [
+        Obstacle(f"w{n}", "object", 2.5, y, radius_m=0.03)
+        for n, y in enumerate(np.arange(-2, 2, 0.15))
+    ]
     cut = route_pilot.interpret(
-        drawn((1.0, 0.2), (2.0, 0.6), (3.0, 0.6)), None, box, setup, 0.2, 0.4
+        drawn((1.0, 0.0), (2.0, 0.0), (3.0, 0.0)), None, wall, setup, 0.08, 0.2
     )
-    assert 0.5 < len(cut.path) * 0.1 < 1.6 and "can follow it for" in cut.said
-    assert first_hit(cut.path, box, Body(setup.chair.width_m, setup.chair.length_m, 0.2)) is None
+    assert 1.0 < len(cut.path) * 0.1 < 2.1 and first_hit(cut.path, wall, shape) is None
+    assert cut.path[-1][0] + setup.chair.length_m / 2 < 2.5 - 0.08 - 0.15  # short of the wall
     # A point above the horizon is not floor: the route ends before it.
     sky = route_pilot.Plan("route", points=(*drawn((1.0, 0.0), (2.0, 0.0)).points, (0.5, 0.2)))
-    kept = route_pilot.interpret(sky, None, [], setup, 0.2, 0.4)
-    assert "point 3" in kept.said and np.hypot(*(kept.path[-1] - (2.0, 0.0))) < 0.15
+    kept = route_pilot.interpret(sky, None, [], setup, 0.08, 0.2)
+    assert np.hypot(*(kept.path[-1] - (2.0, 0.0))) < 0.15
 
 
 def test_a_turn_on_the_spot_needs_floor_known_to_be_clear_and_nothing_is_forgotten_by_time():
