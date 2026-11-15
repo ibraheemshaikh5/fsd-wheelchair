@@ -39,9 +39,10 @@ DEFAULTS: dict[str, float] = {
     # Space kept around the chair (front and sides) on a set or pilot move. Depth reads
     # 10-25% long up close, so this is generous.
     "clearance_m": 0.25,
-    # Space kept between the chair's body and obstacles along the paths offered to the Gemini
-    # pilot (fsd_ml/candidates.py). Planning only: the stop above still applies while driving.
-    "path_clearance_m": 0.2,
+    # Space kept between the chair's body and obstacles along a path a Gemini pilot picks or
+    # draws: both where the path is cut when offered and where the chair stops while driving
+    # it (one rule, with the stop distance on top). clearance_m above is for set moves only.
+    "path_clearance_m": 0.08,
     # How much of the driving model's stick is sent: 100 is all of it.
     "model_speed_pct": 40.0,
     # How many times the model pilot may look and decide before the run is called off.

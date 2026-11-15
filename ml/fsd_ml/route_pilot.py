@@ -307,7 +307,7 @@ REMEMBER_CELL_M = 0.15
 # A remembered obstacle is taken to be bigger by this share of how far the chair has driven
 # since it was last seen: where it is, is only as good as the chair's sense of how far it
 # has gone, which is speed times time.
-DRIFT_SHARE = 0.15
+DRIFT_SHARE = 0.08
 
 
 class Remembered:

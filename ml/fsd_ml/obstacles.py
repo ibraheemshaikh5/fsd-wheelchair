@@ -44,6 +44,9 @@ FLOOR_BAND_PER_M = 0.04
 TOP_M = 1.3
 # A cell needs this many points standing in it to count: one stray point is noise.
 MIN_POINTS = 3
+# A cell with no filled cell beside it needs this many: a few stray points alone in open
+# floor are noise in the depth, while a thin thing standing by itself (a chair leg) has many.
+ALONE_POINTS = 9
 KEEP = 60
 # The bottom of the picture shows the chair's own footplate and caster: never an obstacle.
 OWN_CHAIR_ROWS = 0.12
@@ -237,7 +240,16 @@ def obstacles_from_depth(
         cell[0] += 1
         cell[1] += a
         cell[2] += b
-    filled = sorted((c for c in cells.values() if c[0] >= MIN_POINTS), key=lambda c: c[1] / c[0])
+    full = {key for key, cell in cells.items() if cell[0] >= MIN_POINTS}
+
+    def beside(key: tuple[int, int]) -> bool:
+        near = ((key[0] + a, key[1] + b) for a in (-1, 0, 1) for b in (-1, 0, 1) if a or b)
+        return any(other in full for other in near)
+
+    filled = sorted(
+        (cells[key] for key in full if cells[key][0] >= ALONE_POINTS or beside(key)),
+        key=lambda c: c[1] / c[0],
+    )
     obstacles = [
         Obstacle(
             f"o{i}",
