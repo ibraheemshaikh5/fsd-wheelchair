@@ -85,6 +85,15 @@ On the page (`http://127.0.0.1:8200`):
 2. Pick the goal: a point, a typed instruction, a photo, or whatever the rider set on the iPad.
 3. **Send to chair** sends each decision to the chair, optionally for a set number of steps. **Drive with W A S D** drives by hand. **STOP** or Esc stops everything.
 
+To use the console from an iPad or phone on the tailnet (e.g. STOP from a tablet), publish it from the laptop:
+
+```bash
+tailscale serve --bg --https=8445 8200      # then open https://<laptop>.<tailnet>.ts.net:8445
+tailscale serve --https=8445 off            # to stop publishing
+```
+
+Keep it tailnet-only: never use `tailscale funnel` or a public tunnel, since this page drives the chair.
+
 What keeps it safe:
 
 - **A command lasts 600 ms.** If the model, the page or the laptop stops, the chair stops.

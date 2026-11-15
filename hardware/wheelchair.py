@@ -7,6 +7,8 @@ waits on the network, so Wi-Fi jitter doesn't stall the caller.
 
 Mode: chair.fsd = False -> the real stick drives (stock behaviour); True -> set(x, y) drives.
 Dropout: after > 2 s without packets FSD latches off (stats()['dropout_latched']); set fsd again to re-arm.
+One program drives at a time (the board ignores a second until the first is quiet 2 s). With FSD off
+this client stops sending after 1 s, so leaving teleop or the console open never blocks the other.
 Takeover: in FSD, pushing the real stick hands control back (stats()['takeover'] == True).
 Deadman layers:
   - here: if set() has not been called for 0.3 s, we send zeros;
@@ -20,6 +22,7 @@ now = time.monotonic
 
 HOST = os.environ.get("WHEELCHAIR_HOST", "wheelchair-unoq")
 PORT, RATE_HZ, FRESH_S = 5005, 20, 0.3
+IDLE_S = 1.0   # FSD off for this long: stop sending, so the board frees its one-sender slot for another program
 
 
 class Wheelchair:
@@ -28,7 +31,7 @@ class Wheelchair:
         self.turn_deadband = turn_deadband  # same for left/right
         self._fsd = False; self._arm = 0    # arm bumps on every off->on, so the board can re-arm after a dropout
         self._session = int.from_bytes(os.urandom(3), "big"); self._seq = 0
-        self._x = self._y = 0; self._at = 0.0; self._stop = False; self._send_lock = threading.Lock()
+        self._x = self._y = 0; self._at = 0.0; self._fsd_at = now(); self._stop = False; self._send_lock = threading.Lock()
         self._stats = None; self._stats_at = 0.0
         self._addr = (socket.gethostbyname(HOST), PORT)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); self._sock.setblocking(False)
@@ -47,13 +50,13 @@ class Wheelchair:
     def fsd(self, on):
         """False: the real stick drives. True: set(x, y) drives (re-arms after a Wi-Fi dropout)."""
         if on and not self._fsd: self._arm += 1
-        self._fsd = bool(on)
+        self._fsd = bool(on); self._fsd_at = now()   # keep sending a moment either way, so the change reaches the board
 
     def set(self, x, y):
         """Latest wish from the driver (GUI or AI). Must be called at least every 0.3 s."""
         changed = (int(x), int(y)) != (self._x, self._y)
         self._x, self._y, self._at = int(x), int(y), now()
-        if changed:                          # don't wait for the next tick: send key presses/releases at once
+        if changed and self._fsd:            # don't wait for the next tick: send key presses/releases at once
             try: self._send(self._x, self._y)
             except OSError: pass
 
@@ -83,9 +86,10 @@ class Wheelchair:
 
     def _sender(self):
         while not self._stop:
-            fresh = now() - self._at < FRESH_S
-            try: self._send(self._x if fresh else 0, self._y if fresh else 0)
-            except OSError: pass
+            if self._fsd or now() - self._fsd_at < IDLE_S:   # FSD off: go quiet; the board frees the slot after 2 s
+                fresh = now() - self._at < FRESH_S
+                try: self._send(self._x if fresh else 0, self._y if fresh else 0)
+                except OSError: pass
             time.sleep(1 / RATE_HZ)
             while True:                     # drain every reply that arrived; keep the newest
                 try: v = [int(w, 16) for w in self._sock.recv(256).split()]
