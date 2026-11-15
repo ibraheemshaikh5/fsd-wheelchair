@@ -43,6 +43,9 @@ from fsd_ml.runlog import RunLog
 from fsd_ml.video import FPS, Conversion, VideoError, standardize
 
 PAGE = Path(__file__).with_name("page.html")
+# Stop for anything this close ahead. Depth reads 10-25% long up close and the chair coasts
+# to a stop, so at 0.4 m a bag ended 5 in from the lens; 0.7 m leaves room.
+STOP_M = 0.7
 BENCH_PAGE = Path(__file__).with_name("bench.html")
 MAX_UPLOAD_BYTES = 2 * 1024**3
 # How the goal is given: a point, an instruction, a photo, or one of those with a point.
@@ -123,7 +126,7 @@ class Session:
         self.control = ControlConfig()
         # Indoors things are close: react to what is within two metres, stop half a metre short.
         self.avoiding = FootprintConfig(
-            shape=self.setup.chair, caution_m=0.15, slow_distance_m=2.0, stop_distance_m=0.5
+            shape=self.setup.chair, caution_m=0.15, slow_distance_m=2.0, stop_distance_m=STOP_M
         )
         # How the chair is driven: read afresh from its file every time (fsd_ml/bench.py).
         self.bench = bench.Bench(work_dir / "bench")
@@ -690,7 +693,7 @@ class Session:
             ),
             caution_m=0.05,
             slow_distance_m=2.0,
-            stop_distance_m=0.4,
+            stop_distance_m=STOP_M,
         )
         picked = choose(
             [Candidate(np.column_stack([ahead, np.zeros_like(ahead)]), 1.0)], seen, tight
