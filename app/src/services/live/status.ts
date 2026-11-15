@@ -71,6 +71,20 @@ const statusSchema = z.object({
   // the chair's board) with this iPad sending GPS, compass and motion. Absent from
   // older services, which only had the phone.
   frame_source: frameSourceSchema.nullable().optional().default(null).catch(null),
+  // The chair's own state from its board: who drives, estimated speed (from the stick
+  // sent, not measured), and the safety latches. Null when the board isn't reporting.
+  chair: z
+    .object({
+      fresh: z.boolean(),
+      driver: z.string(),
+      speed_mps: finite,
+      takeover: z.boolean(),
+      dropout_latched: z.boolean(),
+    })
+    .nullable()
+    .optional()
+    .default(null)
+    .catch(null),
 })
 
 export type ServiceStatus = z.infer<typeof statusSchema>

@@ -105,10 +105,12 @@ export function chairPose(
 }
 
 /**
- * Fresh IMU-derived motion first (it follows the chair within a frame or two);
- * else the fresh GPS speed, which lags by a second or more; else stopped.
+ * The board's estimate from the stick it sends first (instant, and works indoors);
+ * else fresh IMU-derived motion; else the fresh GPS speed, which lags; else stopped.
  */
 function chairSpeed(status: ServiceStatus | null, freshGps: GpsStatus | null): number {
+  const chair = status?.chair ?? null
+  if (chair?.fresh) return Math.abs(chair.speed_mps)
   const motion = status?.motion ?? null
   const motionSpeed = motion?.fresh ? motion.speed_mps : null
   return Math.max(0, motionSpeed ?? freshGps?.speed_mps ?? 0)
@@ -189,7 +191,14 @@ function engageBlocked(link: ChairLink): string {
  * Manual once speed passes MOVING_MPS, and only back to ready below STOPPED_MPS.
  * Fused speed updates ~30 times a second, so a single threshold would flicker.
  */
-function modeFor(trip: Trip | null, arrived: boolean, speedMps: number, previousMode?: DriveMode): DriveMode {
+function modeFor(
+  trip: Trip | null,
+  arrived: boolean,
+  speedMps: number,
+  previousMode?: DriveMode,
+  selfDriving = false,
+): DriveMode {
+  if (selfDriving) return 'driving'
   if (!trip) return 'idle'
   if (arrived) return 'arrived'
   const threshold = previousMode === 'manual' ? STOPPED_MPS : MOVING_MPS
@@ -199,6 +208,7 @@ function modeFor(trip: Trip | null, arrived: boolean, speedMps: number, previous
 function reasonFor(mode: DriveMode, link: ChairLink): string | null {
   if (mode === 'idle') return null
   if (mode === 'arrived') return 'Arrived'
+  if (mode === 'driving') return 'Self-driving'
   if (link.phone !== 'ok') return 'Waiting for the chair’s sensors'
   // Nothing on the iPad controls the chair yet, so never claim it is holding.
   return mode === 'manual' ? 'You’re driving' : 'Drive with the joystick'
@@ -266,7 +276,8 @@ export function deriveState(input: LiveInputs): DriveState {
   const pose = chairPose(input.status, input.ipadPosition, input.defaultPosition, input.previousHeadingDeg)
   const link = chairLink(input.socket, input.status, pose.positionFrom, input.linkLost, input.linkIssue)
   const { arrived, ...trip } = tripFields(input.trip, pose, input.progressM, input.arrived)
-  const mode = modeFor(input.trip, arrived, pose.speedMps, input.previousMode)
+  const chair = input.status?.chair?.fresh ? input.status.chair : null
+  const mode = modeFor(input.trip, arrived, pose.speedMps, input.previousMode, chair?.driver === 'fsd')
   return {
     mode,
     source: 'live',
@@ -286,6 +297,10 @@ export function deriveState(input: LiveInputs): DriveState {
     obstacles: [],
     yieldingToId: null,
     reason: reasonFor(mode, link),
-    takeOver: null,
+    takeOver: chair?.takeover
+      ? 'You took over with the joystick'
+      : chair?.dropout_latched
+        ? 'Connection to the chair dropped; self-driving is off'
+        : null,
   }
 }
