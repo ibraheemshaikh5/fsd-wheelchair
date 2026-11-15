@@ -79,7 +79,11 @@ class Wheelchair:
         return (1 if p > 0 else -1) * round(db + (100 - db) * abs(p) / 100)
 
     def _send(self, x, y):
-        sx, sy = self._past_deadband(x, self.turn_deadband), self._past_deadband(y)
+        sy = self._past_deadband(y)
+        # The turn dead zone only matters when spinning on the spot. Once forward/back is past
+        # its dead zone the chair already moves, so a small sideways nudge stays small; adding
+        # the turn dead zone there turned a gentle correction into a ~40% swerve.
+        sx = self._past_deadband(x, self.turn_deadband) if sy == 0 else max(-100, min(100, int(x)))
         with self._send_lock: self._seq += 1; seq = self._seq
         msg = f"{sx} {sy} {1 if self._fsd else 0} {self._arm} {self._session} {seq}"
         self._sock.sendto(msg.encode(), self._addr)
