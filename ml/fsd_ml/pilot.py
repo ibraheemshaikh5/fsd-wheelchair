@@ -1,6 +1,7 @@
 """A frontier model drives the chair: it is shown the camera's picture and answers with moves.
 
-The model (Claude Sonnet) is given the task in words, a picture, and a short report of what
+The model (Claude Haiku by default) is given the task in words, a picture, and a short
+report of what
 the chair's own obstacle sense finds nearby. It answers by calling tools: go forward, go
 back, turn left, turn right, or say it is done. Several can be called at once and are run in
 order. After they run it gets the results and a new picture, and so on.
@@ -23,8 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# PILOT_MODEL=claude-haiku-5-5 for a faster, cheaper pilot.
-MODEL = os.environ.get("PILOT_MODEL", "claude-sonnet-5-5")
+# Haiku by default for speed; PILOT_MODEL=claude-sonnet-5-5 (or another) to compare.
+MODEL = os.environ.get("PILOT_MODEL", "claude-haiku-5-5")
 PROMPT_FILE = Path(__file__).resolve().parent.parent / "pilot_prompt.md"
 # What an earlier picture is replaced with once a newer one has been sent.
 OLD_PICTURE = {"type": "text", "text": "[An earlier picture from the camera, no longer shown.]"}
@@ -109,7 +110,6 @@ class Pilot:
 
     task: str
     model: str = MODEL
-    effort: str = "low"
     client: Any = None
     messages: list[dict[str, Any]] = field(default_factory=list)
     # How the last reply went, for the record.
@@ -159,17 +159,10 @@ class Pilot:
             max_tokens=2000,
             system=self._prompt(),
             tools=TOOLS,
-            # A quick decision about once every few seconds, not a long think. Haiku has no
-            # between-tools thinking, so it thinks adaptively instead.
-            thinking={"type": "adaptive" if "haiku" in self.model else "between_tools"},
-            output_config={"effort": self.effort},
+            # No extended thinking: a fast answer matters more than a long think here.
             messages=self.messages,
         )
-        # The reply goes back next turn without its thinking blocks: those are only valid
-        # while everything before them is unchanged, and the picture before them is swapped
-        # for a line of text on the next look.
-        kept = [b for b in response.content if b.type not in ("thinking", "redacted_thinking")]
-        self.messages.append({"role": "assistant", "content": kept})
+        self.messages.append({"role": "assistant", "content": response.content})
         usage = response.usage
         self.last = {
             "ms": round((time.perf_counter() - started) * 1000.0),
