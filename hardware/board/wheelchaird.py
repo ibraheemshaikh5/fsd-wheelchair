@@ -97,8 +97,8 @@ class Metrics:
         return {
             "t": time.time(),
             "driver": "fsd" if fsd else "joystick",     # who is moving the chair right now
-            "speed_mph": round(self.mph, 2), "speed_mps": round(self.mph * MPH_TO_MPS, 2),
-            "turn_dps": round(self.turn, 1),            # + = turning right
+            "speed_mph": round(self.mph, 2) + 0.0, "speed_mps": round(self.mph * MPH_TO_MPS, 2) + 0.0,   # +0.0: no "-0.0"
+            "turn_dps": round(self.turn, 1) + 0.0,            # + = turning right
             "odometer_m": round(self.odo_m, 1),         # since the daemon started; estimate
             "stick_pct": {"fwd": round(fwd), "right": round(right)},          # what the chair receives
             "real_stick_pct": {"fwd": round(stick_pct(ky, CY, 96, 113)), "right": round(stick_pct(kx, CX, 103, 104))},
