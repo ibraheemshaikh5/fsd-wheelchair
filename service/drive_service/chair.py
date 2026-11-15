@@ -21,6 +21,8 @@ METRICS_PATH = os.environ.get("CHAIR_METRICS", "/dev/shm/wheelchair.json")
 METRICS_URL = os.environ.get("CHAIR_METRICS_URL", "")
 FRESH_S = 1.0
 POLL_S = 0.2
+# The daemon writes about every 100 ms, so a copy this old is as good as a fresh read.
+FILE_CACHE_S = 0.1
 
 try:  # python.org builds on macOS ship without CA certificates; the board's tailnet cert needs them
     import certifi
@@ -30,6 +32,7 @@ except ImportError:
     _TLS = ssl.create_default_context()
 
 _remote: dict[str, Any] = {"chair": None, "at": 0.0}
+_file: dict[str, Any] = {"metrics": None, "at": float("-inf")}
 _poller: threading.Thread | None = None
 
 
@@ -58,11 +61,21 @@ def _from_board(url: str) -> dict[str, Any] | None:
     return {**chair, "fresh": fresh}
 
 
+def _from_file() -> dict[str, Any] | None:
+    """The daemon's file, re-read at most every FILE_CACHE_S: every status build asks."""
+    now = time.monotonic()
+    if now - _file["at"] >= FILE_CACHE_S:
+        _file["at"] = now
+        try:
+            with open(METRICS_PATH) as f:
+                _file["metrics"] = json.load(f)
+        except (OSError, ValueError):
+            _file["metrics"] = None
+    return _file["metrics"]
+
+
 def chair_status() -> dict[str, Any] | None:
-    try:
-        with open(METRICS_PATH) as f:
-            metrics: dict[str, Any] = json.load(f)
-    except (OSError, ValueError):
+    metrics = _from_file()
+    if metrics is None:
         return _from_board(METRICS_URL) if METRICS_URL else None
-    metrics["fresh"] = time.time() - metrics.get("t", 0) < FRESH_S
-    return metrics
+    return {**metrics, "fresh": time.time() - metrics.get("t", 0) < FRESH_S}

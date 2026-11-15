@@ -1,6 +1,6 @@
 // Thin wrappers around the browser sensor APIs. Logic that can be tested
 // without a browser lives in the neighbouring modules; this file only wires
-// those to Safari/Chrome and is exercised by the Playwright test and on device.
+// those to Safari/Chrome and is exercised on device.
 
 import { drawTransform, type FrameOrientation, frameRotation, rotatedSize } from './orientation';
 import {

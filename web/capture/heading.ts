@@ -15,8 +15,7 @@ const FULL_TURN_DEG = 360;
  *
  * iOS Safari gives `webkitCompassHeading` directly (clockwise from magnetic
  * north). Other browsers give an absolute `alpha`, which runs counter-clockwise.
- * Whether either is right with the phone upright in its mount is checked by
- * the device spike page; a relative alpha is useless as a heading.
+ * A relative alpha is useless as a heading.
  */
 export function toHeadingMessage(event: OrientationLike, nowMs: number): HeadingMessage | null {
   if (isFiniteNumber(event.webkitCompassHeading) && event.webkitCompassHeading >= 0) {

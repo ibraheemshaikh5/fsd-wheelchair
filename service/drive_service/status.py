@@ -7,7 +7,16 @@ from typing import Any
 
 from drive_service.chair import chair_status
 from drive_service.clock import is_synced
-from drive_service.config import Settings
+from drive_service.config import (
+    FPS_WINDOW_S,
+    FRAME_STALE_MS,
+    GPS_STALE_MS,
+    HEADING_STALE_MS,
+    LINK_STALE_MS,
+    MAX_CLOCK_RTT_MS,
+    MOTION_STALE_MS,
+    MOVING_SPEED_MPS,
+)
 from drive_service.declination import resolve_declination
 from drive_service.destination import (
     Destination,
@@ -52,7 +61,7 @@ def _gps(snapshot: SensorSnapshot, now_mono: float, fresh: bool) -> dict[str, An
     }
 
 
-def _motion(snapshot: SensorSnapshot, now_mono: float, settings: Settings) -> dict[str, Any] | None:
+def _motion(snapshot: SensorSnapshot, now_mono: float) -> dict[str, Any] | None:
     """Speed, turn rate (positive = left) and acceleration, judged by the newest IMU sample."""
     if snapshot.motion is None:
         return None
@@ -64,7 +73,7 @@ def _motion(snapshot: SensorSnapshot, now_mono: float, settings: Settings) -> di
         "accel_fwd_mps2": estimate.accel_fwd_mps2,
         "accel_lat_mps2": estimate.accel_lat_mps2,
         "age_ms": age_ms(snapshot.motion, now_mono),
-        "fresh": is_fresh(snapshot.motion, settings.motion_stale_ms, now_mono),
+        "fresh": is_fresh(snapshot.motion, MOTION_STALE_MS, now_mono),
     }
 
 
@@ -72,7 +81,7 @@ def _motion(snapshot: SensorSnapshot, now_mono: float, settings: Settings) -> di
 _LINK_ENVELOPE = frozenset({"v", "type", "t"})
 
 
-def _link(snapshot: SensorSnapshot, now_mono: float, settings: Settings) -> dict[str, Any] | None:
+def _link(snapshot: SensorSnapshot, now_mono: float) -> dict[str, Any] | None:
     """The phone's latest uplink report, aged by when the service received it."""
     if snapshot.link is None:
         return None
@@ -80,23 +89,19 @@ def _link(snapshot: SensorSnapshot, now_mono: float, settings: Settings) -> dict
     return {
         **snapshot.link.value.model_dump(exclude=_LINK_ENVELOPE),
         "age_ms": age,
-        "fresh": age <= settings.link_stale_ms,
+        "fresh": age <= LINK_STALE_MS,
     }
 
 
 def _heading(
-    snapshot: SensorSnapshot,
-    now_mono: float,
-    gps_fresh: bool,
-    compass_fresh: bool,
-    settings: Settings,
+    snapshot: SensorSnapshot, now_mono: float, gps_fresh: bool, compass_fresh: bool
 ) -> dict[str, Any] | None:
     fresh_fix = snapshot.gps.value if snapshot.gps and gps_fresh else None
-    declination_deg = resolve_declination(settings.magnetic_declination_deg, fresh_fix)
+    declination_deg = resolve_declination(fresh_fix)
     best = best_heading(
         fresh_fix,
         snapshot.heading.value if snapshot.heading and compass_fresh else None,
-        settings.moving_speed_mps,
+        MOVING_SPEED_MPS,
         declination_deg,
     )
     if best is None and snapshot.heading is None:
@@ -116,7 +121,7 @@ def _heading(
 
 
 def _frame_source(
-    snapshot: SensorSnapshot, phone_clock_synced: bool, external_camera: bool, settings: Settings
+    snapshot: SensorSnapshot, phone_clock_synced: bool, external_camera: bool
 ) -> dict[str, Any]:
     """Where frames come from, and whether that sender is connected with a synced clock."""
     if not external_camera:
@@ -129,7 +134,7 @@ def _frame_source(
     return {
         "kind": "external",
         "connected": connected,
-        "clock_synced": connected and is_synced(snapshot.camera_clock, settings.max_clock_rtt_ms),
+        "clock_synced": connected and is_synced(snapshot.camera_clock, MAX_CLOCK_RTT_MS),
     }
 
 
@@ -138,47 +143,44 @@ def build_status(
     stats: StreamStats,
     recording: RecordingInfo,
     rejected: int,
-    rate_limited: int,
     now_mono: float,
-    settings: Settings,
     destination: Destination | None = None,
     goal: Goal | None = None,
     external_camera: bool = False,
 ) -> dict[str, Any]:
-    frame_fresh = is_fresh(snapshot.frame, settings.frame_stale_ms, now_mono)
-    gps_fresh = is_fresh(snapshot.gps, settings.gps_stale_ms, now_mono)
-    compass_fresh = is_fresh(snapshot.heading, settings.heading_stale_ms, now_mono)
+    frame_fresh = is_fresh(snapshot.frame, FRAME_STALE_MS, now_mono)
+    gps_fresh = is_fresh(snapshot.gps, GPS_STALE_MS, now_mono)
+    compass_fresh = is_fresh(snapshot.heading, HEADING_STALE_MS, now_mono)
     # Only the connected phone's clock counts; a departed phone's estimate lingers
     # until the next one attaches.
-    clock_synced = snapshot.phone_connected and is_synced(snapshot.clock, settings.max_clock_rtt_ms)
+    clock_synced = snapshot.phone_connected and is_synced(snapshot.clock, MAX_CLOCK_RTT_MS)
     hello = snapshot.hello
-    source = _frame_source(snapshot, clock_synced, external_camera, settings)
+    source = _frame_source(snapshot, clock_synced, external_camera)
     camera_hello = snapshot.camera_hello if external_camera else hello
     camera = camera_hello.camera if camera_hello else None
     return {
         "type": "status",
         "phone_connected": snapshot.phone_connected,
         "clock_synced": clock_synced,
-        # Outdoor definition: a live camera and a live GPS fix, judged by capture time.
-        # With an external camera its own link and clock must be live too.
+        # A live camera, judged by capture time. With an external camera its own link
+        # and clock must be live too. GPS is not required (there is none indoors); its
+        # freshness is reported in "gps".
         "sensors_ok": (
             snapshot.phone_connected
             and clock_synced
             and source["connected"]
             and source["clock_synced"]
             and frame_fresh
-            and gps_fresh
         ),
         "frame_source": source,
         "frame": _frame(snapshot, now_mono, frame_fresh),
         "gps": _gps(snapshot, now_mono, gps_fresh),
-        "heading": _heading(snapshot, now_mono, gps_fresh, compass_fresh, settings),
-        "motion": _motion(snapshot, now_mono, settings),
+        "heading": _heading(snapshot, now_mono, gps_fresh, compass_fresh),
+        "motion": _motion(snapshot, now_mono),
         "clock": asdict(snapshot.clock) if snapshot.clock else None,
         "stats": {
-            **asdict(summarize(stats, now_mono, settings.fps_window_s)),
+            **asdict(summarize(stats, now_mono, FPS_WINDOW_S)),
             "rejected": rejected,
-            "rate_limited": rate_limited,
         },
         "camera": camera.model_dump() if camera else None,
         "mount": hello.mount.model_dump() if hello and hello.mount else None,
@@ -188,7 +190,7 @@ def build_status(
         ),
         # The route or instruction a driving model follows; GET /api/goal has the route itself.
         "goal": goal_status(goal),
-        "link": _link(snapshot, now_mono, settings),
+        "link": _link(snapshot, now_mono),
     }
 
 
@@ -197,7 +199,6 @@ def live_status(
     recorder: Recorder,
     destinations: DestinationStore,
     now_mono: float,
-    settings: Settings,
 ) -> dict[str, Any]:
     """The status right now, as served by GET /api/status and every /ws/viewer message."""
     status = build_status(
@@ -205,9 +206,7 @@ def live_status(
         hub.stats,
         recorder.info,
         hub.rejected,
-        hub.rate_limited,
         now_mono,
-        settings,
         destination=destinations.current,
         goal=destinations.goal,
         external_camera=hub.external_camera,

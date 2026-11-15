@@ -7,7 +7,7 @@
 // in flight from send until its ack (or any later one) arrives, and the page
 // sends a new frame only while few are in flight. That bounds the whole
 // backlog, wherever it sits, to a few frames: on a slow link fewer frames go,
-// but none of them is old. See docs/phone-protocol.md.
+// but none of them is old.
 
 /**
  * Most frames sent but not yet acked. At 20 fps a frame leaves every 50 ms, so
@@ -23,7 +23,6 @@ const RTT_SMOOTHING = 0.2;
  * Sends remembered for round-trip sampling and ack counting. Unlike the
  * in-flight set they do not expire at ACK_TIMEOUT_MS, so an ack that takes
  * longer than that, on exactly the link this exists for, is still measured.
- * Before the first ack sends are not gated, so this covers a few seconds at 60 fps.
  */
 export const RTT_HISTORY = 256;
 
@@ -34,8 +33,6 @@ export interface InFlightFrame {
 }
 
 export interface FrameFlow {
-  /** Whether this connection's service has acked a frame; until then it gates nothing (an older service). */
-  readonly acking: boolean;
   /** Frames that hold a slot: sent, not acked, and not yet past ACK_TIMEOUT_MS. */
   readonly inFlight: readonly InFlightFrame[];
   /** The last RTT_HISTORY sends on this connection, acked or not. */
@@ -47,7 +44,6 @@ export interface FrameFlow {
 }
 
 export const INITIAL_FLOW: FrameFlow = Object.freeze({
-  acking: false,
   inFlight: Object.freeze([]),
   recentSends: Object.freeze([]),
   highestAckedSeq: -1,
@@ -62,12 +58,9 @@ export function expireFrames(flow: FrameFlow, nowMs: number): FrameFlow {
 
 /**
  * Whether one more frame may go out. Only frames actually sent count: one
- * still encoding holds no slot (the send-time check catches it). Before the
- * first ack this always allows: only the send budget applies, as with a
- * service that never acks.
+ * still encoding holds no slot (the send-time check catches it).
  */
 export function maySend(flow: FrameFlow, nowMs: number): boolean {
-  if (!flow.acking) return true;
   return expireFrames(flow, nowMs).inFlight.length < MAX_FRAMES_IN_FLIGHT;
 }
 
@@ -105,10 +98,9 @@ const smooth = (previous: number | null, sample: number): number =>
 export function recordAck(flow: FrameFlow, seq: number, nowMs: number): FrameFlow {
   const inFlight = flow.inFlight.filter((frame) => frame.seq > seq);
   const acked = isNewAck(flow, seq) ? sentFrame(flow, seq) : undefined;
-  if (acked === undefined) return { ...flow, acking: true, inFlight };
+  if (acked === undefined) return { ...flow, inFlight };
   return {
     ...flow,
-    acking: true,
     inFlight,
     highestAckedSeq: seq,
     rttMs: smooth(flow.rttMs, Math.max(0, nowMs - acked.sentAtMs)),

@@ -21,12 +21,7 @@ from drive_service.destination import (
 from drive_service.hub import Hub
 from drive_service.origin import origin_allowed
 from drive_service.protocol import CameraInfo
-from drive_service.recorder import (
-    InsufficientDiskError,
-    Recorder,
-    RecorderBusyError,
-    RecorderError,
-)
+from drive_service.recorder import Recorder, RecorderBusyError, RecorderError
 from drive_service.state import SensorSnapshot
 from drive_service.status import live_status
 from drive_service.timeutil import TimeSource
@@ -35,7 +30,7 @@ log = logging.getLogger(__name__)
 
 NO_HELLO_MESSAGE = "phone is not connected or has not sent hello yet"
 FOREIGN_ORIGIN_MESSAGE = "request came from another site"
-BAD_JSON_MESSAGE = 'body must be JSON like {"lat": 38.99, "lon": -76.94}'
+BAD_JSON_MESSAGE = 'body must be JSON like {"lat": 40.35, "lon": -74.66}'
 BAD_DESTINATION_MESSAGE = (
     "destination must be lat in [-90, 90] and lon in [-180, 180], nothing else"
 )
@@ -43,7 +38,7 @@ BAD_DESTINATION_MESSAGE = (
 MAX_DESTINATION_BODY_BYTES = 1024
 BAD_GOAL_JSON_MESSAGE = (
     'body must be JSON like {"kind": "instruction", "text": "go to the kitchen"}'
-    ' or {"kind": "route", "points": [{"lat": 38.99, "lon": -76.94}, ...]}'
+    ' or {"kind": "route", "points": [{"lat": 40.35, "lon": -74.66}, ...]}'
 )
 BAD_GOAL_MESSAGE = (
     "goal must be a route of 2 to 2000 lat/lon points, or an instruction of 1 to 200 characters"
@@ -56,7 +51,6 @@ HTTP_CONFLICT = 409
 HTTP_PAYLOAD_TOO_LARGE = 413
 HTTP_UNPROCESSABLE = 422
 HTTP_SERVER_ERROR = 500
-HTTP_INSUFFICIENT_STORAGE = 507
 
 
 def ok(data: Any) -> JSONResponse:
@@ -84,7 +78,7 @@ def build_router(
 
     @router.get("/status")
     async def status() -> JSONResponse:
-        return ok(live_status(hub, recorder, destinations, time_source.mono(), settings))
+        return ok(live_status(hub, recorder, destinations, time_source.mono()))
 
     @router.post("/recording/start")
     async def start_recording(request: Request) -> JSONResponse:
@@ -102,15 +96,14 @@ def build_router(
             "camera_clock": asdict(snapshot.camera_clock) if snapshot.camera_clock else None,
             "mount": hello.mount.model_dump() if hello.mount else None,
             "user_agent": hello.user_agent,
-            # Null for older pages, whose imu rotation columns are [about y, z, x].
-            "imu_axes": hello.imu_axes,
             "clock": asdict(snapshot.clock) if snapshot.clock else None,
         }
         try:
             return ok(asdict(recorder.start(meta)))
         except RecorderError as error:
             log.warning("could not start recording: %s", error)
-            return fail(_start_error_status(error), str(error))
+            busy = isinstance(error, RecorderBusyError)
+            return fail(HTTP_CONFLICT if busy else HTTP_SERVER_ERROR, str(error))
 
     @router.post("/recording/stop")
     async def stop_recording(request: Request) -> JSONResponse:
@@ -137,9 +130,7 @@ def build_router(
         destinations.set(destination)
         # Never log the coordinates: they say where the rider is going.
         log.info("destination set")
-        return ok(
-            live_status(hub, recorder, destinations, time_source.mono(), settings)["destination"]
-        )
+        return ok(live_status(hub, recorder, destinations, time_source.mono())["destination"])
 
     @router.get("/goal")
     async def get_goal() -> JSONResponse:
@@ -169,14 +160,6 @@ def build_router(
         log.info("goal set: %s", goal.kind)
         return ok(goal_detail(goal))
 
-    @router.delete("/goal")
-    async def clear_goal(request: Request) -> JSONResponse:
-        if not origin_allowed(request.headers, settings.allowed_origins):
-            return fail(HTTP_FORBIDDEN, FOREIGN_ORIGIN_MESSAGE)
-        destinations.clear()
-        log.info("goal cleared")
-        return ok(None)
-
     @router.delete("/destination")
     async def clear_destination(request: Request) -> JSONResponse:
         if not origin_allowed(request.headers, settings.allowed_origins):
@@ -186,11 +169,3 @@ def build_router(
         return ok(None)
 
     return router
-
-
-def _start_error_status(error: RecorderError) -> int:
-    if isinstance(error, RecorderBusyError):
-        return HTTP_CONFLICT
-    if isinstance(error, InsufficientDiskError):
-        return HTTP_INSUFFICIENT_STORAGE
-    return HTTP_SERVER_ERROR

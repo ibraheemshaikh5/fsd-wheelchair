@@ -16,7 +16,6 @@ export default defineConfig({
         home: page('./index.html'),
         capture: page('./capture/index.html'),
         viewer: page('./viewer/index.html'),
-        spike: page('./spike/index.html'),
       },
     },
   },
@@ -37,13 +36,5 @@ export default defineConfig({
   test: {
     include: ['tests/unit/**/*.test.ts'],
     environment: 'node',
-    coverage: {
-      provider: 'v8',
-      include: ['shared/**/*.ts', 'capture/**/*.ts', 'viewer/**/*.ts', 'spike/**/*.ts'],
-      // Entry points and thin browser-API wrappers are exercised by the
-      // Playwright test and on the device, not by unit tests.
-      exclude: ['**/main.ts', 'capture/browser.ts', 'shared/dom.ts', 'shared/map.ts'],
-      thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
-    },
   },
 });

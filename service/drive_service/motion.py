@@ -3,13 +3,12 @@
 Pure functions: a frozen ``MotionState`` goes in, a new one comes out.
 
 iOS conventions (verified against WebKit's WebCoreMotionManager and Apple's
-CoreMotion docs; see docs/phone-protocol.md):
+CoreMotion docs):
 
 * Device axes: x to the right of the screen, y toward its top, z out of the
   screen toward the viewer. The back camera looks along -z, so -z is "forward".
-* Rotation rates are right-handed about device x, y, z in deg/s. Pages before
-  ``imu_axes: "device_xyz"`` wrote them in the order [about y, about z, about x];
-  ``to_device_xyz`` puts those back.
+* Rotation rates are right-handed about device x, y, z in deg/s, in that order
+  (the hello's ``imu_axes: "device_xyz"``).
 * ``accelerationIncludingGravity`` is CoreMotion's (user acceleration + gravity)
   times 9.80665, and CoreMotion's gravity points TOWARD the ground (a phone lying
   face up reads z = -9.8). So the low-passed reading G points down, up is -G/|G|,
@@ -27,7 +26,7 @@ Method:
   vanish from the linear acceleration and the chair would look still. What
   leaks in is small (about 12% of the speed gained over a 2.5 s push); GPS
   pulls speed back about once a second. Replaying the first iPhone recording
-  confirmed the axis order and sign: propagating with the remapped, right-handed
+  confirmed the axis order and sign: propagating with right-handed x, y, z
   rates tracked the accelerometer best (20 deg error vs 32-66 deg otherwise).
 * Yaw rate: rotation rate dotted with unit up, so it works for any mount.
   Positive = turning left (counter-clockwise seen from above).
@@ -171,22 +170,11 @@ class _Axes:
     left: Vec3 | None
 
 
-def to_device_xyz(sample: ImuSample, legacy_axes: bool) -> ImuSample:
-    """Rotation columns about device x, y, z. Legacy pages wrote [y, z, x]."""
-    if not legacy_axes:
-        return sample
-    dt, ax, ay, az, about_y, about_z, about_x = sample
-    return (dt, ax, ay, az, about_x, about_y, about_z)
-
-
-def update_imu(
-    state: MotionState, batch: Imu, legacy_axes: bool
-) -> tuple[MotionState, BatchResult]:
+def update_imu(state: MotionState, batch: Imu) -> tuple[MotionState, BatchResult]:
     """Run every sample of a batch through the estimator, one output row each."""
     rows: list[MotionRow] = []
     newest: float | None = None
-    for raw in batch.samples:
-        sample = to_device_xyz(raw, legacy_axes)
+    for sample in batch.samples:
         t_ms = batch.t + sample[0]
         if not _usable(sample) or (state.last_t_ms is not None and t_ms < state.last_t_ms):
             rows.append(MotionRow(dt_ms=sample[0]))

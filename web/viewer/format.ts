@@ -103,7 +103,7 @@ function latencyRow(status: ServiceStatus): StatusRow {
 
 function framesRow(status: ServiceStatus): StatusRow {
   const s = status.stats;
-  const value = `${s.frames} received · ${s.missed} missed · ${s.rejected} rejected · ${s.rate_limited} rate-limited`;
+  const value = `${s.frames} received · ${s.missed} missed · ${s.rejected} rejected`;
   return { label: 'Frames', value, level: s.rejected > 0 ? 'warn' : 'none' };
 }
 
@@ -114,8 +114,7 @@ function recordingState(r: RecordingStatus): readonly string[] {
 
 function recordingRow(status: ServiceStatus): StatusRow {
   const r = status.recording;
-  const endReason = r.end_reason ?? null;
-  if (!r.active && !r.finishing && r.session === null && r.error === null && endReason === null) {
+  if (!r.active && !r.finishing && r.session === null && r.error === null) {
     return { label: 'Recording', value: 'Off', level: 'none' };
   }
   const parts = [
@@ -124,10 +123,8 @@ function recordingRow(status: ServiceStatus): StatusRow {
     `${r.sensors} sensor lines`,
     `${r.dropped} dropped`,
     ...(r.error === null ? [] : [r.error]),
-    ...(endReason === null ? [] : [`ended: ${endReason}`]),
     ...recordingState(r),
   ];
-  // Reaching a limit is a clean end; only an error is a failure.
   const level: Level = r.error !== null ? 'bad' : r.active ? 'ok' : 'none';
   return { label: 'Recording', value: parts.join(' · '), level };
 }
