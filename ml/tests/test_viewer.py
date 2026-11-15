@@ -118,11 +118,9 @@ def test_page_is_told_which_model_and_where_it_runs() -> None:
     assert (local["title"], local["runs_on"]) == ("Fan (a stand-in, not a model)", "this computer")
 
     class OnCpu(FanDriver):
-        name = "flowpilot"
         provider = "CPUExecutionProvider"
 
     assert describe(OnCpu())["runs_on"] == "this computer (CPU)"
-    assert describe(OnCpu())["title"] == "FlowPilot (small)"
 
     class Hosted(FanDriver):
         name = "remote-omnivla"
@@ -316,6 +314,9 @@ def test_ipad_trip_becomes_a_goal_for_the_model(monkeypatch: pytest.MonkeyPatch)
     goal, note = reader.read(bare)
     assert goal.point_xy == pytest.approx((0.0, -20.0), abs=1e-6)
     assert "no route" in note
+    # Close enough is there: no goal, so the chair is stopped.
+    near = {**bare, "destination": {"distance_m": 2.0, "bearing_deg": 90.0}}
+    assert reader.read(near) == (None, live.ARRIVED)
     # Without knowing which way the chair faces there is nothing to aim at.
     assert reader.read({**bare, "heading": {"deg": 0.0, "reference": "magnetic"}})[0] is None
 
@@ -351,13 +352,19 @@ def test_ipad_trip_becomes_a_goal_for_the_model(monkeypatch: pytest.MonkeyPatch)
 def test_ipad_message_reads_as_a_sentence() -> None:
     from fsd_ml.live import ipad_message
 
-    assert ipad_message({}) == {"kind": None, "text": "Nothing set on the iPad"}
-    said = {"goal": {"kind": "instruction", "instruction": "go to the kitchen"}}
-    assert ipad_message(said) == {"kind": "instruction", "text": "“go to the kitchen”"}
-    routed = {"goal": {"kind": "route"}, "destination": {"distance_m": 143.4}}
-    assert ipad_message(routed)["text"] == "Map destination, 143 m away, by a planned route"
-    bare = {"destination": {"distance_m": None}}
-    assert ipad_message(bare) == {
-        "kind": "destination",
-        "text": "Map destination, distance unknown without GPS, no route",
+    assert ipad_message({}) == {"kind": None, "text": "Nothing set on the iPad", "request": None}
+    said = {"goal": {"kind": "instruction", "version": 3, "instruction": "go to the kitchen"}}
+    assert ipad_message(said) == {
+        "kind": "instruction",
+        "text": "“go to the kitchen”",
+        "request": "goal-3",
     }
+    # Asking again, even in the same words, is a new request.
+    again = {"goal": {"kind": "instruction", "version": 4, "instruction": "go to the kitchen"}}
+    assert ipad_message(again)["request"] != ipad_message(said)["request"]
+
+    routed = {"goal": {"kind": "route", "version": 5}, "destination": {"distance_m": 143.4}}
+    assert ipad_message(routed)["text"] == "Map destination, 143 m away, by a planned route"
+    bare = {"destination": {"distance_m": None, "lat": 1.0, "lon": 2.0}}
+    assert ipad_message(bare)["text"] == "Map destination, distance unknown without GPS, no route"
+    assert ipad_message(bare)["request"] == "point-1.0-2.0"

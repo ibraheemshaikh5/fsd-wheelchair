@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chair test bench</title>
+<style>
+  :root {
+    --bg: #0d1014; --panel: #161b22; --line: #2a313b; --text: #e6edf3; --muted: #8b949e;
+    --teal: #3ddbd9; --good: #4cd964; --warn: #ffd54f; --bad: #ff5252; --amber: #ffa726;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap; padding: 10px 16px; background: rgba(13, 16, 20, 0.96);
+    border-bottom: 1px solid var(--line); }
+  h1 { font-size: 16px; margin: 0 6px 0 0; }
+  h2 { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted);
+    margin: 0 0 10px; font-weight: 600; }
+  .chip { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+    font-size: 13px; white-space: nowrap; }
+  .chip.ok { color: var(--good); border-color: rgba(76, 217, 100, 0.5); }
+  .chip.no { color: var(--bad); border-color: rgba(255, 82, 82, 0.6); }
+  .spacer { flex: 1; }
+  a { color: var(--teal); }
+  button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.primary { background: var(--teal); border-color: var(--teal); color: #06231f; font-weight: 600; }
+  button.stop { background: #c62828; border: 0; color: #fff; font-weight: 700; letter-spacing: 0.05em;
+    padding: 11px 30px; font-size: 16px; }
+  button.stop:hover { background: #e53935; }
+  main { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 14px;
+    padding: 14px 16px 40px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .stack { display: grid; gap: 14px; align-content: start; }
+  .note { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .camwrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
+  #view { width: 100%; display: block; aspect-ratio: 16 / 9; }
+  #top { width: 100%; max-width: 360px; display: block; border-radius: 8px; }
+  .running { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal) inset; }
+  .banner { padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); }
+  .banner.go { border-color: var(--teal); }
+  .banner.arrived, .banner.finished, .banner.turned { border-color: var(--good); }
+  .banner.failed, .banner.aborted { border-color: var(--bad); }
+  .banner strong { display: block; }
+  .case { border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: grid; gap: 6px; }
+  .case.next { border-color: var(--warn); }
+  .case .head { display: flex; align-items: center; gap: 10px; }
+  .case .title { font-weight: 600; flex: 1; }
+  .case .does { color: var(--muted); font-size: 13px; }
+  .case .last { font-size: 13px; }
+  .case .claude { font-size: 13px; border-left: 3px solid var(--warn); padding-left: 9px; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--warn);
+    color: var(--warn); text-transform: uppercase; letter-spacing: 0.05em; }
+  .outcome { font-weight: 600; }
+  .outcome.arrived, .outcome.finished, .outcome.turned { color: var(--good); }
+  .outcome.failed, .outcome.aborted { color: var(--bad); }
+  input[type=text], textarea { width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; }
+  textarea { min-height: 70px; resize: vertical; }
+  input[type=range] { width: 150px; accent-color: var(--teal); vertical-align: middle; }
+  .ratings { display: flex; gap: 8px; flex-wrap: wrap; }
+  .ratings button.on { outline: 2px solid var(--teal); }
+  .ratings .good.on { background: rgba(76, 217, 100, 0.18); }
+  .ratings .bad.on { background: rgba(255, 82, 82, 0.18); }
+  ul { margin: 6px 0 0; padding-left: 18px; }
+  li { margin: 3px 0; }
+  details summary { cursor: pointer; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+  td { padding: 3px 0; border-bottom: 1px solid var(--line); }
+  td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .error { color: var(--bad); }
+  label.toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+  #cam { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #cam[hidden] { display: none; }
+  #view { position: relative; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Chair test bench</h1>
+  <span class="chip" id="chipFeed">camera</span>
+  <span class="chip" id="chipGyro">gyro</span>
+  <span class="chip" id="chipChair">chair</span>
+  <span class="chip" id="chipFloor">floor</span>
+  <span class="spacer"></span>
+  <a href="/">Full viewer</a>
+  <button class="stop" id="stop" title="Stops the chair now (Esc)">STOP</button>
+</header>
+
+<main>
+  <section class="stack">
+    <div class="banner" id="banner"><strong id="bannerTitle">Ready.</strong><span id="bannerText" class="note">Pick a test on the right.</span></div>
+    <div class="panel">
+      <h2>What the chair sees</h2>
+      <div class="camwrap"><canvas id="cam" hidden></canvas>
+      <canvas id="view" width="640" height="360"></canvas></div>
+      <p class="note" id="seenNote"></p>
+    </div>
+    <div class="panel">
+      <h2>From above</h2>
+      <div class="row" style="align-items:flex-start">
+        <canvas id="top" width="360" height="360"></canvas>
+        <div style="flex:1; min-width:200px">
+          <p class="note" style="margin-top:0"><span style="color:var(--bad)">●</span> seen now ·
+            <span style="color:var(--amber)">○</span> remembered ·
+            <span style="color:var(--good)">◆</span> target · <span style="color:var(--teal)">✚</span> start</p>
+          <p id="poseText" style="margin:10px 0"></p>
+          <div class="row">
+            <button id="setStart" title="Call where the chair is now the start">Set start here</button>
+            <button id="goHome" title="Drive back to the start and face the way it faced">Return to start</button>
+          </div>
+          <p class="note">Return goes by how far the chair believes it moved, so it is only as good as
+            the speed calibration. Put tape on the floor at the start to see how far off it lands.</p>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Drive by hand</h2>
+      <div class="row">
+        <label class="toggle"><input type="checkbox" id="wasd"> W A S D / arrow keys</label>
+        <span>speed <input type="range" id="wasdSpeed" min="1" max="30" step="1" value="6"> <output id="wasdOut">6%</output></span>
+      </div>
+      <p class="note" id="wasdNote">Hold a key to move, let go to stop. S reverses.</p>
+    </div>
+  </section>
+
+  <section class="stack">
+    <div class="panel" id="feedbackPanel" hidden>
+      <h2>How did that go?</h2>
+      <p id="fbFor" style="margin:0 0 8px"></p>
+      <div class="ratings">
+        <button class="good" data-rating="good">Good</button>
+        <button data-rating="close">Close, needs tuning</button>
+        <button class="bad" data-rating="bad">Wrong</button>
+        <button class="bad" data-rating="harsh">Too harsh</button>
+      </div>
+      <p class="note" id="fbAsk" style="margin:10px 0 4px"></p>
+      <input type="text" id="fbMeasured" placeholder="What you measured, if anything">
+      <textarea id="fbText" placeholder="What you saw. Anything that looked wrong, in your own words." style="margin-top:8px"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="fbSend">Send to Claude</button>
+        <button id="fbSkip">Skip</button>
+        <span class="note" id="fbSaved"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>From Claude</h2>
+      <p id="notesSummary" style="margin:0">No notes yet.</p>
+      <ul id="notesChanges"></ul>
+      <p class="note" id="notesWhen"></p>
+    </div>
+
+    <div class="panel">
+      <h2>Tests</h2>
+      <div class="stack" id="cases"></div>
+      <p class="error" id="error" role="alert"></p>
+    </div>
+
+    <div class="panel">
+      <details>
+        <summary>How the chair is being driven (settings)</summary>
+        <table id="settings"></table>
+        <p class="note">Claude changes these between runs. They take effect on the next Run.</p>
+      </details>
+    </div>
+  </section>
+</main>
+
+<script>
+const SHOW_ROUTE = false;  // the white route line, off for now
+const $ = (id) => document.getElementById(id);
+const state = { bench: null, view: null, focus: null, rating: null, skipped: new Set(), built: false };
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || "request failed");
+  return body;
+}
+function showError(message) { $("error").textContent = message || ""; }
+function chip(id, text, ok) {
+  $(id).textContent = text;
+  $(id).className = "chip " + (ok === null ? "" : ok ? "ok" : "no");
+}
+
+// The tests.
+function buildCases(cases) {
+  $("cases").innerHTML = "";
+  for (const test of cases) {
+    const card = document.createElement("div");
+    card.className = "case"; card.id = `case-${test.id}`;
+    card.innerHTML = `
+      <div class="head"><span class="title"></span><span class="tag" hidden>try next</span>
+        <button class="primary run">Run</button></div>
+      <div class="does"></div>
+      ${test.input ? '<input type="text" class="say" aria-label="What to go to">' : ""}
+      <div class="last"></div>
+      <div class="claude" hidden></div>`;
+    card.querySelector(".title").textContent = test.title;
+    card.querySelector(".does").textContent = test.does;
+    if (test.input) card.querySelector(".say").value = test.params.say;
+    card.querySelector(".run").addEventListener("click", () => run(test.id));
+    $("cases").appendChild(card);
+  }
+  state.built = true;
+}
+async function run(caseId) {
+  const card = $(`case-${caseId}`), say = card && card.querySelector(".say");
+  const query = new URLSearchParams({ case: caseId });
+  if (say) query.set("say", say.value);
+  try {
+    showError("");
+    state.rating = null;
+    render(await api(`/api/bench/run?${query}`, { method: "POST" }));
+  } catch (error) { showError(error.message); }
+}
+async function stop() {
+  held.clear();
+  try { render(await api("/api/bench/stop", { method: "POST" })); } catch (error) { showError(error.message); }
+}
+
+function describe(run) {
+  if (!run) return "Not run yet.";
+  const when = new Date(run.t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (!run.result) return `Running since ${when}…`;
+  const r = run.result;
+  let text = `<span class="outcome ${r.outcome}">${(r.outcome || "").toUpperCase()}</span> at ${when} · ${r.reason || ""} · ${r.seconds} s`;
+  if (run.feedback) text += `<br><span class="note">You said: ${escapeHtml(run.feedback.rating)}${run.feedback.measured ? ", " + escapeHtml(run.feedback.measured) : ""}${run.feedback.text ? " · " + escapeHtml(run.feedback.text) : ""}</span>`;
+  return text;
+}
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function render(bench) {
+  state.bench = bench;
+  if (!state.built) buildCases(bench.cases);
+  const episode = bench.episode || {}, running = Boolean(episode.running);
+  const notes = bench.notes || {};
+  for (const test of bench.cases) {
+    const card = $(`case-${test.id}`), last = bench.latest[test.id];
+    card.querySelector(".last").innerHTML = describe(last);
+    card.querySelector(".run").disabled = running;
+    card.classList.toggle("running", running && last && !last.result);
+    const next = notes.next && notes.next.case === test.id;
+    card.classList.toggle("next", Boolean(next));
+    card.querySelector(".tag").hidden = !next;
+    const note = (notes.cases || {})[test.id] || (next ? notes.next.why : null);
+    const box = card.querySelector(".claude");
+    box.hidden = !note; box.textContent = note ? `Claude: ${note}` : "";
+  }
+  $("setStart").disabled = running; $("goHome").disabled = running;
+
+  // The banner: what is happening now, or how the last thing ended.
+  const banner = $("banner");
+  if (running) {
+    banner.className = "banner go";
+    $("bannerTitle").textContent = `Running: ${titleOf(episode)}`;
+    $("bannerText").textContent = `${episode.phase || ""}${episode.reason ? " · " + episode.reason : ""}`;
+  } else if (episode.outcome) {
+    banner.className = `banner ${episode.outcome}`;
+    $("bannerTitle").textContent = `${titleOf(episode)}: ${episode.outcome.toUpperCase()}`;
+    $("bannerText").textContent = `${episode.reason || ""} · ${episode.seconds} s`;
+  } else {
+    banner.className = "banner";
+    $("bannerTitle").textContent = "Ready.";
+    $("bannerText").textContent = "Pick a test on the right.";
+  }
+
+  // Feedback: the newest finished run that has none yet.
+  const waiting = Object.values(bench.latest)
+    .filter((r) => r.result && !r.feedback && !state.skipped.has(r.run))
+    .sort((a, b) => b.t - a.t)[0];
+  if (waiting && (!state.focus || state.focus.run !== waiting.run)) {
+    state.focus = waiting; state.rating = null;
+    $("fbMeasured").value = ""; $("fbText").value = ""; $("fbSaved").textContent = "";
+    document.querySelectorAll(".ratings button").forEach((b) => b.classList.remove("on"));
+  }
+  if (!waiting) state.focus = null;
+  $("feedbackPanel").hidden = !state.focus;
+  if (state.focus) {
+    const test = bench.cases.find((c) => c.id === state.focus.case);
+    $("fbFor").innerHTML = `<strong>${escapeHtml(test ? test.title : "Return to start")}</strong> · ${describe(state.focus)}`;
+    $("fbAsk").textContent = test ? test.ask : "How far from the start mark did it end (inches)?";
+  }
+
+  // Claude's notes.
+  $("notesSummary").textContent = notes.summary || "No notes yet. Run a test and send feedback.";
+  $("notesChanges").innerHTML = "";
+  for (const change of notes.changes || []) {
+    const item = document.createElement("li"); item.textContent = change; $("notesChanges").appendChild(item);
+  }
+  $("notesWhen").textContent = notes.updated ? `Updated ${notes.updated}` : "";
+
+  // Settings.
+  $("settings").innerHTML = Object.entries(bench.settings)
+    .map(([name, value]) => `<tr><td>${name.replace(/_/g, " ")}</td><td>${value}</td></tr>`).join("");
+
+  const pose = bench.pose;
+  $("poseText").textContent = `From the start: ${pose.ahead_m} m ahead, ${pose.left_m} m left, turned ${pose.turned_deg}°.`;
+  const board = bench.board || {};
+  if ("chair_listening" in board) chip("chipChair", board.chair_listening ? "chair on" : "chair not listening: switched on?", board.chair_listening);
+  else chip("chipChair", bench.connected ? "chair: checked when a run starts" : "not connected", bench.connected ? null : false);
+  if ($("wasd").checked !== bench.manual && !wasdBusy) { $("wasd").checked = bench.manual; }
+}
+function titleOf(episode) {
+  const test = state.bench.cases.find((c) => c.kind === episode.kind && (c.kind !== "turn" || c.params.degrees_left === episode.degrees_left));
+  return episode.kind === "home" ? "Return to start" : test ? test.title : episode.kind;
+}
+
+// Feedback.
+document.querySelectorAll(".ratings button").forEach((button) => button.addEventListener("click", () => {
+  state.rating = button.dataset.rating;
+  document.querySelectorAll(".ratings button").forEach((b) => b.classList.toggle("on", b === button));
+}));
+$("fbSend").addEventListener("click", async () => {
+  if (!state.focus) return;
+  if (!state.rating && !$("fbText").value.trim() && !$("fbMeasured").value.trim()) {
+    $("fbSaved").textContent = "Pick a rating or write something first."; return;
+  }
+  try {
+    render(await api("/api/bench/feedback", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run: state.focus.run, rating: state.rating || "", measured: $("fbMeasured").value, text: $("fbText").value }),
+    }));
+    showError("");
+  } catch (error) { $("fbSaved").textContent = error.message; }
+});
+$("fbSkip").addEventListener("click", () => { if (state.focus) state.skipped.add(state.focus.run); state.focus = null; render(state.bench); });
+
+// Position.
+$("setStart").addEventListener("click", async () => { try { render(await api("/api/bench/start", { method: "POST" })); } catch (e) { showError(e.message); } });
+$("goHome").addEventListener("click", () => run("home"));
+$("stop").addEventListener("click", stop);
+
+// Driving by hand.
+const KEYS = { w: [0, 1], arrowup: [0, 1], s: [0, -1], arrowdown: [0, -1], a: [-1, 0], arrowleft: [-1, 0], d: [1, 0], arrowright: [1, 0] };
+const held = new Set();
+let lastStick = "0,0", wasdBusy = false;
+function stickNow() {
+  let x = 0, y = 0;
+  for (const key of held) { x += KEYS[key][0]; y += KEYS[key][1]; }
+  const strength = Math.max(1, Math.min(30, Number($("wasdSpeed").value) || 6));
+  return [Math.sign(x) * strength, Math.sign(y) * strength];
+}
+async function sendDrive(force) {
+  if (!$("wasd").checked) return;
+  const [x, y] = stickNow(), now = `${x},${y}`;
+  if (now === "0,0" && lastStick === "0,0" && !force) return;
+  lastStick = now;
+  try {
+    const answer = await api(`/api/live/drive?x=${x}&y=${y}`, { method: "POST" });
+    $("wasdNote").textContent = answer.warning ? `Sent, but ${answer.warning}`
+      : answer.sent ? `Stick x ${x}%, y ${y}%` : `Not sent: ${answer.problem}`;
+    if (!answer.sent) setWasd(false);
+  } catch (error) { $("wasdNote").textContent = error.message; setWasd(false); }
+}
+async function setWasd(on) {
+  held.clear(); lastStick = "0,0"; wasdBusy = true;
+  try { await api(`/api/live/manual?on=${on ? 1 : 0}`, { method: "POST" }); }
+  catch (error) { on = false; $("wasdNote").textContent = error.message; }
+  $("wasd").checked = on; wasdBusy = false;
+  if (on) $("wasdNote").textContent = "Hold a key to move, let go to stop. S reverses.";
+}
+setInterval(() => sendDrive(false), 150);
+$("wasd").addEventListener("change", (event) => { event.target.blur(); setWasd(event.target.checked); });
+$("wasdSpeed").addEventListener("input", (event) => {
+  $("wasdOut").textContent = `${event.target.value}%`;
+  try { localStorage.setItem("benchWasdSpeed", event.target.value); } catch (error) { /* private window */ }
+  if (held.size) sendDrive(true);
+});
+$("wasdSpeed").addEventListener("change", (event) => event.target.blur());
+try {
+  const saved = Number(localStorage.getItem("benchWasdSpeed"));
+  if (saved >= 1 && saved <= 30) { $("wasdSpeed").value = saved; $("wasdOut").textContent = `${saved}%`; }
+} catch (error) { /* private window */ }
+function typing(event) { return ["TEXTAREA"].includes(event.target.tagName) || (event.target.tagName === "INPUT" && event.target.type === "text"); }
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { stop(); return; }
+  const key = event.key.toLowerCase();
+  if (!$("wasd").checked || !(key in KEYS) || typing(event) || event.metaKey || event.ctrlKey) return;
+  event.preventDefault();
+  if (!held.has(key)) { held.add(key); sendDrive(true); }
+});
+document.addEventListener("keyup", (event) => { if (held.delete(event.key.toLowerCase())) sendDrive(true); });
+window.addEventListener("blur", () => { if (held.size) { held.clear(); sendDrive(true); } });
+
+// The camera and the map.
+const view = $("view"), vctx = view.getContext("2d");
+const topc = $("top"), tctx = topc.getContext("2d");
+
+// The smooth camera layer: the phone's own frames, as fast as they load, cut to the same
+// 16:9 middle the model sees, so the slower overlay drawn above it lines up.
+const cam = $("cam"), cctx = cam.getContext("2d");
+let camOn = false;
+async function camLoop() {
+  if (camOn) return;
+  camOn = true;
+  while (true) {
+    const began = performance.now();
+    const image = new Image();
+    await new Promise((resolve) => { image.onload = image.onerror = resolve; image.src = `/live/now.jpg?t=${began}`; });
+    if (image.naturalWidth) {
+      const w = image.naturalWidth, h = image.naturalHeight;
+      const keepW = Math.min(w, Math.round(h * 16 / 9)), keepH = Math.min(h, Math.round(w * 9 / 16));
+      if (cam.width !== keepW || cam.height !== keepH) { cam.width = keepW; cam.height = keepH; }
+      cctx.drawImage(image, (w - keepW) / 2, (h - keepH) / 2, keepW, keepH, 0, 0, keepW, keepH);
+      cam.hidden = false;
+    }
+    const wait = image.naturalWidth ? 33 - (performance.now() - began) : 500;
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+  camOn = false;
+  cam.hidden = true;
+}
+function drawView(live) {
+  vctx.clearRect(0, 0, view.width, view.height);
+  const seen = live.seen;
+  if (seen && seen.boxes && seen.boxes.length) {
+    const box = seen.boxes[0], colour = seen.locked ? "#4cd964" : "#ffd54f";
+    const x = box.x0 * view.width, y = box.y0 * view.height;
+    const w = (box.x1 - box.x0) * view.width, h = (box.y1 - box.y0) * view.height;
+    vctx.strokeStyle = colour; vctx.lineWidth = 3; vctx.strokeRect(x, y, w, h);
+    const label = `${seen.locked ? "LOCKED · " : ""}${box.label}${box.distance_m != null ? ` · ${box.distance_m.toFixed(1)} m` : ""}`;
+    vctx.font = "600 13px system-ui, sans-serif";
+    const wide = vctx.measureText(label).width + 10, top = y > 20 ? y - 20 : y + h;
+    vctx.fillStyle = colour; vctx.fillRect(x, top, wide, 20);
+    vctx.fillStyle = "#111"; vctx.fillText(label, x + 5, top + 14);
+  }
+  $("seenNote").textContent = !seen || !seen.target ? "No target named. The Go-to test names one."
+    : `Target “${seen.target}”: ${seen.boxes && seen.boxes.length ? (seen.locked ? "locked" : "in view, not sure enough to lock") : "not in view"}${seen.note ? " · " + seen.note : ""}`;
+}
+function drawTop(live) {
+  const size = topc.width, reach = 4, scale = size / reach;
+  const map = (ahead, left) => [size / 2 - left * scale, size - 60 - ahead * scale];
+  tctx.fillStyle = "#0d1014"; tctx.fillRect(0, 0, size, size);
+  tctx.strokeStyle = "#2a313b"; tctx.lineWidth = 1;
+  for (let m = -2; m <= 2; m++) { tctx.beginPath(); tctx.moveTo(...map(-1, m)); tctx.lineTo(...map(reach, m)); tctx.stroke(); }
+  for (let m = 0; m <= reach; m++) { tctx.beginPath(); tctx.moveTo(...map(m, -3)); tctx.lineTo(...map(m, 3)); tctx.stroke(); }
+  for (const [ahead, left, radius, seenNow] of live.obstacles || []) {
+    const at = map(ahead, left);
+    tctx.beginPath(); tctx.arc(at[0], at[1], Math.max(2, radius * scale), 0, Math.PI * 2);
+    if (seenNow) { tctx.fillStyle = "rgba(255, 82, 82, 0.85)"; tctx.fill(); }
+    else { tctx.strokeStyle = "#ffa726"; tctx.lineWidth = 1.5; tctx.stroke(); }
+  }
+  if (SHOW_ROUTE && live.route && live.route.length > 1) {
+    tctx.beginPath(); tctx.moveTo(...map(0, 0));
+    for (const [ahead, left] of live.route) tctx.lineTo(...map(ahead, left));
+    tctx.strokeStyle = "#fff"; tctx.lineWidth = 2; tctx.stroke();
+  }
+  if (live.target_xy) {
+    const at = map(live.target_xy[0], live.target_xy[1]);
+    tctx.fillStyle = "#4cd964"; tctx.beginPath();
+    tctx.moveTo(at[0], at[1] - 7); tctx.lineTo(at[0] + 7, at[1]); tctx.lineTo(at[0], at[1] + 7); tctx.lineTo(at[0] - 7, at[1]); tctx.fill();
+  }
+  // Where the start is from here: the chair's own position, turned round.
+  const pose = state.bench && state.bench.pose;
+  if (pose) {
+    const yaw = pose.turned_deg * Math.PI / 180;
+    const ahead = -(pose.ahead_m * Math.cos(yaw) + pose.left_m * Math.sin(yaw));
+    const left = -(-pose.ahead_m * Math.sin(yaw) + pose.left_m * Math.cos(yaw));
+    const at = map(ahead, left);
+    tctx.strokeStyle = "#3ddbd9"; tctx.lineWidth = 2;
+    tctx.beginPath(); tctx.moveTo(at[0] - 7, at[1]); tctx.lineTo(at[0] + 7, at[1]); tctx.moveTo(at[0], at[1] - 7); tctx.lineTo(at[0], at[1] + 7); tctx.stroke();
+  }
+  const chair = live.chair || { width_m: 0.58, length_m: 1.02 };
+  const corner = map(chair.length_m / 2, chair.width_m / 2);
+  tctx.fillStyle = "#e6edf3"; tctx.fillRect(corner[0], corner[1], chair.width_m * scale, chair.length_m * scale);
+  tctx.fillStyle = "#0d1014";
+  const nose = map(chair.length_m / 2 - 0.08, 0);
+  tctx.beginPath(); tctx.moveTo(nose[0], nose[1] - 6); tctx.lineTo(nose[0] + 6, nose[1] + 5); tctx.lineTo(nose[0] - 6, nose[1] + 5); tctx.fill();
+}
+
+async function pollBench() {
+  try { render(await api("/api/bench")); } catch (error) { showError(error.message); }
+  setTimeout(pollBench, 700);
+}
+async function pollView() {
+  try {
+    const live = await api("/api/bench/view");
+    state.view = live;
+    chip("chipFeed", live.waiting ? `camera: ${live.waiting}` : "camera live", !live.waiting);
+    chip("chipGyro", live.gyro_fresh ? "gyro live" : "gyro: no reading", live.gyro_fresh);
+    const sight = live.sight || {};
+    chip("chipFloor", sight.problem ? "obstacle view: error" : sight.floor ? `floor in view · ${sight.seen || 0} obstacles` : "cannot see the floor", Boolean(sight.floor));
+    if (!live.waiting && live.seq != null) {
+      drawView(live);
+    }
+    drawTop(live);
+  } catch (error) { chip("chipFeed", "viewer not answering", false); }
+  setTimeout(pollView, 350);
+}
+pollBench();
+pollView();
+camLoop();
+</script>
+</body>
+</html>
