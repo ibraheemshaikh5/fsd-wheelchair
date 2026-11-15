@@ -216,8 +216,9 @@ def test_what_the_pilot_asks_for_is_cut_to_what_is_allowed():
     runner(chair)[0].pilot("go", pilot, background=False)
     forward = [y for _, y in chair.sticks if y > 0]
     back = [y for _, y in chair.sticks if y < 0]
-    # A metre forward at most, 0.4 m back at most (0.2 m/s believed, a command every 0.1 s).
-    assert 45 <= len(forward) <= 55 and 15 <= len(back) <= 25
+    # A metre forward at most (cut further by the 4 s move cap), 0.4 m back at most
+    # (0.2 m/s believed, a command every 0.1 s).
+    assert 35 <= len(forward) <= 41 and 15 <= len(back) <= 25
     assert "the most allowed" in pilot.told[1][0][1]
     # A negative distance is refused, not driven the other way or as its absolute value.
     assert pilot.told[2][0][2] and "not a positive amount" in pilot.told[2][0][1]

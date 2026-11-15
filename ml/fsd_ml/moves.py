@@ -30,6 +30,10 @@ if TYPE_CHECKING:
 TURN_TIMEOUT_S_PER_DEG = 0.12
 
 
+# Longest a straight or backing move may drive, however slow the chair is believed to be.
+MAX_MOVE_S = 4.0
+
+
 class Runner:
     def __init__(
         self,
@@ -180,8 +184,10 @@ class Runner:
         speed = self._chair.speed_for(stick)
         if speed <= 0:
             return "failed", "no speed is known for that stick"
-        # Easing in and out each cover half the ground of the same time at full stick.
-        seconds, started = distance_m / speed + ramp, self._clock()
+        # Easing in and out each cover half the ground of the same time at full stick. The
+        # believed speed is a guess (nothing measures distance), so a move never runs past
+        # MAX_MOVE_S whatever it says.
+        seconds, started = min(distance_m / speed + ramp, MAX_MOVE_S), self._clock()
         while (now := self._clock() - started) < seconds:
             if why := self._stopped():
                 return "aborted", why
