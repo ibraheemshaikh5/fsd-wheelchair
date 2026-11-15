@@ -152,6 +152,11 @@ class Session:
         # camera was last warned of in it.
         self.episode: Episode | None = None
         self._warned_s = 0.0
+        # Where the chair is believed to be since this connection began (see ``record``),
+        # when that was last moved on, and the forward stick last sent.
+        self._pose_xy = [0.0, 0.0]
+        self._pose_s = 0.0
+        self._stick_y = 0.0
         self._waiting_logged: str | None = None
         # A depth model that finds what stands on the floor. None if torch is not installed.
         self.sight: obstacles.ObstacleWatcher | None = None
@@ -363,6 +368,7 @@ class Session:
         feed.start()
         self._service_file.write_text(json.dumps(service))
         self.runlog = RunLog(self.work_dir / "live" / time.strftime("%Y%m%d-%H%M%S"))
+        self._pose_xy, self._pose_s, self._stick_y = [0.0, 0.0], 0.0, 0.0
         self.log("connected", service=service, model=self.driver.name)
         if obstacles.available():
             depth, camera = obstacles.DepthObstacles(), self.setup.camera
@@ -429,14 +435,34 @@ class Session:
         model: dict[str, Any] | None = None,
         frame_gap_s: float = 0.0,
         picture: bytes | None = None,
+        asked: tuple[float, float] | None = None,
     ) -> None:
-        """Write one command line: the frame it was given on, the stick sent, the model's say.
+        """Write one command line: the frame it was given on, the stick sent, the model's say,
+        and where the chair is believed to be. Every stick sent, by anyone, comes through here.
 
-        ``picture`` is the frame as the model was shown it (paths drawn on): saved beside the
-        frame as ``<frame>.picks.jpg``.
+        ``picture`` is the frame as the model was shown it (lines drawn on): saved beside the
+        frame as ``<frame>.picks.jpg``. A command given on a camera frame older than half a
+        second is warned of, once a second at most.
         """
         if self.runlog is None:
             return
+        now = time.monotonic()
+        age = frame.age_s(now) if frame else None
+        fresh = age is not None and age <= MAX_FRAME_AGE_S
+        if result is not None:
+            # The believed pose moves on by what the stick just sent is believed to do, for
+            # the time since the last one. A long gap is not driving: the board stops the
+            # chair when commands stop coming.
+            step_s = min(now - self._pose_s, 0.3) if self._pose_s else 0.0
+            y = self._stick_y
+            step = math.copysign(self.speed_for(abs(y)), y) * step_s
+            self._pose_xy[0] += step * math.cos(self.yaw_rad())
+            self._pose_xy[1] += step * math.sin(self.yaw_rad())
+            self._pose_s, self._stick_y = now, result.y if result.sent else 0
+            if not fresh and self.sending and now - self._warned_s > 1.0:
+                self._warned_s = now
+                what = "no camera frame" if age is None else f"the camera frame is {age:.1f} s old"
+                self.note("warning", what=f"a command was given while {what}", frame_age_s=age)
         named = self.runlog.frame(frame, frame_gap_s)
         if picture and named["frame"]:
             named["picture"] = str(Path(named["frame"]).with_suffix(".picks.jpg"))
@@ -444,18 +470,35 @@ class Session:
                 (self.runlog.folder / named["picture"]).write_bytes(picture)
             except OSError:
                 named["picture"] = None
-        if self.episode is not None and model and "look" in model and result is None:
-            self.episode.write("model_call", mode=mode, **named, **model)
-        self.runlog.write(
-            "command",
-            mode=mode,
+        line = {
+            "mode": mode,
             **named,
-            stick=[result.x, result.y] if result else None,
-            sent=bool(result and result.sent),
-            problem=result.problem if result else None,
-            model=model,
-            board=self._sender.telemetry() if self._sender else None,
-        )
+            # The frame's own count and age: ``frame`` is the newest one saved, which for
+            # commands many times a second may be a little older.
+            "frame_seen_n": frame.n if frame else None,
+            "frame_age_s": None if age is None else round(age, 3),
+            "camera_fresh": fresh,
+            "asked": [round(v, 2) for v in asked] if asked else None,
+            "stick": [result.x, result.y] if result else None,
+            "sent": bool(result and result.sent),
+            "problem": result.problem if result else None,
+            # The gyro's summed yaw, and the believed pose: metres from where this connection
+            # began along the gyro's zero heading and to its left, by the calibrated speed.
+            "yaw_deg": round(math.degrees(self.yaw_rad()), 2),
+            "gyro_fresh": self.gyro_fresh(),
+            "pose": {"x_m": round(self._pose_xy[0], 3), "y_m": round(self._pose_xy[1], 3)},
+            "obstacle_age_s": round(self.sight.age_s(), 3)
+            if self.sight and self.sight.at_s
+            else None,
+            "action": self.runner.state().get("action"),
+        }
+        if self.episode is not None:
+            if result is not None:
+                self.episode.write("tick", **line)
+            elif model and "look" in model:
+                self.episode.write("model_call", **line, **model)
+        board = self._sender.telemetry() if self._sender else None
+        self.runlog.write("command", **line, model=model, board=board)
 
     def _log_waiting(self, why: str | None) -> None:
         """Record why nothing was decided, once each time the reason changes."""
@@ -556,46 +599,13 @@ class Session:
             result,
             model=self.runner.state().get("call"),
             frame_gap_s=TICK_FRAME_GAP_S,
+            asked=(x_pct, y_pct),
         )
-        self._tick(frame, [x_pct, y_pct], result)
         if result.halted:  # the board took control back: a person must switch it on again
             self._armed = False
             self.stop_chair()
             return result.problem
         return None
-
-    def _tick(self, frame: LiveFrame | None, asked: list[float], result: SendResult) -> None:
-        """One stick command of the run that is going, for its episode; and a warning if the
-        camera frame it was given on is old."""
-        if self.episode is None or self.runlog is None:
-            return
-        now = time.monotonic()
-        age = frame.age_s(now) if frame else None
-        fresh = age is not None and age <= MAX_FRAME_AGE_S
-        if not fresh and now - self._warned_s > 1.0:
-            self._warned_s = now
-            what = "no camera frame" if age is None else f"the camera frame is {age:.1f} s old"
-            self.note("warning", what=f"a command was given while {what}", frame_age_s=age)
-        y = result.y if result.sent else 0
-        self.episode.tick(
-            self.yaw_rad(),
-            math.copysign(self.speed_for(abs(y)), y),
-            mode=self._mode(),
-            asked=[round(v, 2) for v in asked],
-            stick=[result.x, result.y],
-            sent=result.sent,
-            problem=result.problem,
-            # The file is the newest frame saved (at most ten a second); n is this frame's count.
-            frame={
-                **self.runlog.frame(frame, TICK_FRAME_GAP_S),
-                "n": frame.n if frame else None,
-                "age_s": None if age is None else round(age, 3),
-            },
-            obstacle_age_s=round(self.sight.age_s(), 3) if self.sight and self.sight.at_s else None,
-            gyro_fresh=self.gyro_fresh(),
-            camera_fresh=fresh,
-            action=self.runner.state().get("action"),
-        )
 
     def _send_decision(
         self, decision: dict[str, Any] | None, frame: LiveFrame | None, model: dict[str, Any]
@@ -699,7 +709,8 @@ class Session:
         if self.sending and self._sender is not None:
             settings = self.bench.settings()
             stopped = self._sender.brake(settings["brake_pct"], settings["brake_ms"])
-            self._tick(self.live.latest().frame if self.live else None, [0.0, 0.0], stopped)
+            frame = self.live.latest().frame if self.live else None
+            self.record(self._mode(), frame, stopped, frame_gap_s=TICK_FRAME_GAP_S, asked=(0, 0))
 
     def yaw_rad(self) -> float:
         return self.live.yaw_rad() if self.live else 0.0

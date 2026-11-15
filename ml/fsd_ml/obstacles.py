@@ -24,6 +24,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -96,6 +97,62 @@ def fit_floor(points: np.ndarray) -> tuple[np.ndarray, float] | None:
     return normal, distance
 
 
+@dataclass(frozen=True, slots=True)
+class Ground:
+    """Where every cell of a depth map is, in the chair's frame: metres ahead, metres left,
+    and metres above the floor fitted in that picture. Each array is (rows, columns)."""
+
+    ahead: np.ndarray
+    left: np.ndarray
+    above: np.ndarray
+    # For the page: the depth scale and the camera's tilt as fitted.
+    info: dict[str, Any]
+
+    def floor(self) -> np.ndarray:
+        """Which cells are floor the chair could drive on: low enough, and near enough to trust."""
+        low = self.above < FLOOR_BAND_M + FLOOR_BAND_PER_M * np.maximum(self.ahead, 0.0)
+        return low & (self.ahead > 0.15) & (self.ahead < RANGE_M + 0.5)
+
+    def at(self, across: float, down: float) -> tuple[float, float, bool]:
+        """The cell at a point of the picture (fractions across and down, 0 to 1): metres
+        ahead and left of the chair's middle, and whether it is floor."""
+        rows, columns = self.ahead.shape
+        row = min(rows - 1, max(0, int(down * rows)))
+        column = min(columns - 1, max(0, int(across * columns)))
+        return (
+            float(self.ahead[row, column]),
+            float(self.left[row, column]),
+            bool(self.floor()[row, column]),
+        )
+
+
+def ground_from_depth(
+    depth: np.ndarray,
+    hfov_deg: float,
+    camera_height_m: float,
+    lens_xy: tuple[float, float] = (0.0, 0.0),
+) -> Ground | None:
+    """Every cell of a depth map placed in the chair's frame, or None if no floor is found."""
+    height, width = depth.shape
+    points = rays(width, height, hfov_deg) * depth[:, :, None]
+    floor = fit_floor(points)
+    if floor is None:
+        return None
+    normal, distance = floor
+    scale = camera_height_m / distance  # the fitted floor is the lens height away, by definition
+    # Forward along the floor: the camera's axis with its downward part taken out.
+    forward = np.array([0.0, 0.0, 1.0]) - normal * normal[2]
+    forward /= np.linalg.norm(forward)
+    right = np.cross(normal, forward)  # down x forward = right
+    tilt = math.degrees(math.asin(max(-1.0, min(1.0, float(normal[2])))))
+    return Ground(
+        ahead=(points @ forward) * scale + lens_xy[0],
+        left=-(points @ right) * scale + lens_xy[1],
+        above=(distance - points @ normal) * scale,
+        info={"floor": True, "scale": round(scale, 3), "tilt_deg": round(tilt, 1)},
+    )
+
+
 def obstacles_from_depth(
     depth: np.ndarray,
     hfov_deg: float,
@@ -104,19 +161,10 @@ def obstacles_from_depth(
 ) -> tuple[list[Obstacle], dict[str, Any]]:
     """What stands on the floor, in the chair's frame, from a depth map in any consistent unit."""
     height, width = depth.shape
-    points = rays(width, height, hfov_deg) * depth[:, :, None]
-    floor = fit_floor(points)
-    if floor is None:
+    ground = ground_from_depth(depth, hfov_deg, camera_height_m, lens_xy)
+    if ground is None:
         return [], {"floor": False}
-    normal, distance = floor
-    scale = camera_height_m / distance  # the fitted floor is the lens height away, by definition
-    above = (distance - points @ normal) * scale
-    # Forward along the floor: the camera's axis with its downward part taken out.
-    forward = np.array([0.0, 0.0, 1.0]) - normal * normal[2]
-    forward /= np.linalg.norm(forward)
-    right = np.cross(normal, forward)  # down x forward = right
-    ahead = (points @ forward) * scale
-    left = -(points @ right) * scale
+    ahead, left, above = ground.ahead - lens_xy[0], ground.left - lens_xy[1], ground.above
     standing = (
         (above > FLOOR_BAND_M + FLOOR_BAND_PER_M * ahead)
         & (above < TOP_M)
@@ -150,8 +198,7 @@ def obstacles_from_depth(
         )
         for i, (n, total_a, total_b) in enumerate(filled[:KEEP])
     ]
-    tilt = math.degrees(math.asin(max(-1.0, min(1.0, float(normal[2])))))
-    return obstacles, {"floor": True, "scale": round(scale, 3), "tilt_deg": round(tilt, 1)}
+    return obstacles, ground.info
 
 
 class DepthObstacles:
@@ -163,8 +210,14 @@ class DepthObstacles:
         self._processor: Any = None
         self._torch: Any = None
         self.device = "cpu"
+        # One picture at a time: the watcher and a pilot's look may both ask.
+        self._lock = threading.Lock()
 
     def depth(self, image: np.ndarray) -> np.ndarray:
+        with self._lock:
+            return self._depth(image)
+
+    def _depth(self, image: np.ndarray) -> np.ndarray:
         if self._model is None:
             import torch
             from transformers import AutoImageProcessor, AutoModelForDepthEstimation
@@ -191,6 +244,15 @@ class DepthObstacles:
         lens_xy: tuple[float, float] = (0.0, 0.0),
     ) -> tuple[list[Obstacle], dict[str, Any]]:
         return obstacles_from_depth(self.depth(image), hfov_deg, camera_height_m, lens_xy)
+
+    def ground(
+        self,
+        image: np.ndarray,
+        hfov_deg: float,
+        camera_height_m: float,
+        lens_xy: tuple[float, float] = (0.0, 0.0),
+    ) -> Ground | None:
+        return ground_from_depth(self.depth(image), hfov_deg, camera_height_m, lens_xy)
 
 
 class ObstacleWatcher:

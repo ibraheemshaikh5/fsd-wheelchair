@@ -114,7 +114,7 @@ def options(paths: dict[str, np.ndarray]) -> dict[str, str]:
     return {**listed, **OTHERS}
 
 
-def _in_view(pixels: np.ndarray, width: int, height: int) -> np.ndarray:
+def in_view(pixels: np.ndarray, width: int, height: int) -> np.ndarray:
     """The pixels that are in the picture: not behind the lens, far below it, or off a side.
 
     A little below the bottom edge is kept, so a line starts at the edge and not at the
@@ -124,12 +124,12 @@ def _in_view(pixels: np.ndarray, width: int, height: int) -> np.ndarray:
     return pixels[~np.isnan(x) & (x >= 0) & (x < width) & (y < height * 1.3)]
 
 
-def _guides(pen: ImageDraw.ImageDraw, setup: ChairSetup, size: tuple[int, int]) -> None:
+def guides(pen: ImageDraw.ImageDraw, setup: ChairSetup, size: tuple[int, int]) -> None:
     """Thin lines where the chair's sides pass if it drives straight, with distance marks."""
     front, half = setup.chair.length_m / 2, setup.chair.width_m / 2
     ahead = front + np.arange(0.0, MARKS_M[-1] + 0.5 + 1e-9, SAMPLE_SPACING_M)
     for side in (half, -half):
-        rail = _in_view(
+        rail = in_view(
             setup.to_pixels(np.column_stack([ahead, np.full_like(ahead, side)]), *size), *size
         )
         if len(rail) > 1:
@@ -137,7 +137,7 @@ def _guides(pen: ImageDraw.ImageDraw, setup: ChairSetup, size: tuple[int, int]) 
     font = ImageFont.load_default(size=round(size[0] * 0.017))
     for mark in MARKS_M:
         ends = setup.to_pixels([[front + mark, half], [front + mark, -half]], *size)
-        if len(_in_view(ends, *size)) == 2:
+        if len(in_view(ends, *size)) == 2:
             pen.line([tuple(p) for p in ends], fill=GUIDE, width=2)
             pen.text(
                 (ends[0][0] - 6, ends[0][1]),
@@ -164,7 +164,7 @@ def draw(jpeg: bytes, paths: dict[str, np.ndarray], setup: ChairSetup) -> bytes:
         image = image.resize((DRAW_WIDTH, round(image.height * scale)), Image.Resampling.LANCZOS)
     width, height = image.size
     pen = ImageDraw.Draw(image, "RGBA")
-    _guides(pen, setup, image.size)
+    guides(pen, setup, image.size)
     radius = round(width * 0.022)
     font = ImageFont.load_default(size=round(radius * 1.5))
     front = round(setup.chair.length_m / 2 / SAMPLE_SPACING_M)
@@ -172,8 +172,8 @@ def draw(jpeg: bytes, paths: dict[str, np.ndarray], setup: ChairSetup) -> bytes:
     for label, path in paths.items():
         whole = arc(BEARINGS_DEG[int(label) - 1])
         reach = min(len(whole), len(path) + front)  # the chair's front is ahead of its middle
-        solid = _in_view(setup.to_pixels(whole[:reach], width, height), width, height)
-        rest = _in_view(setup.to_pixels(whole[reach - 1 :], width, height), width, height)
+        solid = in_view(setup.to_pixels(whole[:reach], width, height), width, height)
+        rest = in_view(setup.to_pixels(whole[reach - 1 :], width, height), width, height)
         colour = COLOURS[int(label) - 1]
         if len(solid) > 1:
             line = [tuple(p) for p in solid]

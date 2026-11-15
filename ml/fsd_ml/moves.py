@@ -61,11 +61,15 @@ OVERSHOOT_DEG = 5.0
 MAX_PUSHES = 4
 PICTURE_STILL = 1.0
 STUCK = f"the stick was held {STUCK_S:g} s but the chair isn't moving: stuck or blocked"
-# Holding a heading while driving straight: sideways stick per degree off, and the most of
-# it. Measured at 10% forward: 5% sideways turns the chair about 4 degrees a second, and
-# with none it veers right about 1 degree a second.
-HEADING_PCT_PER_DEG = 1.0
-HEADING_MAX_PCT = 8.0
+# Holding a heading while driving straight: sideways stick per degree off, more of it per
+# degree for every second it stays off (that is what cancels the chair's own steady veer,
+# about 1 degree a second to the right), and the most of each. Measured: at 1% per degree
+# alone a 0.76 m straight ended 4.5 degrees off at both 6% and 10% forward, having pushed
+# no harder than 5%: the casters swing it off in the first half second.
+HEADING_PCT_PER_DEG = 2.5
+HEADING_PCT_PER_DEG_S = 1.0
+HEADING_MAX_PCT = 10.0
+HEADING_VEER_MAX_PCT = 3.0
 # How fast a stick that is not turning the chair is raised.
 RAISE_PCT_PER_S = 6.0
 
@@ -404,7 +408,7 @@ class Runner:
         # believed speed is a guess (nothing measures distance), so a move never runs past
         # MAX_MOVE_S whatever it says.
         seconds, started = min(distance_m / speed + ramp, MAX_MOVE_S), self._clock()
-        y, last, quiet = 0.0, started, None
+        y, last, quiet, veer = 0.0, started, None, 0.0
         while (now := self._clock() - started) < seconds:
             tick = self._clock() - last
             gone += self._chair.speed_for(y) * tick
@@ -424,7 +428,9 @@ class Runner:
             # (hardware/wheelchair.py adds the turn dead zone only when standing), so the
             # heading can be held in proportion. Without the gyro the stick stays straight.
             off = math.degrees(heading - yaw) if self._chair.gyro_fresh() else 0.0
-            x = -max(-HEADING_MAX_PCT, min(HEADING_MAX_PCT, HEADING_PCT_PER_DEG * off))
+            veer += HEADING_PCT_PER_DEG_S * off * tick
+            veer = max(-HEADING_VEER_MAX_PCT, min(HEADING_VEER_MAX_PCT, veer))
+            x = -max(-HEADING_MAX_PCT, min(HEADING_MAX_PCT, HEADING_PCT_PER_DEG * off + veer))
             eased = min(1.0, now / ramp, (seconds - now) / ramp) if ramp > 0 else 1.0
             y = max(1.0, stick * eased)
             if problem := self._chair.drive(x, y if forward else -y, reverse=not forward):

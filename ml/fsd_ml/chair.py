@@ -83,6 +83,23 @@ class ChairSetup:
             [width / 2 - focal * left / depth, height / 2 + focal * below / depth]
         )
 
+    def to_floor(self, pixels_xy: np.ndarray, width: int, height: int) -> np.ndarray:
+        """Pixels of the camera's picture as the points of the floor they show (chair frame).
+
+        The other way round from ``to_pixels``. A pixel at or above the horizon shows no
+        floor and comes back as NaN.
+        """
+        camera = self.camera
+        x, y = np.asarray(pixels_xy, dtype=np.float64).reshape(-1, 2).T
+        focal = (width / 2) / math.tan(math.radians(camera.hfov_deg) / 2)
+        across, down = (x - width / 2) / focal, (y - height / 2) / focal
+        tilt = math.radians(camera.tilt_down_deg)
+        # Along the lens's axis to where the ray meets the floor, the lens's height below it.
+        falls = down * math.cos(tilt) + math.sin(tilt)
+        depth = np.where(falls > 1e-6, camera.height_m / np.where(falls > 1e-6, falls, 1.0), np.nan)
+        ahead = depth * (math.cos(tilt) - down * math.sin(tilt))
+        return np.column_stack([ahead, -across * depth]) + self.lens_xy
+
     def as_dict(self) -> dict:
         ahead, left = self.lens_xy
         return {**asdict(self), "lens_ahead_m": round(ahead, 3), "lens_left_m": round(left, 3)}

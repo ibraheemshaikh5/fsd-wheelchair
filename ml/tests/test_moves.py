@@ -365,7 +365,7 @@ def test_a_straight_holds_its_heading_and_gives_up_on_a_chair_that_is_not_moving
     done = runner(chair)[0].straight(0.6, background=False)
     assert done["outcome"] == "finished" and abs(math.degrees(chair.yaw)) < 3
     steer = [x for x, _ in chair.sticks]
-    assert max(steer) <= 0 and -8 <= min(steer) < 0  # stick left, gently
+    assert max(steer) <= 0 and -10 <= min(steer) < 0  # stick left, within its limit
 
     # The stick is held, the gyro is quiet and the picture is not changing: stuck.
     chair = FakeChair()

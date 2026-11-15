@@ -131,6 +131,9 @@ def test_a_run_is_one_whole_episode_in_the_record(tmp_path: Path) -> None:
     # Every stick command is there, with the believed pose moved on by it.
     ticks = [r for r in records if r["type"] == "tick"]
     assert ticks[-1]["pose"]["x_m"] == pytest.approx(0.2, abs=0.08)
+    logged = [json.loads(line) for line in (session.runlog.folder / "log.jsonl").open()]
+    commands = [line for line in logged if line["event"] == "command"]
+    assert commands[-1]["pose"] == ticks[-1]["pose"] and "yaw_deg" in commands[-1]
     assert {"stick", "frame", "yaw_deg", "gyro_fresh", "camera_fresh"} <= set(ticks[0])
     # With no camera at all, that is warned of, not passed over.
     assert "warning" in kinds

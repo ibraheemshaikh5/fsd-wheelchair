@@ -14,6 +14,17 @@ command or decision::
      "stick": [x, y],                # percent sent, x right, y forward; null if none was
      "sent": true, "problem": null,  # whether it reached the chair, and why not
      "model": {...},                 # what the model said: its path, or the pilot's tool call
+     "asked": [x, y],                # the stick asked for, before it was rounded and capped
+     "yaw_deg": 12.3,                # the gyro's summed yaw (positive left) and its freshness
+     "gyro_fresh": true,
+     "pose": {"x_m": 1.2, "y_m": 0.1},  # believed: metres from where the connection began,
+                                     # along the gyro's zero heading and to its left, from
+                                     # the calibrated speed of the stick sent and the yaw
+     "frame_seen_n": 1236,           # the count and age of the frame the command was given
+     "frame_age_s": 0.06,            # on (``frame`` is the newest one saved, at most 10 a
+     "camera_fresh": true,           # second), and whether that is under half a second
+     "obstacle_age_s": 0.12,         # how old the obstacle sense's picture was
+     "action": 3,                    # the move of a run it belongs to (see episodes below)
      "picture": "frames/0001234.picks.jpg",  # gemini only: the frame as the model was shown it
      "board": {...}}                 # the board's telemetry at that moment
 
@@ -31,11 +42,10 @@ seconds), ``mono`` (monotonic seconds) and ``type``:
 - ``episode_start``: the task, the kind of run, the code's git commit, the camera and chair
   calibration (ml/chair.json), every bench setting, and the model (name, thinking, its
   prompt file and that file's sha256).
-- ``tick``: one per stick command (about 20 a second while a move is under way): the stick
-  asked for and sent, the frame it was given on (file, count, when taken, its age), the
-  gyro's summed ``yaw_deg``, the believed ``pose`` (metres ahead and left of where the
-  episode began, and heading; from the gyro and the calibrated speed, so believed not
-  measured), the age of the obstacle sense's picture, and whether gyro and camera are fresh.
+- ``tick``: one per stick command (about 20 a second while a move is under way), with
+  everything a ``command`` line has: the stick asked for and sent, the frame it was given
+  on, the gyro's summed ``yaw_deg``, the believed ``pose``, the age of the obstacle sense's
+  picture, and whether gyro and camera are fresh.
 - ``model_call``: one per look: the picture exactly as the model was sent it (``picture``),
   the raw frame, the full prompt text, what was on offer, the model's raw output and what
   was made of it, how long it took, and the tokens.
@@ -61,7 +71,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import subprocess
 import threading
 import time
@@ -159,11 +168,6 @@ class Episode:
         self._began = time.monotonic()
         self._counts: Counter[str] = Counter()
         self._stops: Counter[str] = Counter()
-        # The believed pose: metres ahead and left of where the episode began, the yaw then,
-        # and when it was last moved on.
-        self._xy = [0.0, 0.0]
-        self._yaw0: float | None = None
-        self._tick_s: float | None = None
         self.write("episode_start", episode=number, code=code_version(), **header)
 
     def write(self, kind: str, /, **fields: Any) -> None:
@@ -177,26 +181,6 @@ class Episode:
                 lines.write(line + "\n")
         except (OSError, TypeError, ValueError):
             pass
-
-    def tick(self, yaw_rad: float, speed_mps: float, **fields: Any) -> None:
-        """One stick command. ``speed_mps`` is what the stick sent is believed to give
-        (negative backing); the pose is moved on by it, along the gyro's heading, for the
-        time since the last tick."""
-        now = time.monotonic()
-        if self._yaw0 is None:
-            self._yaw0 = yaw_rad
-        heading = yaw_rad - self._yaw0
-        # A long gap is not driving: the board stops the chair when commands stop coming.
-        step = speed_mps * min(now - self._tick_s, 0.3) if self._tick_s is not None else 0.0
-        self._tick_s = now
-        self._xy[0] += step * math.cos(heading)
-        self._xy[1] += step * math.sin(heading)
-        pose = {
-            "x_m": round(self._xy[0], 3),
-            "y_m": round(self._xy[1], 3),
-            "heading_deg": round(math.degrees(heading), 2),
-        }
-        self.write("tick", yaw_deg=round(math.degrees(yaw_rad), 2), pose=pose, **fields)
 
     def end(self, outcome: Any, reason: Any) -> None:
         self.write(
