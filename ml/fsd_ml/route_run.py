@@ -38,7 +38,7 @@ from fsd_ml.candidates import PLAN_SLACK_M
 from fsd_ml.chair_link import to_stick
 from fsd_ml.moves import STUCK, STUCK_S, _degrees
 from fsd_ml.pipeline.control import follow
-from fsd_ml.pipeline.footprint import SAMPLE_SPACING_M, stop_distance_m, turn_room_deg
+from fsd_ml.pipeline.footprint import SAMPLE_SPACING_M, stop_distance_m
 from fsd_ml.route_pilot import Plan, Pose, Remembered, RoutePilot, into, out_of
 
 if TYPE_CHECKING:
@@ -75,6 +75,9 @@ class RouteRun:
         # the chair points and stays put in a turn. The chair's own middle is ahead of it.
         self._pivot = self._setup.chair.pivot_behind_m
         self._axle = [-self._pivot, 0.0]
+        # The run's frame is where the chair stands and faces as the run begins: the gyro's
+        # own angle counts from when the phone connected, so it is taken off.
+        self._yaw0 = self._chair.yaw_rad()
         self._xy = [0.0, 0.0]
         self._driven = 0.0
         self._v = 0.0
@@ -88,7 +91,7 @@ class RouteRun:
         self._moving_since: float | None = None
         self._stood_since = self._clock()
         self._quiet: tuple[float, float] | None = None
-        self._was_yaw = self._chair.yaw_rad()
+        self._was_yaw = 0.0
         # The look being asked, if any, and where the chair was when the last one was taken.
         self._asking: threading.Thread | None = None
         self._answer: dict[str, Any] | None = None
@@ -101,11 +104,14 @@ class RouteRun:
         self._notes: list[str] = []
         self._happened: list[str] = []
         self._goal: tuple[float, float] | None = None
-        self._remembered = Remembered(self._setup)
+        self._remembered = Remembered(self._setup, (0.0, 0.0, 0.0))
         self._seen_s = 0.0
 
+    def _heading(self) -> float:
+        return self._chair.yaw_rad() - self._yaw0
+
     def _pose(self) -> Pose:
-        return (self._xy[0], self._xy[1], self._chair.yaw_rad())
+        return (self._xy[0], self._xy[1], self._heading())
 
     def _pose_at(self, when_s: float) -> Pose:
         """The pose nearest a moment in the last few seconds."""
@@ -135,7 +141,7 @@ class RouteRun:
 
     def _move_on(self, now: float) -> None:
         """Move the believed pose on by what was last commanded."""
-        yaw = self._chair.yaw_rad()
+        yaw = self._heading()
         step = self._v * (now - self._at_s)
         self._at_s = now
         self._driven += abs(step)
@@ -144,6 +150,7 @@ class RouteRun:
         self._xy[0] = self._axle[0] + self._pivot * math.cos(yaw)
         self._xy[1] = self._axle[1] + self._pivot * math.sin(yaw)
         self._poses.append((now, self._pose()))
+        self._remembered.stand(self._pose())
 
     def _remember(self) -> None:
         """Take in the obstacle sense's newest picture, placed where the chair was then."""
@@ -196,7 +203,8 @@ class RouteRun:
             )
         goal = None if self._goal is None else tuple(into(pose, [self._goal])[0])
         self._looks += 1
-        happened, self._happened = self._happened, []
+        happened = [*self._happened, *self._remembered.beside(pose, self._driven)]
+        self._happened = []
         self._asked_xy = (self._xy[0], self._xy[1])
         self._runner._phase(f"look {self._looks}: the pilot is thinking", steps=self._looks)
         obstacles = self._remembered.around(pose)
@@ -281,7 +289,7 @@ class RouteRun:
         if plan.action == "back_up":
             outcome, text = self._runner._back(route_pilot.BACK_UP_M)
             backed = float(self._runner.achieved.get("believed_m", 0.0))
-            yaw = self._chair.yaw_rad()
+            yaw = self._heading()
             self._axle[0] -= backed * math.cos(yaw)
             self._axle[1] -= backed * math.sin(yaw)
         else:
@@ -341,22 +349,13 @@ class RouteRun:
         """Turn on the spot, as far as the chair's body has room to: a turn swings its front
         and rear through floor the camera is not looking at, so what was seen there earlier
         in the run decides. What it could not turn is said."""
-        body = self._setup.chair
-        room = turn_room_deg(
-            degrees_left, self._remembered.around(self._pose(), self._driven), body
-        )
-        if abs(room) < MIN_TURN_DEG:
-            self._chair.note("refused", call="turn", asked_deg=degrees_left, room_deg=room)
-            return "failed", (
-                f"asked {_degrees(degrees_left)}, did not turn: the chair's body would hit"
-                " something beside it that it saw earlier"
-            )
+        room, why = self._remembered.turn_room(self._pose(), degrees_left, self._driven)
+        if abs(room) < min(MIN_TURN_DEG, abs(degrees_left)):
+            self._chair.note("refused", call="turn", asked_deg=degrees_left, room_deg=room, why=why)
+            return "failed", f"asked {_degrees(degrees_left)}, did not turn: {why}"
         outcome, text = self._runner._turn(room)
         if room != degrees_left:
-            text += (
-                f" (you asked for {_degrees(degrees_left)}; further round, the chair's body"
-                " would hit something beside it that it saw earlier)"
-            )
+            text += f" (you asked for {_degrees(degrees_left)}; further round, {why})"
         return outcome, text
 
     def _end_route(self, reason: str, outcome: str, why: str = "") -> str:

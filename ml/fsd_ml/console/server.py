@@ -165,6 +165,7 @@ class Session:
         # when that was last moved on, and the forward stick last sent.
         self._pose_xy = [0.0, 0.0]
         self._axle_xy = [0.0, 0.0]
+        self._run_origin = (0.0, 0.0, 0.0)
         self._pose_s = 0.0
         self._stick_y = 0.0
         self._waiting_logged: str | None = None
@@ -509,6 +510,8 @@ class Session:
             "yaw_deg": round(math.degrees(self.yaw_rad()), 2),
             "gyro_fresh": self.gyro_fresh(),
             "pose": {"x_m": round(self._pose_xy[0], 3), "y_m": round(self._pose_xy[1], 3)},
+            # The same, from where the episode going began and the way the chair faced then.
+            "pose_in_run": self._pose_in_run(),
             "obstacle_age_s": round(self.sight.age_s(), 3)
             if self.sight and self.sight.at_s
             else None,
@@ -521,6 +524,28 @@ class Session:
                 self.episode.write("model_call", **line, **model)
         board = self._sender.telemetry() if self._sender else None
         self.runlog.write("command", **line, model=model, board=board)
+
+    def _begin_episode(self, **header: Any) -> None:
+        """Open the record of a run or of driving by hand, and note where it begins."""
+        if self.runlog is not None:
+            self._run_origin = (self._pose_xy[0], self._pose_xy[1], self.yaw_rad())
+            self.episode = self.runlog.episode(
+                calibration=self.setup.as_dict(),
+                settings=self.bench.settings(),
+                session=self.runlog.folder.name,
+                **header,
+            )
+
+    def _pose_in_run(self) -> dict[str, float] | None:
+        if self.episode is None:
+            return None
+        x0, y0, yaw0 = self._run_origin
+        east, north = self._pose_xy[0] - x0, self._pose_xy[1] - y0
+        return {
+            "x_m": round(east * math.cos(yaw0) + north * math.sin(yaw0), 3),
+            "y_m": round(-east * math.sin(yaw0) + north * math.cos(yaw0), 3),
+            "heading_deg": round(math.degrees(self.yaw_rad() - yaw0), 2),
+        }
 
     def _log_waiting(self, why: str | None) -> None:
         """Record why nothing was decided, once each time the reason changes."""
@@ -600,16 +625,9 @@ class Session:
         self._engage()
         self._manual, self.chair_steps = True, None
         self.log("manual on")
-        if self.runlog is not None:
-            # Driving by hand is recorded as an episode too, so a demonstration made while
-            # the camera had stopped is marked as such.
-            self.episode = self.runlog.episode(
-                kind="manual",
-                task=None,
-                calibration=self.setup.as_dict(),
-                settings=self.bench.settings(),
-                session=self.runlog.folder.name,
-            )
+        # Driving by hand is recorded as an episode too, so a demonstration made while the
+        # camera had stopped is marked as such.
+        self._begin_episode(kind="manual", task=None)
         return {"manual": True}
 
     def _mode(self) -> str:
@@ -911,22 +929,18 @@ class Session:
             pilot = RoutePilot(params["say"])
         elif chosen["kind"] == "pilot":
             pilot = Pilot(params["say"])
-        if self.runlog is not None:
-            self.episode = self.runlog.episode(
-                case=case_id,
-                kind=chosen["kind"],
-                task=params.get("say"),
-                params=params,
-                calibration=self.setup.as_dict(),
-                settings=self.bench.settings(),
-                model=pilot
-                and {
-                    "name": pilot.model,
-                    "thinking": pilot.thinking,
-                    "prompt": prompt_stamp(pilot.prompt_file),
-                },
-                session=self.runlog.folder.name,
-            )
+        self._begin_episode(
+            case=case_id,
+            kind=chosen["kind"],
+            task=params.get("say"),
+            params=params,
+            model=pilot
+            and {
+                "name": pilot.model,
+                "thinking": pilot.thinking,
+                "prompt": prompt_stamp(pilot.prompt_file),
+            },
+        )
         looks = max(1, round(self.setting("pilot_max_looks")))
         try:
             if chosen["kind"] == "straight":

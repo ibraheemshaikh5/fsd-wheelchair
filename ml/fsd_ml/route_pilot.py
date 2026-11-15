@@ -55,7 +55,13 @@ from PIL import Image, ImageDraw, ImageFont
 from fsd_ml import candidates
 from fsd_ml.chair import Body, ChairSetup
 from fsd_ml.obstacles import Ground
-from fsd_ml.pipeline.footprint import BESIDE_M, SAMPLE_SPACING_M, beside, first_hit_from_here
+from fsd_ml.pipeline.footprint import (
+    BESIDE_M,
+    SAMPLE_SPACING_M,
+    beside,
+    first_hit_from_here,
+    turn_room_deg,
+)
 from fsd_ml.pipeline.types import Obstacle
 
 MODEL = os.environ.get("GEMINI_PILOT_MODEL", "gemini-robotics-er-2-preview")
@@ -65,7 +71,7 @@ PROMPT_FILE = Path(__file__).resolve().parent.parent / "route_pilot_prompt.md"
 
 # What the model may answer with, and the turns among them (degrees to the left).
 ACTIONS = ("route", "look_left", "look_right", "look_behind", "back_up", "arrived", "give_up")
-TURNS = {"look_left": 60.0, "look_right": -60.0, "look_behind": 180.0}
+TURNS = {"look_left": 30.0, "look_right": -30.0, "look_behind": 180.0}
 BACK_UP_M = 0.3
 # A route point nearer than this is under the chair: the path starts at its middle anyway.
 NEAR_M = 0.5
@@ -300,57 +306,126 @@ def into(pose: Pose, points_xy: np.ndarray) -> np.ndarray:
     )
 
 
-# How long an obstacle that has left the picture is still kept clear of, and how big the
-# cells are that they are remembered in.
-REMEMBER_S = 20.0
+# How big the cells are that obstacles and seen floor are remembered in.
 REMEMBER_CELL_M = 0.15
 # A remembered obstacle is taken to be bigger by this share of how far the chair has driven
 # since it was last seen: where it is, is only as good as the chair's sense of how far it
 # has gone, which is speed times time.
 DRIFT_SHARE = 0.08
+# Floor counts as seen from this near the lens to this far, and this much inside the edge
+# of the picture.
+SEEN_NEAR_M, SEEN_FAR_M, SEEN_EDGE_DEG = 0.45, 3.0, 6.0
+# Where a run starts, the floor this far round the point the chair turns about is taken to
+# be clear: the person who started it put the chair where it can turn. Nothing else the
+# camera has not looked at is.
+START_CLEAR_M = 1.1
+# A remembered obstacle up to this far behind one seen now is an older sighting of the same
+# thing, placed a little off by the chair's drifting sense of where it is: it is replaced.
+SAME_THING_M = 0.5
 
 
 class Remembered:
-    """Obstacles the camera has seen in this run, kept after they leave the picture.
+    """What the camera has seen in this run, kept after it leaves the picture: the
+    obstacles, and the floor that was seen to be clear.
 
     The obstacle sense only knows what is in the current picture, and the chair's body is
     beside and behind the camera: a thing the chair is passing leaves the picture while the
-    chair can still hit it. So what was seen is kept, in the run's frame, for REMEMBER_S.
-    What is in the picture now always replaces what was remembered there, so nothing that
-    has moved away, and no doubled copy from a drifting sense of position, stays in view.
+    chair can still hit it, and a turn on the spot swings the body over floor the camera is
+    not looking at. So both are kept, in the run's frame, for the whole run. An obstacle is
+    forgotten only when a later picture looks straight at where it was and it is not there.
+    Floor is known clear only if the camera saw it with nothing on it or the chair has stood
+    on it; floor that was never seen is not clear, it is unknown.
     """
 
-    def __init__(self, setup: ChairSetup) -> None:
+    def __init__(self, setup: ChairSetup, pose: Pose) -> None:
         self._setup = setup
         # By cell: where (run's frame), how big, when last seen, and how far the chair had
         # driven by then.
         self._cells: dict[tuple[int, int], tuple[float, float, float, float, float]] = {}
         self._driven_m = 0.0
+        # The cells of floor known to be clear.
+        self._clear: set[tuple[int, int]] = set()
+        camera = setup.camera
+        # The floor a picture shows, as points in the chair's frame, with each one's bearing
+        # and distance from the lens.
+        half = camera.hfov_deg / 2 - SEEN_EDGE_DEG
+        bearing, distance = np.meshgrid(
+            np.radians(np.arange(-half, half + 1e-9, 2.0)), np.arange(SEEN_NEAR_M, SEEN_FAR_M, 0.12)
+        )
+        self._bearing, self._distance = bearing.ravel(), distance.ravel()
+        self._view = (
+            np.column_stack(
+                [self._distance * np.cos(self._bearing), self._distance * np.sin(self._bearing)]
+            )
+            + setup.lens_xy
+        )
+        # The chair's own body, as points in its frame.
+        body = setup.chair
+        along = np.arange(-body.length_m / 2, body.length_m / 2 + 0.05, 0.1)
+        across = np.arange(-body.width_m / 2, body.width_m / 2 + 0.05, 0.1)
+        self._body = np.array([(a, b) for a in along for b in across])
+        ring = [
+            (r * math.cos(a), r * math.sin(a))
+            for r in np.arange(0.0, START_CLEAR_M + 1e-9, 0.1)
+            for a in np.arange(0.0, 2 * math.pi, 0.1)
+        ]
+        self._mark(out_of(pose, np.array(ring) + [-body.pivot_behind_m, 0.0]))
+
+    @staticmethod
+    def _keys(points_xy: np.ndarray) -> set[tuple[int, int]]:
+        return {(int(a), int(b)) for a, b in np.round(points_xy / REMEMBER_CELL_M)}
+
+    def _mark(self, points_xy: np.ndarray) -> None:
+        self._clear |= self._keys(points_xy)
+
+    def stand(self, pose: Pose) -> None:
+        """The chair is here: the floor under it is clear."""
+        self._mark(out_of(pose, self._body))
+
+    def _in_sight(
+        self, points_xy: np.ndarray, obstacles: Sequence[Obstacle], behind_m: float = 0.0
+    ) -> np.ndarray:
+        """Which points (chair's frame) a picture taken from here shows the floor at: in
+        view, in range, and not behind or under any of the obstacles it found. A point less
+        than ``behind_m`` behind an obstacle still counts as shown: that is how a remembered
+        copy of the same thing, placed a little off, is told from something hidden by it."""
+        ahead, left = (
+            np.asarray(points_xy, dtype=np.float64).reshape(-1, 2) - self._setup.lens_xy
+        ).T
+        bearing, distance = np.arctan2(left, ahead), np.hypot(ahead, left)
+        half = math.radians(self._setup.camera.hfov_deg / 2 - SEEN_EDGE_DEG)
+        shown = (np.abs(bearing) < half) & (distance > SEEN_NEAR_M) & (distance < SEEN_FAR_M)
+        for obstacle in obstacles:
+            o_ahead, o_left = (
+                obstacle.x - self._setup.lens_xy[0],
+                obstacle.y - self._setup.lens_xy[1],
+            )
+            o_distance = math.hypot(o_ahead, o_left)
+            wide = math.atan2(obstacle.radius_m + 0.08, max(o_distance, 0.1))
+            behind = np.abs(bearing - math.atan2(o_left, o_ahead)) < wide
+            shown &= ~(behind & (distance > o_distance - obstacle.radius_m - 0.08 + behind_m))
+        return shown
 
     def see(self, obstacles: Sequence[Obstacle], pose: Pose, at_s: float, driven_m: float) -> None:
         """Take in what one picture showed, taken at ``pose`` at time ``at_s``, when the
         chair had driven ``driven_m`` in all."""
         self._driven_m = driven_m
-        camera = self._setup.camera
         if self._cells:
-            # Forget what this picture should have shown again: it is in view and in range.
-            placed = np.array([cell[:2] for cell in self._cells.values()])
-            ahead, left = (into(pose, placed) - self._setup.lens_xy).T
-            aside = np.abs(np.degrees(np.arctan2(left, ahead)))
-            shown = (
-                (aside < camera.hfov_deg / 2 - 8) & (ahead > 0.6) & (np.hypot(ahead, left) < 3.0)
-            )
-            old = np.array([at_s - cell[3] > REMEMBER_S for cell in self._cells.values()])
+            # Forget what this picture looked straight at and did not find again.
+            placed = into(pose, np.array([cell[:2] for cell in self._cells.values()]))
+            gone = self._in_sight(placed, obstacles, SAME_THING_M)
             self._cells = {
                 key: cell
-                for (key, cell), gone in zip(self._cells.items(), shown | old, strict=True)
-                if not gone
+                for (key, cell), lost in zip(self._cells.items(), gone, strict=True)
+                if not lost
             }
+        self._mark(out_of(pose, self._view[self._in_sight(self._view, obstacles)]))
         if obstacles:
             where = out_of(pose, np.array([[o.x, o.y] for o in obstacles]))
             for (x, y), obstacle in zip(where, obstacles, strict=True):
                 key = (round(x / REMEMBER_CELL_M), round(y / REMEMBER_CELL_M))
                 self._cells[key] = (float(x), float(y), obstacle.radius_m, at_s, driven_m)
+            self._clear -= set(self._cells)
 
     def around(self, pose: Pose, driven_m: float | None = None) -> list[Obstacle]:
         """Everything remembered, in the chair's frame at ``pose``, each as much bigger as
@@ -370,6 +445,52 @@ class Remembered:
             )
             for n, ((ahead, left), cell) in enumerate(zip(where, cells, strict=True))
         ]
+
+    def turn_room(self, pose: Pose, degrees_left: float, driven_m: float) -> tuple[float, str]:
+        """How far of a turn on the spot the chair may make from ``pose``, and what stops
+        it going further ("" if nothing).
+
+        Its body must not touch anything remembered (footprint.turn_room_deg), and must
+        swing only over floor known to be clear: where the camera never looked, there may
+        be anything. In 5 degree steps.
+        """
+        body = self._setup.chair
+        room = turn_room_deg(degrees_left, self.around(pose, driven_m), body)
+        why = "" if room == degrees_left else "its body would hit something it saw earlier"
+        pivot = np.array([-body.pivot_behind_m, 0.0])
+        way, known = math.copysign(1.0, degrees_left), 0.0
+        for step in np.arange(5.0, abs(room) + 5.0, 5.0):
+            angle = math.radians(way * min(step, abs(room)))
+            turn = np.array(
+                [[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]]
+            )
+            swung = (self._body - pivot) @ turn.T + pivot
+            if not self._keys(out_of(pose, swung)) <= self._clear | set(self._cells):
+                return way * known, "its body would swing over floor the camera has not seen"
+            known = min(step, abs(room))
+        return room, why
+
+    def beside(self, pose: Pose, driven_m: float) -> list[str]:
+        """What is remembered close beside or behind the chair, out of the picture, in words."""
+        body, said = self._setup.chair, []
+        half = math.radians(self._setup.camera.hfov_deg / 2 - SEEN_EDGE_DEG)
+        sides: dict[str, float] = {}
+        for obstacle in self.around(pose, driven_m):
+            ahead, left = obstacle.x - self._setup.lens_xy[0], obstacle.y - self._setup.lens_xy[1]
+            if abs(math.atan2(left, ahead)) < half and ahead > SEEN_NEAR_M:
+                continue  # in the picture: the model can see it
+            if abs(obstacle.x) > body.length_m / 2 + 0.6:
+                continue
+            gap = abs(obstacle.y) - body.width_m / 2 - obstacle.radius_m
+            side = "left" if obstacle.y > 0 else "right"
+            if gap < 0.8:
+                sides[side] = min(sides.get(side, math.inf), max(0.0, gap))
+        for side, gap in sides.items():
+            said.append(
+                f"Out of the picture, remembered from earlier: something is about {gap:.1f} m"
+                f" from the chair's {side} side."
+            )
+        return said
 
 
 def hidden(goal: tuple[float, float], ground: Ground | None, setup: ChairSetup) -> bool:

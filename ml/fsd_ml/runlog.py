@@ -19,7 +19,10 @@ command or decision::
      "gyro_fresh": true,
      "pose": {"x_m": 1.2, "y_m": 0.1},  # believed: metres from where the connection began,
                                      # along the gyro's zero heading and to its left, from
-                                     # the calibrated speed of the stick sent and the yaw
+                                     # the calibrated speed of the stick sent and the yaw.
+                                     # NOT from the start of a run: for that,
+     "pose_in_run": {"x_m": .., "y_m": .., "heading_deg": ..},  # metres ahead and left of
+                                     # where the episode began, and the turn since
      "frame_seen_n": 1236,           # the count and age of the frame the command was given
      "frame_age_s": 0.06,            # on (``frame`` is the newest one saved, at most 10 a
      "camera_fresh": true,           # second), and whether that is under half a second

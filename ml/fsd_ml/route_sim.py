@@ -319,6 +319,7 @@ def run(name: str, work: Path) -> dict[str, Any]:
         "closest_m": round(world.closest_m, 2),
         "worst_drift_m": round(max(drift, default=0.0), 2),
         "moves_ended_early": stops,
+        "turns_refused": sum(1 for e in ends if e["type"] == "refused"),
         "why": [
             e["detail"]
             for e in ends

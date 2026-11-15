@@ -71,3 +71,30 @@ def test_a_drawn_route_is_kept_only_on_floor_and_cut_short_of_what_it_meets():
     sky = route_pilot.Plan("route", points=(*drawn((1.0, 0.0), (2.0, 0.0)).points, (0.5, 0.2)))
     kept = route_pilot.interpret(sky, None, [], setup, 0.2, 0.4)
     assert "point 3" in kept.said and np.hypot(*(kept.path[-1] - (2.0, 0.0))) < 0.15
+
+
+def test_a_turn_on_the_spot_needs_floor_known_to_be_clear_and_nothing_is_forgotten_by_time():
+    from fsd_ml.route_pilot import Remembered
+
+    setup = ChairSetup()
+    start = (0.0, 0.0, 0.0)
+    memory = Remembered(setup, start)
+    # Where a run starts, the chair may turn: the person starting it put it there.
+    assert memory.turn_room(start, -30.0, 0.0) == (-30.0, "")
+    # It drives 3 m on, seeing open floor ahead all the way and a box that ends up beside it.
+    for step in range(31):
+        pose = (step * 0.1, 0.0, 0.0)
+        box = Obstacle("box", "object", 3.3 - pose[0], -0.75, radius_m=0.09)
+        memory.stand(pose)
+        memory.see([box] if box.x > 0.8 else [], pose, at_s=step * 0.3, driven_m=step * 0.1)
+    there = (3.0, 0.0, 0.0)
+    # Long after the box left the picture, a turn toward it is still refused...
+    memory.see([], there, at_s=500.0, driven_m=3.0)
+    room, why = memory.turn_room(there, -60.0, 3.0)
+    assert abs(room) < 30 and "saw earlier" in why
+    # ...the turn away from it, over floor seen on the way, is allowed...
+    assert memory.turn_room(there, 30.0, 3.0) == (30.0, "")
+    # ...and a chair set down somewhere it never looked at may not swing round blind.
+    blind = Remembered(setup, start)
+    room, why = blind.turn_room((6.0, 4.0, 1.0), 30.0, 0.0)
+    assert room == 0 and "not seen" in why

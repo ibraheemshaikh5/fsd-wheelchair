@@ -46,12 +46,28 @@ Answer with one action.
   - If the floor in front of the white triangle is red all the way across, there is no room
     to drive forward from here: look left or right for a way, or back up.
   - If the chair stops short it tells you where and why. Believe it, and draw another way.
-- `look_left`, `look_right`: turn 60 degrees on the spot, to see what is beside you.
-  `look_behind`: turn right round. Use these to search for the goal or for a way through.
-  Keep searching the same way round, so you do not look twice at the same place.
+- `look_left`, `look_right`: turn 30 degrees on the spot, to see more to that side.
+  `look_behind`: turn right round. Use these to search for the goal or for a way through
+  when the chair is standing with no route to draw. Keep searching the same way round, so
+  you do not look twice at the same place.
+  - Turning swings the chair's body, which you cannot see: it reaches a metre in front of
+    the point the chair turns about. The chair turns only over floor it has seen to be
+    clear, so a look may be cut short or refused next to things. Then drive on first, to
+    where there is room, and look from there.
+  - To face something you can see, do not look: draw a route toward it. The chair turns to
+    face the start of a route by exactly as much as it needs.
 - `back_up`: back straight up 0.3 m, where you cannot see. Only to get out of a tight spot.
 - `arrived`: the task is done. The chair stops where it is.
 - `give_up`: the task cannot be done. Say why in the note.
+
+## Going round things
+
+- When the goal is behind something, the way to it is round that thing, not toward the
+  goal. Keep to your route round it until you are past; do not give it up half way to look
+  toward the goal, which only shows you the thing in the way. You are told where the goal
+  is believed to be even when you cannot see it.
+- You are told what the chair remembers close beside it, out of the picture. Do not draw a
+  route that turns toward that side until you have driven past it.
 
 ## Reaching the goal
 
