@@ -18,8 +18,8 @@ DEFAULTS: dict[str, float] = {
     "drive_stick_pct": 6.0,
     "ramp_s": 0.8,
     # Stick while turning on the spot, and how early it is released (the chair coasts on).
-    "turn_stick_pct": 1.0,
-    "turn_lead_deg": 10.0,
+    "turn_stick_pct": 12.0,
+    "turn_lead_deg": 2.0,
     "turn_done_deg": 5.0,
     "turn_passes": 3.0,
     # Standing still between one move and the next.
