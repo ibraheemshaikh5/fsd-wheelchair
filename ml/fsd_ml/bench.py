@@ -45,7 +45,7 @@ CASES: list[dict[str, Any]] = [
     {
         "id": "pilot",
         "title": "Claude drives to a named thing",
-        "does": "Claude Sonnet sees the camera, picks each move itself (forward, back, turn), "
+        "does": "Claude sees the camera, picks each move itself (forward, back, turn), "
         "and says when it has arrived. The chair still stops itself for obstacles.",
         "kind": "pilot",
         "params": {"say": "go to the red pillow"},
