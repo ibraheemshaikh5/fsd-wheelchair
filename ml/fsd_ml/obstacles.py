@@ -196,13 +196,15 @@ class DepthObstacles:
 class ObstacleWatcher:
     """Looks for obstacles in the newest frame, in the background, so driving never waits on it.
 
-    ``look`` gives the newest frame, or None when there is none fresh enough; ``find`` turns
-    a frame into obstacles. What is published is always from one frame, the latest looked at.
+    ``look`` gives the newest frame and how long ago it was taken, or None when there is
+    none fresh enough; ``find`` turns a frame into obstacles. What is published is always
+    from one frame, the latest looked at, and ``age_s`` says how old that picture is now:
+    a moving chair is that much closer to everything in it.
     """
 
     def __init__(
         self,
-        look: Callable[[], np.ndarray | None],
+        look: Callable[[], tuple[np.ndarray, float] | None],
         find: Callable[[np.ndarray], tuple[list[Obstacle], dict[str, Any]]],
         period_s: float = 0.1,
         clock: Callable[[], float] = time.monotonic,
@@ -213,6 +215,7 @@ class ObstacleWatcher:
         self.obstacles: tuple[Obstacle, ...] = ()
         # For the page: floor, scale, how long the look took; or the problem.
         self.info: dict[str, Any] = {}
+        # When the picture behind ``obstacles`` was taken.
         self.at_s = 0.0
 
     def start(self) -> None:
@@ -221,22 +224,26 @@ class ObstacleWatcher:
     def stop(self) -> None:
         self._stop.set()
 
+    def age_s(self) -> float:
+        return self._clock() - self.at_s
+
     def fresh(self, within_s: float = 1.0) -> tuple[Obstacle, ...] | None:
         """What stands in view, or None when the floor has not been seen recently."""
-        if self._clock() - self.at_s > within_s or not self.info.get("floor"):
+        if self.age_s() > within_s or not self.info.get("floor"):
             return None
         return self.obstacles
 
     def once(self) -> None:
         now = self._clock()
-        image = self._look()
-        if image is None:
+        looked = self._look()
+        if looked is None:
             return
+        image, age_s = looked
         started = time.perf_counter()
         found, info = self._find(image)
         self.obstacles = tuple(found)
         self.info = {**info, "ms": round((time.perf_counter() - started) * 1000.0, 1)}
-        self.at_s = now
+        self.at_s = now - age_s
 
     def _run(self) -> None:
         while not self._stop.is_set():

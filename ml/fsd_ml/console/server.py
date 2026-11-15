@@ -362,9 +362,9 @@ class Session:
         if obstacles.available():
             depth, camera = obstacles.DepthObstacles(), self.setup.camera
 
-            def look() -> np.ndarray | None:
+            def look() -> tuple[np.ndarray, float] | None:
                 frame = feed.fresh_frame()
-                return frame.image if frame else None
+                return (frame.image, frame.age_s(time.monotonic())) if frame else None
 
             self.sight = obstacles.ObstacleWatcher(
                 look,
@@ -698,15 +698,24 @@ class Session:
             return {}
         return candidates.fan(seen, self.setup, self.setting("path_clearance_m"))
 
-    def blocked(self) -> str | None:
+    def picture_change(self) -> float | None:
+        return self.live.picture_change() if self.live else None
+
+    def blocked(self, speed_mps: float = 0.0) -> str | None:
         """Why the chair must not go on: what stands in the next metre straight ahead, and
-        where. None when it is clear, and when no obstacle sense is installed."""
+        where. None when it is clear, and when no obstacle sense is installed.
+
+        What the obstacle sense reports is from a picture taken a moment ago, and a chair
+        driving at ``speed_mps`` has come that much closer to all of it since: the stretch
+        checked and the distance to stop at both grow by speed times the picture's age.
+        """
         if self.sight is None:
             return None
         seen = self.sight.fresh()
         if seen is None:
             return "the obstacle sense has had no sight of the floor for 1 s"
-        ahead = np.arange(0.1, 1.0 + 1e-9, 0.1)
+        moved = max(0.0, speed_mps) * self.sight.age_s()
+        ahead = np.arange(0.1, 1.0 + moved + 1e-9, 0.1)
         # A set move is short and watched, so it keeps a hand's width clear, not the full
         # clearance used when a model picks its own way.
         tight = FootprintConfig(
@@ -714,8 +723,8 @@ class Session:
                 self.setup.chair.width_m, self.setup.chair.length_m, self.setting("clearance_m")
             ),
             caution_m=0.05,
-            slow_distance_m=2.0,
-            stop_distance_m=STOP_M,
+            slow_distance_m=2.0 + moved,
+            stop_distance_m=STOP_M + moved,
         )
         picked = choose(
             [Candidate(np.column_stack([ahead, np.zeros_like(ahead)]), 1.0)], seen, tight
@@ -730,7 +739,7 @@ class Session:
             return None
         # The one in the way, measured from the chair's front and its centre line.
         near = next(o for o in seen if o.id == picked.yielding_to_id)
-        gap = max(0.0, near.x - self.setup.chair.length_m / 2)
+        gap = max(0.0, near.x - self.setup.chair.length_m / 2 - moved)
         side = "left" if near.y > 0 else "right"
         return f"obstacle {gap:.1f} m ahead of the chair's front, {abs(near.y):.1f} m to the {side}"
 

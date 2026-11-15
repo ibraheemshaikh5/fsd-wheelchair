@@ -70,6 +70,7 @@ def _motion(snapshot: SensorSnapshot, now_mono: float) -> dict[str, Any] | None:
         "speed_mps": estimate.speed_mps,
         "speed_source": estimate.speed_source,
         "yaw_rate_dps": estimate.yaw_rate_dps,
+        "yaw_deg": estimate.yaw_deg,
         "accel_fwd_mps2": estimate.accel_fwd_mps2,
         "accel_lat_mps2": estimate.accel_lat_mps2,
         "age_ms": age_ms(snapshot.motion, now_mono),

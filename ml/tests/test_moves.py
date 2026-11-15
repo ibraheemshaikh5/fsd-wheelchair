@@ -41,6 +41,10 @@ class FakeChair:
         }
         self.setup = ChairSetup()
         self.pictures: list[bytes] = []
+        # What the camera says of movement (None: no picture to compare), and how far the
+        # chair veers by itself each time it is driven, in degrees to the left.
+        self.change: float | None = None
+        self.veer = 0.0
 
     def armed(self):
         return self.is_armed
@@ -71,7 +75,10 @@ class FakeChair:
     def speed_for(self, y_pct):
         return y_pct / 12 * 0.2
 
-    def blocked(self):
+    def picture_change(self):
+        return self.change
+
+    def blocked(self, speed_mps=0.0):
         return self.obstacle
 
     def observe(self):
@@ -99,7 +106,7 @@ class FakeChair:
         if self.takeover_at == len(self.sticks):
             return "the rider took over"
         if self.turns:
-            self.yaw += math.radians(-x_pct * 0.4)  # stick right turns the chair right
+            self.yaw += math.radians(-x_pct * 0.4 + self.veer)  # stick right turns it right
         self.x += y_pct / 12 * 0.2 * 0.1
         return None
 
@@ -180,7 +187,7 @@ def test_a_turn_that_cannot_be_measured_or_does_not_happen_is_stopped():
     chair = FakeChair()
     chair.turns = False
     done = runner(chair)[0].turn(90, background=False)
-    assert done["outcome"] == "failed" and "no rotation" in done["reason"] and stopped(chair)
+    assert done["outcome"] == "failed" and "isn't moving" in done["reason"] and stopped(chair)
     assert done["reason"].startswith("asked left 90°, gyro measured left 0°")
 
     # No gyro: the turn never starts.
@@ -289,7 +296,7 @@ def test_gemini_follows_the_path_it_picks_and_is_told_how_it_went():
     done = runner(chair)[0].gemini("go to the door", pilot, background=False)
     assert done["outcome"] == "arrived" and stopped(chair)
     # Path 1 curves left: the chair steered left along it, and the next look was told so.
-    assert chair.yaw > math.radians(15) and all(y > 0 for _, y in chair.sticks)
+    assert chair.yaw > math.radians(15) and all(y >= 0 for _, y in chair.sticks)
     assert "What happened: drove about" in pilot.told[1][0] and pilot.told[1][1] > 15
     assert len(chair.pictures) == 2  # every look's drawn picture goes to the record
 
@@ -340,3 +347,20 @@ def test_a_turn_ends_within_three_degrees_on_a_chair_that_coasts(plant):
         run._state = {"running": True}
         outcome, said = run._turn(asked)
         assert outcome == "finished" and abs(math.degrees(chair.yaw) - asked) <= 3.5, said
+
+
+def test_a_straight_holds_its_heading_and_gives_up_on_a_chair_that_is_not_moving():
+    # A chair that veers right half a degree every tenth of a second is steered back.
+    chair = FakeChair()
+    chair.veer = -0.5
+    done = runner(chair)[0].straight(0.6, background=False)
+    assert done["outcome"] == "finished" and abs(math.degrees(chair.yaw)) < 3
+    steer = [x for x, _ in chair.sticks]
+    assert max(steer) <= 0 and -8 <= min(steer) < 0  # stick left, gently
+
+    # The stick is held, the gyro is quiet and the picture is not changing: stuck.
+    chair = FakeChair()
+    chair.change = 0.3
+    done = runner(chair)[0].straight(0.6, background=False)
+    assert done["outcome"] == "failed" and "isn't moving" in done["reason"] and stopped(chair)
+    assert 15 <= len(chair.sticks) <= 17 and done["reason"].startswith("drove forward about 0.0")
