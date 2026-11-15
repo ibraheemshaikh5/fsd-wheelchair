@@ -90,28 +90,12 @@ def download() -> None:
     fetch_checkpoint()
 
 
-@app.function(
-    image=image,
-    # 24 GB. The model is about 16 GB in memory; move to "L40S" (48 GB) if it runs out.
-    gpu="A10G",
-    volumes={WEIGHTS_PATH: weights},
-    # Raise to 1 during a demo so a container is always up.
-    min_containers=0,
-    scaledown_window=900,
-    # Covers the first download and loading the model.
-    timeout=3600,
-)
-@modal.concurrent(max_inputs=2)
-@modal.asgi_app()
-def serve():
-    from pathlib import Path
-
+def web_app(checkpoint_dir):
+    """The driver's HTTP face (fsd_ml/remote.py) over the checkpoint in ``checkpoint_dir``."""
     from fsd_ml import remote
     from fsd_ml.omnivla import OmniVLADriver
 
-    fetch_checkpoint()
-    driver = OmniVLADriver(Path(CHECKPOINT))
-
+    driver = OmniVLADriver(checkpoint_dir)
     web = FastAPI()
 
     def check(request: Request) -> None:
@@ -129,3 +113,23 @@ def serve():
         return remote.handle(driver, await request.json())
 
     return web
+
+
+@app.function(
+    image=image,
+    # 24 GB. The model is about 16 GB in memory; move to "L40S" (48 GB) if it runs out.
+    gpu="A10G",
+    volumes={WEIGHTS_PATH: weights},
+    # Raise to 1 during a demo so a container is always up.
+    min_containers=0,
+    scaledown_window=900,
+    # Covers the first download and loading the model.
+    timeout=3600,
+)
+@modal.concurrent(max_inputs=2)
+@modal.asgi_app()
+def serve():
+    from pathlib import Path
+
+    fetch_checkpoint()
+    return web_app(Path(CHECKPOINT))
