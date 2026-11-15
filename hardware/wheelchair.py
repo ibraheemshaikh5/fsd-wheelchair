@@ -37,7 +37,7 @@ class Wheelchair:
         for _ in range(60):                 # wait up to 3 s for the board to answer
             if self._stats: return
             time.sleep(0.05)
-        raise ConnectionError(f"no answer from {HOST}:{PORT} (board on? Tailscale up? wheelchaird running?)")
+        raise ConnectionError(f"no answer from {HOST}:{PORT} (board on? Tailscale up? wheelchaird running? another program already driving?)")
 
     @property
     def fsd(self): return self._fsd

@@ -10,6 +10,8 @@ Packet: "x y mode arm session seq". Gaps in UDP (bad Wi-Fi):
   after HANDBACK_S fall back to JOYSTICK mode and LATCH it: FSD stays off until the sender
   re-arms (arm counter changes = user clicked FSD again). Late/out-of-order packets are dropped
   (seq per session), so a delayed old command can never restart motion.
+One sender at a time: packets from a second sender (e.g. teleop left open while the AI drives)
+  are ignored, unanswered, until the current one has been silent for HANDBACK_S.
 If this daemon dies, the MCU's own ~0.25 s watchdog hands control to the real stick.
 Listens only on the Tailscale address (and localhost), so only tailnet devices can drive.
 Each received packet is answered with a stats line.
@@ -88,7 +90,9 @@ def main():
                         except BlockingIOError: break
                         try: px, py, pm, arm, sess, sq = (int(v) for v in data.split()[:6])
                         except ValueError: continue
-                        if sess != session: session, last_seq, latched = sess, -1, False   # new sender
+                        if sess != session:
+                            if t0 - last_rx < HANDBACK_S: continue                          # another sender is driving: ignore
+                            session, last_seq, latched = sess, -1, False                    # new sender takes over
                         if sq <= last_seq: continue                                         # late / duplicate
                         last_seq = sq; x, y, mode, last_rx = px, py, pm, t0
                         if latched and arm != dead_arm: latched = False                     # re-armed
