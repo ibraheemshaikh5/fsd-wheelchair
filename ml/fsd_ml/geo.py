@@ -24,12 +24,6 @@ def to_local(lat: float, lon: float, origin: LatLon) -> tuple[float, float]:
     return east, north
 
 
-def to_latlon(east: float, north: float, origin: LatLon) -> LatLon:
-    lat = origin[0] + math.degrees(north / EARTH_RADIUS_M)
-    lon = origin[1] + math.degrees(east / (EARTH_RADIUS_M * math.cos(math.radians(origin[0]))))
-    return lat, lon
-
-
 def world_to_chair(
     points_en: np.ndarray, east: float, north: float, heading_deg: float
 ) -> np.ndarray:
@@ -39,14 +33,3 @@ def world_to_chair(
     ahead = delta[:, 0] * math.sin(heading) + delta[:, 1] * math.cos(heading)
     left = -delta[:, 0] * math.cos(heading) + delta[:, 1] * math.sin(heading)
     return np.column_stack([ahead, left])
-
-
-def chair_to_world(
-    points_xy: np.ndarray, east: float, north: float, heading_deg: float
-) -> np.ndarray:
-    """(ahead, left) points of a chair at this pose, as world (east, north)."""
-    heading = math.radians(heading_deg)
-    points = np.asarray(points_xy, dtype=np.float64).reshape(-1, 2)
-    world_east = east + points[:, 0] * math.sin(heading) - points[:, 1] * math.cos(heading)
-    world_north = north + points[:, 0] * math.cos(heading) + points[:, 1] * math.sin(heading)
-    return np.column_stack([world_east, world_north])

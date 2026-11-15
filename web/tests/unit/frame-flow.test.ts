@@ -16,18 +16,11 @@ const sendAll = (flow: FrameFlow, seqs: readonly number[], nowMs: number): Frame
   seqs.reduce((current, seq) => recordSent(current, seq, nowMs), flow);
 
 describe('frame flow control', () => {
-  it('gates nothing before the first ack, as with a service that never acks', () => {
-    const flow = sendAll(INITIAL_FLOW, [0, 1, 2, 3, 4, 5], 0);
-    expect(flow.acking).toBe(false);
-    expect(flow.inFlight).toHaveLength(6);
-    expect(maySend(flow, 1)).toBe(true);
-  });
-
-  it('allows at most two frames in flight once the service acks', () => {
+  it('allows at most two frames in flight', () => {
     // Two cover 20 fps on a round trip up to 100 ms; a third would only add a queued frame.
     expect(MAX_FRAMES_IN_FLIGHT).toBe(2);
     const acked = recordAck(recordSent(INITIAL_FLOW, 0, 0), 0, 30);
-    expect(acked).toMatchObject({ acking: true, inFlight: [], rttMs: 30 });
+    expect(acked).toMatchObject({ inFlight: [], rttMs: 30 });
     const one = sendAll(acked, [1], 40);
     // Only frames actually sent count; one still encoding does not hold a slot.
     expect(maySend(one, 40)).toBe(true);
@@ -71,9 +64,9 @@ describe('frame flow control', () => {
     expect(isNewAck(acked, 5)).toBe(false);
     expect(isNewAck(acked, 4)).toBe(false);
     expect(isNewAck(acked, 6)).toBe(true);
-    // An unknown seq still shows the service acks, but samples nothing and is not counted.
+    // An unknown seq samples nothing and is not counted.
     const unknown = recordAck(INITIAL_FLOW, 3, 10);
-    expect(unknown).toMatchObject({ acking: true, rttMs: null });
+    expect(unknown).toMatchObject({ rttMs: null });
     expect(isNewAck(unknown, 3)).toBe(false);
   });
 

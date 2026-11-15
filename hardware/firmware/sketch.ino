@@ -1,9 +1,12 @@
-// v11: no Linux dependency (no Monitor/Bridge): build with wait_linux_boot=no so the fake sensor
-//      answers within ~1 s of power, before Linux boots. No stick reads while the chair is silent.
-// v10: + takeover: in FSD, 3 reads of the real stick past ~25% -> real stick drives until FSD is re-selected.
-// v9: + real stick on Grove D2 (software master, built-in pull-ups), mode 0 stick / 1 FSD.
-// v8: v1 timing; commands written into cmdBox over SWD by the Mac (no messages handled).
-//     watchdog counts chair polls (no timer wrap), round full-range limit, no raw mode.
+// Firmware for the UNO Q's MCU: poses as the chair's joystick sensor (MLX90393) and reads the real one.
+// - Answers the chair's I2C polls with a stick position: the real stick's (mode 0) or the command
+//   the board daemon (board/wheelchaird.py) writes into cmdBox over SWD (mode 1, FSD).
+// - Reads the real stick on Grove D2 in the chair's quiet gaps. In FSD, 3 reads past ~25% hand
+//   control back to the real stick until FSD is selected again (takeover).
+// - If cmdBox is not refreshed for ~0.25 s, the real stick drives.
+// - No Linux dependency: build with wait_linux_boot=no so it answers within ~1 s of power.
+//   It never prints and never handles a message, so interrupts stay off while the chair talks.
+//
 // MLX90393 emulator with a SOFTWARE I2C target on the shield's SDA (PB11) / SCL (PB10).
 // Why software: the chair's bit-banged I2C master briefly releases SDA_PIN while SCL_PIN is high
 // during the ACK slot of every byte it reads (an accidental STOP condition). The real
@@ -35,12 +38,11 @@ static inline bool sda() { return IDR & SDA_PIN; }
 const uint8_t ADDR = 0x0C;
 const int16_t CX = 16461, CY = 15361;    // centre, from the real chip on the chair (sniff)
 int16_t fx = CX, fy = CY;
-// Command box: the Mac writes it over SWD (openocd on the board) while we run. We never
-// handle a message, so interrupts can stay off and timing stays exactly v1.
+// Command box: the board daemon writes it over SWD (openocd on the board) while we run.
 // x, y in percent (x>0 right, y>0 forward). seq must change on every fresh command.
-// mode: 0 = real stick drives (passthrough), 1 = FSD (x, y from the Mac).
+// mode: 0 = real stick drives (passthrough), 1 = FSD (x, y from the daemon).
 struct CmdBox { uint32_t magic; int32_t x, y, mode, rawX, rawY; uint32_t seq;
-                uint32_t reads, writes, resets, sentX, sentY,     // written by us, read by the Mac
+                uint32_t reads, writes, resets, sentX, sentY,     // written by us, read by the daemon
                          stickX, stickY, stickGood, stickBad, takeover; };
 volatile CmdBox cmdBox = {0xC0FFEE01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
@@ -125,7 +127,7 @@ void refreshStick() {                    // called per RM reply (~200/s): apply 
 uint8_t lastCmd = 0; bool pendingSM = false;
 uint16_t regs[64];
 uint8_t wbuf[8]; uint8_t wn = 0;
-uint32_t nRead = 0, nWrite = 0, nRT = 0, nOther = 0, lastActivity = 0, rmSinceReset = 0;
+uint32_t nRead = 0, nWrite = 0, nRT = 0, rmSinceReset = 0;
 uint32_t seed = 12345;
 int16_t jit() { seed = seed * 1103515245UL + 12345UL; return (int16_t)((seed >> 16) % 5) - 2; }
 
@@ -252,5 +254,5 @@ void loop() {
   }
   __asm volatile ("cpsie i");
   stickAge = 0xFFFF;                             // chair silent: never go deaf for a stick read (startup beep risk)
-  // ponytail: no runtime prints (a jammed Monitor once froze us mid-chair); the Mac reads cmdBox over SWD.
+  // No runtime prints (a jammed Monitor once froze us mid-chair); the board daemon reads cmdBox over SWD.
 }

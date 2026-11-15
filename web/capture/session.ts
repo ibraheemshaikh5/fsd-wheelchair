@@ -30,7 +30,7 @@ import {
 } from './motion';
 import type { CaptureSettings } from './settings';
 import { describeConnection } from './status';
-import { type TransportState, isFinalClose } from './transport';
+import { CLOSE_REPLACED, type TransportState } from './transport';
 
 export type Unsubscribe = () => void;
 export type CameraChange = 'muted' | 'unmuted' | 'ended';
@@ -111,7 +111,7 @@ export interface SessionDeps<S extends StreamLike> {
 
 export interface SessionCallbacks {
   readonly onCamera: (change: CameraChange) => void;
-  /** The service closed this phone for good (replaced, or a priority phone holds the slot). */
+  /** The service closed this phone for good (a newer phone replaced it). */
   readonly onTakenOver: (message: string) => void;
   readonly onError: (message: string) => void;
 }
@@ -295,7 +295,7 @@ export class Session<S extends StreamLike> {
     if (this.stopped) return;
     // A new or lost connection: the last one's link figures no longer describe anything.
     this.update({ connection: state, link: null });
-    if (state.status === 'stopped' && state.lastClose !== null && isFinalClose(state.lastClose.code)) {
+    if (state.status === 'stopped' && state.lastClose?.code === CLOSE_REPLACED) {
       this.callbacks.onTakenOver(describeConnection(state).text);
       return;
     }
@@ -339,7 +339,7 @@ export class Session<S extends StreamLike> {
     const { message, view } = this.link.tick(this.deps.monotonicNow(), this.deps.now());
     this.update({ link: view });
     // Never droppable: it is how the service sees a weak link.
-    if (message !== null) this.send(message);
+    this.send(message);
   }
 
   private ping(): void {

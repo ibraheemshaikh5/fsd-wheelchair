@@ -1,6 +1,5 @@
 import type { Level } from '../shared/status';
 import {
-  CLOSE_BUSY,
   CLOSE_IDLE,
   CLOSE_NO_REPLY,
   CLOSE_POLICY_VIOLATION,
@@ -14,14 +13,11 @@ export interface Described {
 }
 
 export const TAKEOVER_TEXT = 'Another phone or tab took over the stream. Tap Start to resume.';
-export const BUSY_TEXT = 'Another phone has priority and is streaming. Tap Start to try again once it stops.';
 
 function describeStopped(state: TransportState): Described {
   switch (state.lastClose?.code) {
     case CLOSE_REPLACED:
       return { text: TAKEOVER_TEXT, level: 'bad' };
-    case CLOSE_BUSY:
-      return { text: BUSY_TEXT, level: 'bad' };
     default:
       return { text: 'Stopped', level: 'none' };
   }

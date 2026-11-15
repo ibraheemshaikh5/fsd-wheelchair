@@ -30,9 +30,6 @@ from drive_service.hub import Hub
 from drive_service.protocol import Frame
 from drive_service.state import MS_PER_S, Stamped
 
-# The driving model's process, and one more (a second model or a bench test).
-MAX_MODEL_FEEDS = 2
-
 DISCONNECT = "websocket.disconnect"
 _LENGTH_PREFIX = struct.Struct("<I")
 

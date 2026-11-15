@@ -1,22 +1,86 @@
-"""Sum up a live run from the viewer's record, for reading after a test.
+"""The record of a run on the chair: what was sent, on which camera frame, and what came back.
 
-    uv run python -m fsd_ml.runlog                 # the newest run
-    uv run python -m fsd_ml.runlog runs/viewer/live/20261114-193000
+A run is one connection of the console to the chair's driving service. Its folder,
+``runs/console/live/<date-time>/``, holds ``log.jsonl`` and ``frames/``. Every way of driving
+(keyboard, bench moves, the driving model, the pilot) writes one ``command`` line per stick
+command or decision::
 
-A run folder holds ``log.jsonl`` (one line per decision, stop and setting) and the
-camera frame each decision was made on, named by the frame's number.
+    {"t": 1794650000.123,            # when the line was written, unix seconds
+     "event": "command",
+     "mode": "manual" | "bench" | "model" | "pilot",
+     "frame": "frames/0001234.jpg",  # the camera's own JPEG the command was given on
+     "frame_n": 1234,                # the feed's count of that frame
+     "frame_t": 1794650000.051,      # when the phone took it, unix seconds
+     "stick": [x, y],                # percent sent, x right, y forward; null if none was
+     "sent": true, "problem": null,  # whether it reached the chair, and why not
+     "model": {...},                 # what the model said: its path, or the pilot's tool call
+     "board": {...}}                 # the board's telemetry at that moment
+
+Other lines (``connected``, ``sending on``, ``stop``, ``waiting``, ``run finished`` ...) mark
+what happened around them.
+
+    uv run python -m fsd_ml.runlog            # sum up the newest run
+    uv run python -m fsd_ml.runlog runs/console/live/20261114-193000
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import statistics
+import threading
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
-RUNS = Path("runs/viewer/live")
+from fsd_ml.live import LiveFrame
+
+RUNS = Path("runs/console/live")
+
+
+class RunLog:
+    """Writes one run's ``log.jsonl`` and frames. Never gets in the way of driving."""
+
+    def __init__(self, folder: Path) -> None:
+        self.folder = folder
+        (folder / "frames").mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        # The last frame saved, as a command line names it, and when it was saved.
+        self._last: dict[str, Any] = {"frame": None, "frame_n": None, "frame_t": None}
+        self._last_s = 0.0
+
+    def write(self, event: str, **fields: Any) -> None:
+        try:
+            line = json.dumps({"t": round(time.time(), 3), "event": event, **fields})
+            with self._lock, (self.folder / "log.jsonl").open("a") as lines:
+                lines.write(line + "\n")
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def frame(self, frame: LiveFrame | None, min_gap_s: float = 0.0) -> dict[str, Any]:
+        """Save a frame's JPEG and return the fields that name it in a command line.
+
+        With ``min_gap_s``, a frame saved less than that long ago stands in for this one, so
+        commands sent many times a second do not each write a picture.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if frame is None or not frame.jpeg:
+                return dict.fromkeys(self._last)
+            if frame.n == self._last["frame_n"] or now - self._last_s < min_gap_s:
+                return dict(self._last)
+            name = f"frames/{frame.n:07d}.jpg"
+            try:
+                (self.folder / name).write_bytes(frame.jpeg)
+            except OSError:
+                return dict.fromkeys(self._last)
+            self._last = {
+                "frame": name,
+                "frame_n": frame.n,
+                "frame_t": round(time.time() - frame.age_s(now), 3),
+            }
+            self._last_s = now
+            return dict(self._last)
 
 
 def read(run: Path) -> list[dict[str, Any]]:
@@ -24,72 +88,25 @@ def read(run: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
-def _spread(values: list[float]) -> str:
-    if not values:
-        return "none"
-    ordered = sorted(values)
-    high = ordered[min(len(ordered) - 1, round(0.95 * (len(ordered) - 1)))]
-    return f"median {statistics.median(ordered):.0f}, 95th {high:.0f}"
-
-
 def summary(events: list[dict[str, Any]]) -> list[str]:
-    decisions = [e for e in events if e["event"] == "decision"]
-    out = []
-    if not decisions:
-        return ["no decisions recorded"]
-    seconds = decisions[-1]["t"] - decisions[0]["t"]
-    rate = (len(decisions) - 1) / seconds if seconds > 0 else 0.0
-    out.append(f"{len(decisions)} decisions over {seconds:.0f} s ({rate:.1f} per second)")
-    out.append(f"model: {decisions[-1].get('model')}")
-    for name, label in (
-        ("inference_ms", "model time ms"),
-        ("round_trip_ms", "round trip ms"),
-        ("frame_age_ms", "frame age ms"),
-    ):
-        out.append(f"{label}: {_spread([d[name] for d in decisions if d.get(name) is not None])}")
-
-    goals = Counter(d.get("say") or d.get("ipad") or d.get("goal_kind") for d in decisions)
-    out.append("goals: " + "; ".join(f"{goal} x{count}" for goal, count in goals.most_common(4)))
-
-    looked = [d["seen"] for d in decisions if (d.get("seen") or {}).get("target")]
-    if looked:
-        found = [s for s in looked if s["boxes"]]
-        far = [s["boxes"][0]["distance_m"] for s in found if s["boxes"][0].get("distance_m")]
-        line = f"detector: target in view in {len(found)} of {len(looked)} looks"
-        if far:
-            line += f", distance {min(far):.1f} to {max(far):.1f} m (last {far[-1]:.1f})"
+    commands = [e for e in events if e["event"] == "command"]
+    if not commands:
+        return ["no commands recorded"]
+    out = [f"{len(commands)} commands over {commands[-1]['t'] - commands[0]['t']:.0f} s"]
+    for mode, count in Counter(c["mode"] for c in commands).items():
+        sticks = [c["stick"] for c in commands if c["mode"] == mode and c.get("stick")]
+        line = f"{mode}: {count} commands"
+        if sticks:
+            xs, ys = [s[0] for s in sticks], [s[1] for s in sticks]
+            line += f", stick x {min(xs)} to {max(xs)}%, y {min(ys)} to {max(ys)}%"
         out.append(line)
-
-    turn = [d["w_radps"] for d in decisions if d.get("w_radps") is not None]
-    if turn:
-        left = sum(1 for w in turn if w > 0.05)
-        right = sum(1 for w in turn if w < -0.05)
-        out.append(
-            f"steering: left {left}, right {right}, straight {len(turn) - left - right};"
-            f" mean turn {statistics.mean(turn):+.2f} rad/s"
-        )
-    reach = [max((p[0] for p in d["path"]), default=0.0) for d in decisions if d.get("path")]
-    if reach:
-        out.append(f"path reach ahead cm: {_spread([r * 100 for r in reach])}")
-
-    sent = [d["chair"] for d in decisions if (d.get("chair") or {}).get("sent")]
-    if sent:
-        ys, xs = [c["y"] for c in sent], [c["x"] for c in sent]
-        out.append(
-            f"sent to chair: {len(sent)} commands, forward stick {min(ys)} to {max(ys)}%,"
-            f" turn stick {min(xs)} to {max(xs)}%"
-        )
-    else:
-        out.append("sent to chair: nothing")
+    out.append(f"with a frame: {sum(1 for c in commands if c.get('frame'))} of {len(commands)}")
+    for problem, count in Counter(c["problem"] for c in commands if c.get("problem")).items():
+        out.append(f"not sent x{count}: {problem}")
     for event in events:
-        if event["event"] in ("sending on", "settings", "stop", "waiting"):
+        if event["event"] != "command":
             detail = {k: v for k, v in event.items() if k not in ("t", "event", "board")}
             out.append(f"  +{event['t'] - events[0]['t']:6.1f} s  {event['event']}  {detail}")
-    problems = Counter(
-        d["chair"]["problem"] for d in decisions if (d.get("chair") or {}).get("problem")
-    )
-    for problem, count in problems.items():
-        out.append(f"not sent x{count}: {problem}")
     return out
 
 

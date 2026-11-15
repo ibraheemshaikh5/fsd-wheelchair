@@ -41,14 +41,14 @@ from drive_service.protocol import FrameHeader, encode_frame
 log = logging.getLogger("fake_phone")
 
 DEFAULT_URL = "ws://127.0.0.1:8000/ws/phone"
-START_LAT = 38.9869
-START_LON = -76.9426
+START_LAT = 40.3487
+START_LON = -74.6593
 LOOP_RADIUS_M = 20.0
 WALK_SPEED_MPS = 1.2
 METERS_PER_DEG_LAT = 111_320.0
 JPEG_QUALITY = 70
 GRAVITY = 9.81
-# Flow control, the same rule as web/capture (docs/phone-protocol.md).
+# Flow control, the same rule as web/capture (frame-flow.ts).
 MAX_FRAMES_IN_FLIGHT = 3
 ACK_TIMEOUT_MS = 1000.0
 # Weight of the newest round trip in the smoothed ack_rtt_ms.

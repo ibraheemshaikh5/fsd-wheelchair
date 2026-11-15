@@ -47,8 +47,8 @@ def gps_dict(**overrides: Any) -> dict[str, Any]:
         "v": 1,
         "type": "gps",
         "t": 1_700_000_000_000.0,
-        "lat": 38.9869,
-        "lon": -76.9426,
+        "lat": 40.3487,
+        "lon": -74.6593,
         "accuracy_m": 4.5,
         "altitude_m": 40.0,
         "speed_mps": 1.2,
@@ -93,24 +93,6 @@ def imu_dict(**overrides: Any) -> dict[str, Any]:
 
 def ping_dict(**overrides: Any) -> dict[str, Any]:
     base = {"v": 1, "type": "ping", "t": 1_700_000_000_000.0}
-    return {**base, **overrides}
-
-
-def link_dict(**overrides: Any) -> dict[str, Any]:
-    base = {
-        "v": 1,
-        "type": "link",
-        "t": 1_700_000_000_000.0,
-        "captured": 600,
-        "sent": 240,
-        "acked": 236,
-        "skipped_flow": 300,
-        "skipped_encoder": 40,
-        "skipped_socket": 20,
-        "in_flight": 3,
-        "jpeg_quality": 0.5,
-        "ack_rtt_ms": 180.0,
-    }
     return {**base, **overrides}
 
 

@@ -18,8 +18,8 @@ MIN_TOKEN_CHARS = 16
 PLACEHOLDER_MARKERS = ("replace-with", "change-me")
 
 # "phone": frames come from the phone's capture page, as before.
-# "external": frames come from a camera sender on /ws/camera (a USB camera on the Mac,
-# later one on the chair's board); the phone or iPad sends only GPS, compass and motion.
+# "external": frames come from a camera sender on /ws/camera (a USB camera read by
+# scripts/camera_sender.py); the phone or iPad sends only GPS, compass and motion.
 type FrameSource = Literal["phone", "external"]
 
 

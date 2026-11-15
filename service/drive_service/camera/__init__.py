@@ -1,4 +1,4 @@
-"""Frames from an external camera instead of the phone (docs/external-camera.md).
+"""Frames from an external camera instead of the phone (sender: scripts/camera_sender.py).
 
 ``build_camera_router`` returns the /ws/camera router. The hub must be built with
 ``external_camera=settings.source == "external"``.

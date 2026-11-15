@@ -1,22 +1,23 @@
 [project]
 name = "fsd-ml"
 version = "0.1.0"
-description = "FSD wheelchair model side: driving pipeline, simulator, model interface, bake-off."
+description = "FSD wheelchair model side: the viewer that drives the chair, the driving model, and the Claude pilot."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "certifi>=2024.2.2",
     "numpy>=2.0",
     "pillow>=10",
     "httpx>=0.27",
     "websockets>=13",
+    # The Claude pilot (fsd_ml/pilot.py).
+    "anthropic>=0.70",
 ]
 
 [dependency-groups]
+# The optional obstacle sense (fsd_ml/obstacles.py): a depth model run on this machine.
 detect = [
-    "anthropic>=0.70",
-    "clip",
     "torch>=2.4",
     "transformers>=4.45",
-    "ultralytics>=8.4.213",
 ]
 dev = [
     "pytest>=8",
@@ -27,9 +28,6 @@ dev = [
 # imported straight from this directory.
 [tool.uv]
 package = false
-
-[tool.uv.sources]
-clip = { git = "https://github.com/ultralytics/CLIP.git" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

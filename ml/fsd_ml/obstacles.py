@@ -12,11 +12,14 @@ Two things keep it honest with a camera that has not been measured exactly:
 - the floor is fitted from the picture itself, so the camera's tilt is not needed;
 - the fitted floor is known to be the camera's height below the lens, which sets the scale.
 
-Needs the ``detect`` dependency group.
+Only what the camera sees in the current frame counts: nothing is remembered once it
+leaves the picture. It is optional: it needs the ``detect`` dependency group (torch), and
+the console runs without it when that is not installed.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import math
 import threading
 import time
@@ -25,7 +28,6 @@ from typing import Any
 
 import numpy as np
 
-from fsd_ml.memory import ObstacleMemory
 from fsd_ml.pipeline.types import Obstacle
 
 MODEL_ID = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
@@ -49,10 +51,11 @@ OWN_CHAIR_ROWS = 0.12
 OWN_CHAIR_CORNER = (0.72, 0.82)
 # The outermost columns on each side are not used.
 EDGE_COLS = 0.03
-# Ways round: how far each one is looked along, and how much more or less it bends (1/m).
-AROUND_M = 2.5
-BENDS = (0.0, 0.25, -0.25, 0.5, -0.5, 0.85, -0.85, 1.3, -1.3)
-MAX_BEND = 1.6
+
+
+def available() -> bool:
+    """Whether the depth model's libraries are installed."""
+    return all(importlib.util.find_spec(name) for name in ("torch", "transformers"))
 
 
 def rays(width: int, height: int, hfov_deg: float) -> np.ndarray:
@@ -129,8 +132,7 @@ def obstacles_from_depth(
     edge = max(1, round(width * EDGE_COLS))
     standing[:, :edge] = False
     standing[:, -edge:] = False
-    # Each cell reports where its points really are, not the cell's middle: positions that
-    # move smoothly as the chair does are what lets the memory follow them.
+    # Each cell reports where its points really are, not the cell's middle.
     cells: dict[tuple[int, int], list[float]] = {}
     for a, b in zip(ahead[standing], left[standing], strict=True):
         cell = cells.setdefault((int(a // CELL_M), int(b // CELL_M)), [0, 0.0, 0.0])
@@ -152,80 +154,6 @@ def obstacles_from_depth(
     return obstacles, {"floor": True, "scale": round(scale, 3), "tilt_deg": round(tilt, 1)}
 
 
-def locate_box(
-    depth: np.ndarray,
-    hfov_deg: float,
-    camera_height_m: float,
-    box: tuple[float, float, float, float],
-    lens_xy: tuple[float, float] = (0.0, 0.0),
-) -> tuple[float, float] | None:
-    """Where the thing inside a box in the picture stands: (metres ahead, metres left).
-
-    ``box`` is (x0, y0, x1, y1) as fractions of the picture. The answer is the middle of the
-    points inside it that stand up from the floor, so a box drawn a little loose around a
-    thing still gives the thing, not the floor around it or the wall behind.
-    """
-    height, width = depth.shape
-    points = rays(width, height, hfov_deg) * depth[:, :, None]
-    floor = fit_floor(points)
-    if floor is None:
-        return None
-    normal, distance = floor
-    scale = camera_height_m / distance
-    forward = np.array([0.0, 0.0, 1.0]) - normal * normal[2]
-    forward /= np.linalg.norm(forward)
-    right = np.cross(normal, forward)
-    c0, c1 = int(box[0] * width), max(int(box[0] * width) + 1, math.ceil(box[2] * width))
-    r0, r1 = int(box[1] * height), max(int(box[1] * height) + 1, math.ceil(box[3] * height))
-    inside = points[r0:r1, c0:c1].reshape(-1, 3)
-    if len(inside) == 0:
-        return None
-    above = (distance - inside @ normal) * scale
-    ahead = (inside @ forward) * scale
-    left = -(inside @ right) * scale
-    standing = (above > FLOOR_BAND_M) & (ahead > 0.1)
-    if standing.sum() >= 2:
-        ahead, left = ahead[standing], left[standing]
-    # The nearer half: the thing itself, not what shows behind it through the box.
-    near = ahead <= np.median(ahead)
-    return float(np.median(ahead[near])) + lens_xy[0], float(np.median(left[near])) + lens_xy[1]
-
-
-def toward(ahead: float, left: float, speed_mps: float) -> tuple[float, float]:
-    """The speed and turn rate (positive left) that curve the chair onto a point."""
-    distance_sq = ahead * ahead + left * left
-    if distance_sq < 1e-6:
-        return 0.0, 0.0
-    if ahead <= 0.0:  # beside or behind: turn toward it first
-        return 0.0, math.copysign(0.6, left)
-    return speed_mps, speed_mps * 2.0 * left / distance_sq
-
-
-def arc(bend: float, length_m: float = AROUND_M, step_m: float = 0.1) -> np.ndarray:
-    """A path of constant bend (1/m, positive left) from the chair's middle, shape (n, 2)."""
-    along = np.arange(step_m, length_m + 1e-9, step_m)
-    if abs(bend) < 1e-3:
-        return np.column_stack([along, np.zeros_like(along)])
-    along = along[np.abs(bend * along) <= math.pi / 2]
-    return np.column_stack([np.sin(bend * along) / bend, (1 - np.cos(bend * along)) / bend])
-
-
-def ways_round(
-    v_mps: float, w_radps: float, length_m: float = AROUND_M
-) -> list[tuple[float, np.ndarray, float]]:
-    """The model's own heading played forward, and the same bent a little more each way.
-
-    Each is (bend, path, score): the model's own heading scores highest and the score falls
-    as a way strays from it, so the chair takes the clear way nearest to what the model wanted.
-    """
-    wanted = w_radps / v_mps if v_mps > 0.05 else 0.0
-    ways = []
-    for rank, change in enumerate(BENDS):
-        bend = max(-MAX_BEND, min(MAX_BEND, wanted + change))
-        ways.append((bend, arc(bend, length_m), 1.0 - 0.08 * rank))
-    return ways
-
-
 class DepthObstacles:
     """Depth Anything V2 (small, indoor), then the floor-and-obstacle arithmetic above."""
 
@@ -235,8 +163,6 @@ class DepthObstacles:
         self._processor: Any = None
         self._torch: Any = None
         self.device = "cpu"
-        # The newest depth map, kept so a boxed target can be placed on the floor.
-        self.last_depth: np.ndarray | None = None
 
     def depth(self, image: np.ndarray) -> np.ndarray:
         if self._model is None:
@@ -255,8 +181,7 @@ class DepthObstacles:
         small = torch.nn.functional.interpolate(
             predicted[None], size=(GRID[1], GRID[0]), mode="bilinear", align_corners=False
         )
-        self.last_depth = small[0, 0].float().cpu().numpy()
-        return self.last_depth
+        return small[0, 0].float().cpu().numpy()
 
     def find(
         self,
@@ -269,34 +194,26 @@ class DepthObstacles:
 
 
 class ObstacleWatcher:
-    """Keeps the obstacle map fresh in the background, so driving never waits on it.
+    """Looks for obstacles in the newest frame, in the background, so driving never waits on it.
 
-    Each pass moves the remembered map by how the chair has just moved, then adds what the
-    depth model sees now. When the depth model sees no floor (a covered camera) nothing is
-    added or cleared, and the map keeps moving.
+    ``look`` gives the newest frame, or None when there is none fresh enough; ``find`` turns
+    a frame into obstacles. What is published is always from one frame, the latest looked at.
     """
 
     def __init__(
         self,
         look: Callable[[], np.ndarray | None],
         find: Callable[[np.ndarray], tuple[list[Obstacle], dict[str, Any]]],
-        memory: ObstacleMemory | None = None,
-        motion: Callable[[], tuple[float, float]] | None = None,
         period_s: float = 0.1,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._look, self._find, self._period_s = look, find, period_s
-        self.memory = memory or ObstacleMemory()
-        # The chair's speed (m/s) and turn rate (rad/s, positive left) right now.
-        self._motion = motion or (lambda: (0.0, 0.0))
         self._clock = clock
         self._stop = threading.Event()
-        self._guard = threading.Lock()
         self.obstacles: tuple[Obstacle, ...] = ()
-        self.listed: list[list[float]] = []
+        # For the page: floor, scale, how long the look took; or the problem.
         self.info: dict[str, Any] = {}
         self.at_s = 0.0
-        self._moved_s: float | None = None
 
     def start(self) -> None:
         threading.Thread(target=self._run, daemon=True).start()
@@ -305,47 +222,27 @@ class ObstacleWatcher:
         self._stop.set()
 
     def fresh(self, within_s: float = 1.0) -> tuple[Obstacle, ...] | None:
-        """The map, or None when the camera has not been looked through recently."""
-        return self.obstacles if self._clock() - self.at_s <= within_s else None
-
-    def forget(self, why: str | None = None) -> None:
-        with self._guard:
-            self.memory.forget(why)
-            self.obstacles, self.listed = (), []
+        """What stands in view, or None when the floor has not been seen recently."""
+        if self._clock() - self.at_s > within_s or not self.info.get("floor"):
+            return None
+        return self.obstacles
 
     def once(self) -> None:
         now = self._clock()
-        speed, turn = self._motion()
         image = self._look()
-        started = time.perf_counter()
-        found, info = self._find(image) if image is not None else ([], {})
-        with self._guard:
-            if self._moved_s is not None:
-                self.memory.move(speed, turn, now - self._moved_s)
-            self._moved_s = now
-            if info.get("floor"):
-                self.memory.see(found, now)
-            else:
-                self.memory.blind()
-            self.obstacles = tuple(self.memory.obstacles())
-            self.listed = self.memory.listed()
         if image is None:
             return
+        started = time.perf_counter()
+        found, info = self._find(image)
+        self.obstacles = tuple(found)
+        self.info = {**info, "ms": round((time.perf_counter() - started) * 1000.0, 1)}
         self.at_s = now
-        self.info = {
-            **info,
-            "ms": round((time.perf_counter() - started) * 1000.0, 1),
-            "seen": sum(1 for o in self.listed if o[3]),
-            "remembered": sum(1 for o in self.listed if not o[3]),
-            "moving": [round(speed, 2), round(turn, 2)],
-            "note": self.memory.note,
-        }
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
                 self.once()
-            except Exception as error:  # noqa: BLE001  a broken depth model must not stop the viewer
+            except Exception as error:  # noqa: BLE001  a broken depth model must not stop the console
                 self.info = {"problem": str(error)}
                 self._stop.wait(3.0)
             self._stop.wait(self._period_s)

@@ -1,10 +1,9 @@
 """/ws/camera: camera frames from a sender that is not the phone.
 
-Today the sender is ``scripts/camera_sender.py`` reading a USB camera on the Mac;
-later the same sender runs on the chair's board with the camera plugged in there.
-It speaks the phone protocol's subset that a camera needs: ``hello`` (camera
-info), ``ping`` (clock sync, kept apart from the phone's) and binary frames,
-each answered with an ``ack``. Anything else is refused with an ``error``.
+The sender is ``scripts/camera_sender.py`` reading a USB camera. It speaks the
+phone protocol's subset that a camera needs: ``hello`` (camera info), ``ping``
+(clock sync, kept apart from the phone's) and binary frames, each answered with
+an ``ack``. Anything else is refused with an ``error``.
 
 Not a browser endpoint: the sender must present ``Authorization: Bearer <token>``
 and no ``Origin``. The handshake is refused (1008 before
@@ -26,7 +25,7 @@ from pydantic import SecretStr
 from starlette.websockets import WebSocketDisconnect
 
 from drive_service.camera.config import CameraSettings
-from drive_service.config import Settings
+from drive_service.config import MAX_FRAME_BYTES, MAX_FRAME_HEADER_BYTES, MAX_TEXT_BYTES
 from drive_service.hub import Hub
 from drive_service.protocol import (
     FrameError,
@@ -78,16 +77,16 @@ def _refusal(headers: Mapping[str, str], settings: CameraSettings) -> str | None
     return None
 
 
-def _dispatch(hub: Hub, settings: Settings, message: dict[str, Any]) -> _Outcome:
+def _dispatch(hub: Hub, message: dict[str, Any]) -> _Outcome:
     """Validate one raw message from the camera and hand it to the hub."""
     data = message.get("bytes")
     if data is not None:
-        frame = parse_frame(data, settings.max_frame_bytes, settings.max_frame_header_bytes)
+        frame = parse_frame(data, MAX_FRAME_BYTES, MAX_FRAME_HEADER_BYTES)
         return _Outcome(ack=hub.handle_camera_frame(frame))
     text = message.get("text")
     if text is None:
         raise ProtocolError("empty message")
-    parsed = parse_text(text, settings.max_text_bytes)
+    parsed = parse_text(text, MAX_TEXT_BYTES)
     if isinstance(parsed, Ping):
         return _Outcome(reply=hub.handle_camera_ping(parsed))
     if isinstance(parsed, Hello):
@@ -96,9 +95,9 @@ def _dispatch(hub: Hub, settings: Settings, message: dict[str, Any]) -> _Outcome
     raise ProtocolError(f"the camera may send only hello, ping and frames, not {parsed.type}")
 
 
-def _try_dispatch(hub: Hub, settings: Settings, message: dict[str, Any]) -> _Outcome:
+def _try_dispatch(hub: Hub, message: dict[str, Any]) -> _Outcome:
     try:
-        return _dispatch(hub, settings, message)
+        return _dispatch(hub, message)
     except ProtocolError as error:
         hub.note_rejected()
         log.warning("rejected camera message: %s", error)
@@ -107,12 +106,7 @@ def _try_dispatch(hub: Hub, settings: Settings, message: dict[str, Any]) -> _Out
 
 
 async def _serve_camera(
-    ws: WebSocket,
-    hub: Hub,
-    settings: Settings,
-    timeout_s: float,
-    lease: int,
-    superseded: asyncio.Event,
+    ws: WebSocket, hub: Hub, timeout_s: float, lease: int, superseded: asyncio.Event
 ) -> None:
     errors: int | None = 0
     while errors is not None:
@@ -127,18 +121,19 @@ async def _serve_camera(
             return
         if event["type"] == DISCONNECT:
             return
-        errors = await _reply(ws, _try_dispatch(hub, settings, event), errors, settings)
+        errors = await _reply(ws, _try_dispatch(hub, event), errors)
 
 
-def build_camera_router(hub: Hub, settings: Settings, camera: CameraSettings) -> APIRouter:
+def build_camera_router(hub: Hub, camera: CameraSettings) -> APIRouter:
     router = APIRouter()
-    current: dict[str, asyncio.Event | None] = {"superseded": None}
+    current: asyncio.Event | None = None
 
     if camera.source == "external" and camera.token is None:
         log.warning("external camera chosen but DRIVE_CAMERA_TOKEN is not set: no frames")
 
     @router.websocket("/ws/camera")
     async def camera_socket(ws: WebSocket) -> None:
+        nonlocal current
         reason = _refusal(ws.headers, camera)
         if reason is not None:
             log.warning("refused camera connection: %s", reason)
@@ -146,15 +141,13 @@ def build_camera_router(hub: Hub, settings: Settings, camera: CameraSettings) ->
             return
         await ws.accept()
         # No await between superseding the old one and taking the slot.
-        previous = current["superseded"]
-        if previous is not None:
-            previous.set()
-        superseded = asyncio.Event()
-        current["superseded"] = superseded
+        if current is not None:
+            current.set()
+        superseded = current = asyncio.Event()
         lease = hub.attach_camera()
         log.info("camera connected (lease %d)", lease)
         try:
-            await _serve_camera(ws, hub, settings, camera.idle_timeout_s, lease, superseded)
+            await _serve_camera(ws, hub, camera.idle_timeout_s, lease, superseded)
         except WebSocketDisconnect:
             pass
         finally:

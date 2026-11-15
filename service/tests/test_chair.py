@@ -3,7 +3,14 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import pytest
+
 from drive_service import chair
+
+
+@pytest.fixture(autouse=True)
+def _empty_file_cache(monkeypatch):
+    monkeypatch.setattr(chair, "_file", {"metrics": None, "at": float("-inf")})
 
 
 def test_reads_the_daemon_file(tmp_path, monkeypatch):

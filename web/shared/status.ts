@@ -59,10 +59,8 @@ export interface RecordingStatus {
   readonly frames: number;
   readonly sensors: number;
   readonly dropped: number;
-  /** A failure. Reaching a frame, size or disk limit is not an error. */
+  /** Why the recording failed, if it did. */
   readonly error: string | null;
-  /** Why the recording ended on its own (a limit was reached), if it did. */
-  readonly end_reason: string | null;
 }
 
 export interface ServiceStatus {
@@ -70,7 +68,7 @@ export interface ServiceStatus {
   readonly phone_connected: boolean;
   /** Until the phone clock is synced no reading counts as fresh (fail closed). */
   readonly clock_synced: boolean;
-  /** Phone connected, clock synced, and a fresh frame and GPS fix. */
+  /** Phone connected, clock synced, and a fresh frame. GPS is not required (see gps.fresh). */
   readonly sensors_ok: boolean;
   readonly frame: FrameStatus | null;
   readonly gps: GpsStatus | null;
@@ -83,14 +81,13 @@ export interface ServiceStatus {
     readonly frames: number;
     readonly missed: number;
     readonly rejected: number;
-    readonly rate_limited: number;
   };
   readonly camera: CameraInfo | null;
   readonly mount: MountInfo | null;
   readonly recording: RecordingStatus;
-  /** Where the rider asked to go, measured from the latest fresh fix. Absent from older services. */
+  /** Where the rider asked to go, measured from the latest fresh fix. */
   readonly destination?: DestinationStatus | null;
-  /** What the service derives from the IMU. Absent from older services; null when unknown or malformed. */
+  /** What the service derives from the IMU; null when unknown or malformed. */
   readonly motion?: MotionStatus | null;
   /**
    * Set by parseStatus (never sent by the service) when the service sent a motion

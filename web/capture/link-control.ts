@@ -4,7 +4,6 @@
 
 import type { LinkMessage } from '../shared/protocol';
 import {
-  ACK_TIMEOUT_MS,
   expireFrames,
   type FrameFlow,
   INITIAL_FLOW,
@@ -14,7 +13,6 @@ import {
   recordSent,
 } from './frame-flow';
 import {
-  type AckStatus,
   bump,
   counterDelta,
   countSkip,
@@ -22,7 +20,6 @@ import {
   type LinkSnapshot,
   type LinkView,
   buildLinkMessage,
-  linkSkips,
   linkView,
   type SkipReason,
   ZERO_COUNTERS,
@@ -30,12 +27,8 @@ import {
 import { adjustQuality, initialQuality, type QualityState } from './quality';
 
 export interface LinkTick {
-  /**
-   * The `link` message to send, or null until the service has acked a frame in
-   * this session (an older service would refuse the type). Once it has, every
-   * later connection reports from its first second, before its own first ack.
-   */
-  readonly message: LinkMessage | null;
+  /** The `link` message to send. */
+  readonly message: LinkMessage;
   readonly view: LinkView;
 }
 
@@ -46,10 +39,6 @@ export class LinkControl {
   private windowAtMs: number;
   private quality: QualityState;
   private epoch = 0;
-  /** Whether the service has acked a frame on any connection of this session. */
-  private serviceAcks = false;
-  /** When this connection sent its first frame, or null before it has. */
-  private firstSentAtMs: number | null = null;
 
   /** Times are on the monotonic clock. */
   constructor(configuredQuality: number, nowMs: number) {
@@ -67,11 +56,10 @@ export class LinkControl {
     return this.epoch;
   }
 
-  /** A new connection: flow control and counters start again; quality, and knowing the service acks, carry over. */
+  /** A new connection: flow control and counters start again; quality carries over. */
   reset(nowMs: number): void {
     this.epoch += 1;
     this.flow = INITIAL_FLOW;
-    this.firstSentAtMs = null;
     this.counters = ZERO_COUNTERS;
     this.windowStart = ZERO_COUNTERS;
     this.windowAtMs = nowMs;
@@ -93,20 +81,12 @@ export class LinkControl {
   sent(seq: number, nowMs: number): void {
     this.flow = recordSent(this.flow, seq, nowMs);
     this.counters = bump(this.counters, 'sent');
-    this.firstSentAtMs ??= nowMs;
   }
 
   /** Counted only for the first ack of a frame this connection sent, so acked never exceeds sent. */
   ack(seq: number, nowMs: number): void {
     if (isNewAck(this.flow, seq)) this.counters = bump(this.counters, 'acked');
     this.flow = recordAck(this.flow, seq, nowMs);
-    this.serviceAcks = true;
-  }
-
-  private ackStatus(nowMs: number): AckStatus {
-    if (this.flow.acking) return 'acking';
-    if (this.serviceAcks || this.firstSentAtMs === null) return 'waiting';
-    return nowMs - this.firstSentAtMs > ACK_TIMEOUT_MS ? 'none' : 'waiting';
   }
 
   /** Once a second: adapt quality to the last window, and report. */
@@ -116,8 +96,7 @@ export class LinkControl {
       seconds: (nowMs - this.windowAtMs) / 1000,
       captured: window.captured,
       sent: window.sent,
-      skipped: linkSkips(window),
-      ackRttMs: this.flow.acking ? this.flow.rttMs : null,
+      ackRttMs: this.flow.rttMs,
     });
     this.flow = expireFrames(this.flow, nowMs);
     const snapshot: LinkSnapshot = {
@@ -126,9 +105,9 @@ export class LinkControl {
       jpegQuality: this.quality.quality,
       ackRttMs: this.flow.rttMs,
     };
-    const view = linkView(window, nowMs - this.windowAtMs, snapshot, this.ackStatus(nowMs));
+    const view = linkView(window, nowMs - this.windowAtMs, snapshot);
     this.windowStart = this.counters;
     this.windowAtMs = nowMs;
-    return { message: this.serviceAcks ? buildLinkMessage(snapshot, wallNowMs) : null, view };
+    return { message: buildLinkMessage(snapshot, wallNowMs), view };
   }
 }

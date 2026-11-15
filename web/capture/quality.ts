@@ -2,11 +2,10 @@
 // smaller JPEGs let more of them through. Judged once a second; resolution
 // never changes here.
 //
-// With acks the signal is how long acks take and how many frames get through,
-// not the share of frames held back: at 60 fps with 2 frames in flight, any
-// round trip above ~33 ms holds back most frames even though 20+ fresh frames
-// a second still arrive, which is all the driving model needs. Without acks
-// (an older service) the share held back by the send budget is all there is.
+// The signal is how long acks take and how many frames get through, not the
+// share of frames held back: at 60 fps with 2 frames in flight, any round trip
+// above ~33 ms holds back most frames even though 20+ fresh frames a second
+// still arrive, which is all the driving model needs.
 
 /** Quality never adapts below this (unless the setting itself is lower). */
 export const QUALITY_FLOOR = 0.4;
@@ -27,10 +26,6 @@ export const MIN_SENT_FPS = 20;
  */
 const ENOUGH_SHARE = 0.9;
 const ENOUGH_FPS = MIN_SENT_FPS * ENOUGH_SHARE;
-/** Without acks: above this share of frames held back, step down. */
-export const SKIP_HIGH = 0.3;
-/** Without acks: below this share, step up. */
-export const SKIP_LOW = 0.05;
 const STEP_DOWN = 0.1;
 const STEP_UP = 0.05;
 
@@ -48,9 +43,7 @@ export interface QualityWindow {
   readonly captured: number;
   /** Frames sent. */
   readonly sent: number;
-  /** Frames held back by flow control or the send budget. */
-  readonly skipped: number;
-  /** Smoothed ack round trip, or null while the service is not acking. */
+  /** Smoothed ack round trip, or null before this connection's first ack. */
   readonly ackRttMs: number | null;
 }
 
@@ -61,7 +54,7 @@ export const initialQuality = (configured: number): QualityState => ({ quality: 
 /** Rounded to hundredths, so repeated steps do not drift (0.7 - 0.1 - 0.1 stays 0.5). */
 const round = (value: number): number => Math.round(value * 100) / 100;
 
-function stepWithAcks(window: QualityWindow, ackRttMs: number): Step {
+function step(window: QualityWindow, ackRttMs: number): Step {
   const capturedFps = window.captured / window.seconds;
   const sentFps = window.sent / window.seconds;
   // A camera delivering under 20 fps (give or take jitter) is not the link's fault.
@@ -70,20 +63,14 @@ function stepWithAcks(window: QualityWindow, ackRttMs: number): Step {
   return ackRttMs < RTT_LOW_MS ? 'up' : 'hold';
 }
 
-function stepWithoutAcks(window: QualityWindow): Step {
-  const share = window.skipped / window.captured;
-  if (share > SKIP_HIGH) return 'down';
-  return share < SKIP_LOW ? 'up' : 'hold';
-}
-
-/** Step quality for one window. An empty window says nothing about the link and changes nothing. */
+/** Step quality for one window. A window with no frames or no ack yet says nothing about the link. */
 export function adjustQuality(state: QualityState, window: QualityWindow): QualityState {
-  if (window.captured <= 0 || window.seconds <= 0) return state;
-  const step = window.ackRttMs === null ? stepWithoutAcks(window) : stepWithAcks(window, window.ackRttMs);
-  if (step === 'down') {
+  if (window.captured <= 0 || window.seconds <= 0 || window.ackRttMs === null) return state;
+  const direction = step(window, window.ackRttMs);
+  if (direction === 'down') {
     const floor = Math.min(QUALITY_FLOOR, state.ceiling);
     return { ...state, quality: Math.max(floor, round(state.quality - STEP_DOWN)) };
   }
-  if (step === 'up') return { ...state, quality: Math.min(state.ceiling, round(state.quality + STEP_UP)) };
+  if (direction === 'up') return { ...state, quality: Math.min(state.ceiling, round(state.quality + STEP_UP)) };
   return state;
 }
