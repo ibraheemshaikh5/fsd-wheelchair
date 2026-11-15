@@ -1,0 +1,14 @@
+[Unit]
+Description=Driving service (phone in on :8000, model feed out), for tailscale serve
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=arduino
+WorkingDirectory=/home/arduino/fsd-wheelchair/service
+ExecStart=/home/arduino/fsd-wheelchair/.venv/bin/python -m drive_service
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

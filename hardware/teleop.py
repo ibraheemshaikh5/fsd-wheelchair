@@ -1,7 +1,7 @@
 """Drive window. Mode button: JOYSTICK (real stick drives) or FSD (hold W/A/S/D / arrows, let go to stop).
 
-Speed and deadband sliders. Calls Wheelchair.set(x, y) 20x per second, exactly like the AI will.
-Run:  python3 hardware/teleop.py   (Mac and board on the team Tailscale)
+Speed and turn sliders. Calls Wheelchair.set(x, y) 20x per second, exactly like the AI does.
+Run:  python3 hardware/teleop.py   (this computer and the board on the team Tailscale)
 """
 import time, tkinter as tk
 from wheelchair import Wheelchair
@@ -15,11 +15,11 @@ print("connected, opening window", flush=True)
 root = tk.Tk(); root.title(f"Wheelchair teleop ({chair.link})")
 root.lift(); root.attributes("-topmost", True); root.after(500, lambda: root.attributes("-topmost", False))
 held = {}                     # key -> True while held
-speed = tk.IntVar(value=70); turn = tk.IntVar(value=50); deadband = tk.IntVar(value=chair.deadband); turn_db = tk.IntVar(value=chair.turn_deadband)
+speed = tk.IntVar(value=70); turn = tk.IntVar(value=50)
 status = tk.StringVar(value="hold W/A/S/D. Window must be focused.")
 
-for label, var, hi in (("speed %", speed, 100), ("turn %", turn, 100), ("deadband fwd %", deadband, 60), ("deadband turn %", turn_db, 60)):
-    tk.Scale(root, label=label, variable=var, from_=0, to=hi, orient="horizontal", length=320).pack(padx=12)
+for label, var in (("speed %", speed), ("turn %", turn)):
+    tk.Scale(root, label=label, variable=var, from_=0, to=100, orient="horizontal", length=320).pack(padx=12)
 mode_btn = tk.Button(root, text="MODE: JOYSTICK  (click for FSD)", font=("Helvetica", 16, "bold"), width=30,
                      command=lambda: toggle())
 mode_btn.pack(pady=8)
@@ -51,7 +51,6 @@ def release(e):
 def tick(reschedule=True):
     x = sum(KEYS[k][0] for k, v in held.items() if v)
     y = sum(KEYS[k][1] for k, v in held.items() if v)
-    chair.deadband = deadband.get(); chair.turn_deadband = turn_db.get()
     cx, cy = max(-1, min(1, x)) * turn.get(), max(-1, min(1, y)) * speed.get()
     chair.set(cx, cy)
     if not chair.fsd: big.config(text="real stick drives", fg="#555")

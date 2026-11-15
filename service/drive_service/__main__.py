@@ -7,7 +7,7 @@ import logging
 import uvicorn
 
 from drive_service.app import create_app
-from drive_service.config import Settings
+from drive_service.config import HOST, MAX_FRAME_BYTES, Settings
 
 # Room for the frame header and WebSocket framing on top of the JPEG limit.
 WS_OVERHEAD_BYTES = 4096
@@ -24,9 +24,9 @@ def main() -> None:
     settings = Settings()
     uvicorn.run(
         create_app(settings),
-        host=settings.host,
+        host=HOST,
         port=settings.port,
-        ws_max_size=settings.max_frame_bytes + WS_OVERHEAD_BYTES,
+        ws_max_size=MAX_FRAME_BYTES + WS_OVERHEAD_BYTES,
         ws_ping_interval=WS_PING_INTERVAL_S,
         ws_ping_timeout=WS_PING_TIMEOUT_S,
     )

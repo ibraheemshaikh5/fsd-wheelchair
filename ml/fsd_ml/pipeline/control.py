@@ -1,4 +1,9 @@
-"""Turn the chosen path into a speed and a turn rate (pipeline stage 8)."""
+"""Turn the chosen path into a speed and a turn rate.
+
+This is the one place a model's path becomes a command. The speed is the model's own
+(``speed_limit_mps``, see omnivla.implied_speed), never raised and never ramped here: the
+board daemon eases the stick itself, and a stop must be instant.
+"""
 
 from __future__ import annotations
 
@@ -10,14 +15,17 @@ import numpy as np
 
 @dataclass(frozen=True, slots=True)
 class ControlConfig:
+    # The speed for a model that does not give its own.
     cruise_mps: float = 1.0
     # Steer toward the point this far along the path.
     lookahead_m: float = 1.2
     max_yaw_rate_radps: float = 1.0
-    max_accel_mps2: float = 0.8
-    max_brake_mps2: float = 2.0
     # Slows the chair in tight turns so the rider is not thrown sideways.
     max_lateral_accel_mps2: float = 0.6
+    # A target this close to straight ahead is driven straight at. The chair's stick has a
+    # dead zone, so the smallest turn that can be sent is a real one (about 38% of the raw
+    # stick): steering for every degree would make the chair weave.
+    steer_dead_zone_deg: float = 4.0
 
 
 def _target(path_xy: np.ndarray, lookahead_m: float) -> np.ndarray:
@@ -29,12 +37,14 @@ def _target(path_xy: np.ndarray, lookahead_m: float) -> np.ndarray:
 def follow(
     path_xy: np.ndarray,
     speed_factor: float,
-    current_speed_mps: float,
-    dt_s: float,
     config: ControlConfig | None = None,
     speed_limit_mps: float | None = None,
 ) -> tuple[float, float]:
-    """(speed m/s, turn rate rad/s, positive left) to follow a path in the chair's frame."""
+    """(speed m/s, turn rate rad/s, positive left) to follow a path in the chair's frame.
+
+    ``speed_factor`` is the footprint check's verdict: 1 clear, less when slowing, 0 blocked
+    (which stops the chair outright; it does not turn on the spot either).
+    """
     config = config or ControlConfig()
     path = np.asarray(path_xy, dtype=np.float64).reshape(-1, 2)
     if len(path) == 0 or speed_factor <= 0.0:
@@ -49,17 +59,13 @@ def follow(
         # The path starts beside or behind the chair: turn on the spot to face it.
         return 0.0, math.copysign(config.max_yaw_rate_radps * 0.6, left)
 
-    curvature = 2.0 * left / (distance * distance)
-    wanted = config.cruise_mps * min(1.0, speed_factor)
+    off_deg = abs(math.degrees(math.atan2(left, ahead)))
+    curvature = 0.0 if off_deg < config.steer_dead_zone_deg else 2.0 * left / (distance * distance)
+    speed = config.cruise_mps * min(1.0, speed_factor)
     if speed_limit_mps is not None:
-        # A model that plans its own speed may be slowing for something we cannot see.
-        wanted = min(wanted, max(0.0, speed_limit_mps))
+        speed = min(speed, max(0.0, speed_limit_mps) * min(1.0, speed_factor))
     if abs(curvature) > 1e-6:
-        wanted = min(wanted, math.sqrt(config.max_lateral_accel_mps2 / abs(curvature)))
-        wanted = min(wanted, config.max_yaw_rate_radps / abs(curvature))
-
-    low = current_speed_mps - config.max_brake_mps2 * dt_s
-    high = current_speed_mps + config.max_accel_mps2 * dt_s
-    speed = max(0.0, min(high, max(low, wanted)))
-    turn = max(-config.max_yaw_rate_radps, min(config.max_yaw_rate_radps, speed * curvature))
-    return speed, turn
+        speed = min(speed, math.sqrt(config.max_lateral_accel_mps2 / abs(curvature)))
+        speed = min(speed, config.max_yaw_rate_radps / abs(curvature))
+    # The turn rate is in proportion to how far off the target is, at the speed being driven.
+    return speed, speed * curvature

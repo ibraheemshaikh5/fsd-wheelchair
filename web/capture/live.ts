@@ -76,12 +76,8 @@ const SLOW_ACK_MS = 150;
 
 const fps = (value: number): string => `${Math.round(value)}`;
 
-const ACK_STATUS_TEXT = { waiting: 'Waiting for first ack', none: 'No acks (older service)' } as const;
-
-function ackText(link: LinkView): string {
-  if (link.ackStatus !== 'acking') return ACK_STATUS_TEXT[link.ackStatus];
-  return link.ackRttMs === null ? '—' : `${Math.round(link.ackRttMs)} ms`;
-}
+const ackText = (link: LinkView): string =>
+  link.ackRttMs === null ? 'Waiting for first ack' : `${Math.round(link.ackRttMs)} ms`;
 
 /** Sent vs captured rate, flow-control skips, JPEG quality and ack round trip, so a weak link shows. */
 export function linkStatusRows(link: LinkView | null): readonly StatusRow[] {

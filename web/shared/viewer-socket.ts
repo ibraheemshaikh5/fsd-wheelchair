@@ -7,7 +7,6 @@ import { parseStatus, type ServiceStatus } from './status';
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 5000;
 /** Sent by the service when it already has as many viewers as it allows. */
-export const CLOSE_TOO_MANY_VIEWERS = 4429;
 
 export type ViewerConnection = { readonly kind: 'open' } | { readonly kind: 'lost'; readonly reason: string };
 
@@ -41,9 +40,6 @@ export function viewerSocketUrl(location: Pick<Location, 'protocol' | 'host'>): 
   return `${scheme}://${location.host}/ws/viewer`;
 }
 
-function lostReason(code: number): string {
-  return code === CLOSE_TOO_MANY_VIEWERS ? 'too many viewers open' : 'connection lost';
-}
 
 export function connectViewer(options: ViewerOptions): ViewerHandle {
   let attempt = 0;
@@ -58,8 +54,7 @@ export function connectViewer(options: ViewerOptions): ViewerHandle {
     current.binaryType = 'arraybuffer';
     current.onopen = () => options.onConnection({ kind: 'open' });
     current.onmessage = (event) => {
-      // Only a message proves the service kept this socket: it may accept and
-      // then close straight away (too many viewers), so onopen alone does not reset.
+      // Only a message proves the socket works, so onopen alone does not reset the backoff.
       attempt = 0;
       if (event.data instanceof ArrayBuffer) {
         options.onFrame(event.data);
@@ -71,7 +66,7 @@ export function connectViewer(options: ViewerOptions): ViewerHandle {
     current.onclose = (event) => {
       if (stopped || socket !== current) return;
       socket = null;
-      options.onConnection({ kind: 'lost', reason: lostReason(event.code) });
+      options.onConnection({ kind: 'lost', reason: 'connection lost' });
       const delay = backoffDelayMs(attempt, BACKOFF_BASE_MS, BACKOFF_MAX_MS);
       attempt += 1;
       timer = options.setTimer(open, delay);

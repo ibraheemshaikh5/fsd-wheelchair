@@ -1,5 +1,5 @@
 // Wire protocol v1 between the phone and the driving service.
-// Mirrors service/drive_service/protocol.py; the contract is in docs/phone-protocol.md.
+// Mirrors service/drive_service/protocol.py; keep the two in sync.
 
 export const PROTOCOL_VERSION = 1 as const;
 

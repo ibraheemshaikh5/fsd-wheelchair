@@ -20,11 +20,11 @@
       "port": 5174
     },
     {
-      "name": "model-viewer",
+      "name": "console",
       "runtimeExecutable": "bash",
       "runtimeArgs": [
         "-c",
-        "cd ml && uv run --group onnx python -m fsd_ml.viewer --driver flowpilot --no-open"
+        "cd ml && uv run --group detect python -m fsd_ml.console --no-open"
       ],
       "port": 8200
     }

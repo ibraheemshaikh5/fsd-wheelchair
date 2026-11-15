@@ -1,15 +1,13 @@
-"""WebSocket endpoints: /ws/phone (sensor ingest), /ws/viewer (live debug feed)
+"""WebSocket endpoints: /ws/phone (sensor ingest), /ws/viewer (the iPad's feed)
 and /ws/model (every frame for the driving model, see ``model_feed``).
 
 Every binary frame the phone sends is answered with an ack carrying its seq,
-whether it was stored, only rate-limited out of the recording, or refused with a
-readable header, so the phone can cap the frames it has in flight. A frame whose
-header cannot be read gets only the error reply.
+whether it was stored or refused with a readable header, so the phone can cap
+the frames it has in flight. A frame whose header cannot be read gets only the
+error reply.
 
 Only one phone feeds the service. The newest /ws/phone connection wins: the
-older one is told it was superseded and closes itself with 4410. The exception is
-a phone signed in to Tailscale as one of ``priority_users``: while it holds the
-slot, any other phone is turned away with 4409 instead. Every send
+older one is told it was superseded and closes itself with 4410. Every send
 and close on a socket happens in that socket's own task, never from another
 connection's task, so frames on the wire can never interleave.
 """
@@ -17,6 +15,7 @@ connection's task, so frames on the wire can never interleave.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import Callable
@@ -26,10 +25,18 @@ from typing import Any
 from fastapi import APIRouter, WebSocket
 from starlette.websockets import WebSocketDisconnect
 
-from drive_service.config import Settings
+from drive_service.config import (
+    MAX_CONSECUTIVE_ERRORS,
+    MAX_FRAME_BYTES,
+    MAX_FRAME_HEADER_BYTES,
+    MAX_TEXT_BYTES,
+    PHONE_IDLE_TIMEOUT_S,
+    VIEWER_FPS,
+    Settings,
+)
 from drive_service.destination import DestinationStore
 from drive_service.hub import Hub
-from drive_service.model_feed import MAX_MODEL_FEEDS, serve_model
+from drive_service.model_feed import serve_model
 from drive_service.origin import origin_allowed
 from drive_service.protocol import (
     Ack,
@@ -50,13 +57,9 @@ log = logging.getLogger(__name__)
 
 CLOSE_POLICY_VIOLATION = 1008
 CLOSE_PHONE_IDLE = 4408
-CLOSE_PHONE_BUSY = 4409
 CLOSE_PHONE_REPLACED = 4410
-CLOSE_TOO_MANY_VIEWERS = 4429
 
 DISCONNECT = "websocket.disconnect"
-# Set by `tailscale serve` to the login of the tailnet user making the request.
-TAILSCALE_LOGIN_HEADER = "tailscale-user-login"
 
 # Builds the status to send a viewer, as of the moment it is called.
 type StatusNow = Callable[[], dict[str, Any]]
@@ -77,17 +80,7 @@ class _Outcome:
     ack: Ack | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _Holder:
-    """The connection that holds the phone slot."""
-
-    lease: int
-    superseded: asyncio.Event
-    priority: bool
-
-
 REPLACED = _Close(CLOSE_PHONE_REPLACED, "replaced by a newer phone connection")
-BUSY = _Close(CLOSE_PHONE_BUSY, "another phone has priority")
 TOO_MANY_ERRORS = _Close(CLOSE_POLICY_VIOLATION, "too many invalid messages")
 
 
@@ -101,11 +94,6 @@ async def _close_quietly(ws: WebSocket, close: _Close) -> None:
         await ws.close(code=close.code, reason=close.reason)
     except (WebSocketDisconnect, RuntimeError) as error:
         log.debug("socket was already closed when sending %d: %r", close.code, error)
-
-
-def _is_priority(ws: WebSocket, settings: Settings) -> bool:
-    login = ws.headers.get(TAILSCALE_LOGIN_HEADER, "").strip().lower()
-    return bool(login) and login in settings.priority_users
 
 
 def _discard(task: asyncio.Future[Any]) -> None:
@@ -141,21 +129,21 @@ async def _next_phone_event(
     return _idle(timeout_s)
 
 
-def _dispatch(hub: Hub, settings: Settings, message: dict[str, Any]) -> _Outcome:
+def _dispatch(hub: Hub, message: dict[str, Any]) -> _Outcome:
     """Validate one raw WebSocket message and hand it to the hub."""
     data = message.get("bytes")
     if data is not None:
-        frame = parse_frame(data, settings.max_frame_bytes, settings.max_frame_header_bytes)
+        frame = parse_frame(data, MAX_FRAME_BYTES, MAX_FRAME_HEADER_BYTES)
         return _Outcome(ack=hub.handle_frame(frame))
     text = message.get("text")
     if text is None:
         raise ProtocolError("empty message")
-    return _Outcome(reply=hub.handle_message(parse_text(text, settings.max_text_bytes)))
+    return _Outcome(reply=hub.handle_message(parse_text(text, MAX_TEXT_BYTES)))
 
 
-def _try_dispatch(hub: Hub, settings: Settings, message: dict[str, Any]) -> _Outcome:
+def _try_dispatch(hub: Hub, message: dict[str, Any]) -> _Outcome:
     try:
-        return _dispatch(hub, settings, message)
+        return _dispatch(hub, message)
     except ProtocolError as error:
         hub.note_rejected()
         log.warning("rejected phone message: %s", error)
@@ -172,24 +160,22 @@ async def _send(ws: WebSocket, outcome: _Outcome) -> None:
         await ws.send_text(outcome.ack.to_wire())
 
 
-async def _reply(ws: WebSocket, outcome: _Outcome, errors: int, settings: Settings) -> int | None:
+async def _reply(ws: WebSocket, outcome: _Outcome, errors: int) -> int | None:
     """Answer the phone. Returns the updated error streak, or None to stop serving."""
     await _send(ws, outcome)
     if outcome.error is None:
         return 0
-    if errors + 1 >= settings.max_consecutive_errors:
+    if errors + 1 >= MAX_CONSECUTIVE_ERRORS:
         log.error("closing phone connection after %d bad messages", errors + 1)
         await _close_quietly(ws, TOO_MANY_ERRORS)
         return None
     return errors + 1
 
 
-async def _serve_phone(
-    ws: WebSocket, hub: Hub, settings: Settings, lease: int, superseded: asyncio.Event
-) -> None:
+async def _serve_phone(ws: WebSocket, hub: Hub, lease: int, superseded: asyncio.Event) -> None:
     errors: int | None = 0
     while errors is not None:
-        event = await _next_phone_event(ws, superseded, settings.phone_idle_timeout_s)
+        event = await _next_phone_event(ws, superseded, PHONE_IDLE_TIMEOUT_S)
         # Re-checked with no await before the dispatch below, so a message already
         # queued on a replaced socket can never be applied after the takeover.
         if not isinstance(event, _Close) and not hub.holds_phone(lease):
@@ -200,8 +186,7 @@ async def _serve_phone(
             return
         if event["type"] == DISCONNECT:
             return
-        outcome = _try_dispatch(hub, settings, event)
-        errors = await _reply(ws, outcome, errors, settings)
+        errors = await _reply(ws, _try_dispatch(hub, event), errors)
 
 
 async def _send_viewer_update(
@@ -230,11 +215,11 @@ async def _idle_until(ws: WebSocket, loop: asyncio.AbstractEventLoop, deadline: 
     return True
 
 
-async def _serve_viewer(ws: WebSocket, hub: Hub, status_now: StatusNow, settings: Settings) -> None:
+async def _serve_viewer(ws: WebSocket, hub: Hub, status_now: StatusNow) -> None:
     # Paced by the event loop's own clock (time_source may be a fake in tests), so
     # messages from the viewer can never make the service send faster.
     loop = asyncio.get_running_loop()
-    interval_s = 1.0 / settings.viewer_fps
+    interval_s = 1.0 / VIEWER_FPS
     next_tick = loop.time()
     last_sent: Stamped[Frame] | None = None
     while True:
@@ -254,13 +239,10 @@ def build_router(
     router = APIRouter()
 
     def status_now() -> dict[str, Any]:
-        return live_status(hub, recorder, destinations, time_source.mono(), settings)
+        return live_status(hub, recorder, destinations, time_source.mono())
 
-    viewers = {"count": 0}
-    # Counted apart from viewers, so open iPads and debug pages never lock the model out.
-    model_feeds = {"count": 0}
-    # Who holds the phone slot; its event is set to tell it a newer one took over.
-    current_phone: dict[str, _Holder | None] = {"holder": None}
+    # Set to tell the connection holding the phone slot that a newer one took over.
+    phone_superseded: asyncio.Event | None = None
 
     async def refuse_foreign_origin(ws: WebSocket) -> bool:
         if origin_allowed(ws.headers, settings.allowed_origins):
@@ -276,36 +258,20 @@ def build_router(
         await ws.close(code=CLOSE_POLICY_VIOLATION)
         return True
 
-    def slot_reserved() -> bool:
-        """Whether a priority phone holds the slot, so others must not take it."""
-        holder = current_phone["holder"]
-        return holder is not None and holder.priority and hub.holds_phone(holder.lease)
-
-    def take_phone_slot(priority: bool) -> _Holder:
-        """Supersede the current phone connection and claim the slot (no awaits)."""
-        previous = current_phone["holder"]
-        if previous is not None:
-            previous.superseded.set()
-        holder = _Holder(lease=hub.attach_phone(), superseded=asyncio.Event(), priority=priority)
-        current_phone["holder"] = holder
-        return holder
-
     @router.websocket("/ws/phone")
     async def phone_socket(ws: WebSocket) -> None:
+        nonlocal phone_superseded
         if await refuse_foreign_origin(ws):
             return
         await ws.accept()
-        priority = _is_priority(ws, settings)
-        # No await between this check and taking the slot, so two phones cannot race past it.
-        if not priority and slot_reserved():
-            log.info("turned away a phone: a priority phone holds the slot")
-            await _close_quietly(ws, BUSY)
-            return
-        holder = take_phone_slot(priority)
-        lease = holder.lease
-        log.info("phone connected (lease %d%s)", lease, ", priority" if priority else "")
+        # No await between superseding the old connection and taking the slot.
+        if phone_superseded is not None:
+            phone_superseded.set()
+        superseded = phone_superseded = asyncio.Event()
+        lease = hub.attach_phone()
+        log.info("phone connected (lease %d)", lease)
         try:
-            await _serve_phone(ws, hub, settings, lease, holder.superseded)
+            await _serve_phone(ws, hub, lease, superseded)
         except WebSocketDisconnect:
             pass
         finally:
@@ -317,31 +283,15 @@ def build_router(
         if await refuse_foreign_origin(ws):
             return
         await ws.accept()
-        if viewers["count"] >= settings.max_viewers:
-            await ws.close(code=CLOSE_TOO_MANY_VIEWERS, reason="too many viewers")
-            return
-        viewers["count"] += 1
-        try:
-            await _serve_viewer(ws, hub, status_now, settings)
-        except WebSocketDisconnect:
-            pass
-        finally:
-            viewers["count"] -= 1
+        with contextlib.suppress(WebSocketDisconnect):
+            await _serve_viewer(ws, hub, status_now)
 
     @router.websocket("/ws/model")
     async def model_socket(ws: WebSocket) -> None:
         if await refuse_foreign_origin(ws):
             return
         await ws.accept()
-        if model_feeds["count"] >= MAX_MODEL_FEEDS:
-            await ws.close(code=CLOSE_TOO_MANY_VIEWERS, reason="too many model feeds")
-            return
-        model_feeds["count"] += 1
-        try:
-            await serve_model(ws, hub, status_now, time_source.mono, 1.0 / settings.viewer_fps)
-        except WebSocketDisconnect:
-            pass
-        finally:
-            model_feeds["count"] -= 1
+        with contextlib.suppress(WebSocketDisconnect):
+            await serve_model(ws, hub, status_now, time_source.mono, 1.0 / VIEWER_FPS)
 
     return router

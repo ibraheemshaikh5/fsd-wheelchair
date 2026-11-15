@@ -1,6 +1,6 @@
 """The chair's phone, live, by way of the driving service.
 
-This reads the service's model feed (``/ws/model``), not the viewer feed the
+This reads the service's model feed (``/ws/model``), not the console feed the
 iPad uses: the service pushes every camera frame the moment it lands, as the
 status (JSON) and then the frame (``[uint32 LE header length][header JSON][JPEG]``).
 The header's ``age_ms`` says how long ago the phone captured the frame, so each
@@ -11,6 +11,9 @@ them. The service allows two model feeds at once.
     feed = LiveFeed("http://127.0.0.1:8000")      # or the service's Tailscale address
     feed.start()
     sample = feed.latest()
+
+The feed also keeps count of how far the chair has turned, from the phone's gyro in each
+status, so anything that turns the chair by an angle can read it at any time.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import ssl
 import struct
 import threading
 import time
@@ -27,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+import certifi
 import httpx
 import numpy as np
 from PIL import Image
@@ -34,12 +39,14 @@ from PIL import Image
 from fsd_ml.drivers import Goal
 from fsd_ml.geo import to_local, world_to_chair
 from fsd_ml.pipeline.route import Route
-from fsd_ml.pipeline.types import Sensors
 from fsd_ml.video import standardize_frame
 
 # How much recent footage is kept for models that read a history.
 HISTORY_S = 4.0
-TOO_MANY_FEEDS = 4429
+# A frame older than this is not driven on: the chair has moved since it was taken.
+MAX_FRAME_AGE_S = 0.5
+# The gyro counts as reporting while a fresh reading arrived within this long.
+GYRO_FRESH_S = 0.5
 MS_PER_S = 1000.0
 _LENGTH_PREFIX = struct.Struct("<I")
 
@@ -55,6 +62,12 @@ class LiveFrame:
     # When the phone captured it, on this machine's monotonic clock; None before
     # the phone's clock is synced with the service.
     captured_s: float | None = None
+    # The JPEG exactly as the camera sent it: full size, not re-encoded.
+    jpeg: bytes | None = None
+
+    def age_s(self, now_s: float) -> float:
+        """Seconds since the phone took it; since it arrived, before the clocks are synced."""
+        return now_s - (self.captured_s if self.captured_s is not None else self.received_s)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +121,10 @@ class LiveFeed:
         self._frames: deque[LiveFrame] = deque()
         self._count = 0
         self._heard_s: float | None = None
+        # How far the chair has turned since the feed began (radians, positive left), and
+        # when the gyro last gave a fresh reading.
+        self._yaw_rad = 0.0
+        self._gyro_s: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         # Why the feed is down, in words, while it is.
@@ -128,7 +145,12 @@ class LiveFeed:
         wait_s = 0.5
         while not self._stop.is_set():
             try:
-                with connect(self.address, open_timeout=5, max_size=8 * 1024 * 1024) as socket:
+                # certifi's CAs: python.org builds on macOS have none, so wss:// would fail.
+                tls = ssl.create_default_context(cafile=certifi.where())
+                secure = {"ssl": tls} if self.address.startswith("wss://") else {}
+                with connect(
+                    self.address, open_timeout=5, max_size=8 * 1024 * 1024, **secure
+                ) as socket:
                     while not self._stop.is_set():
                         try:
                             message = socket.recv(timeout=1.0)
@@ -136,13 +158,8 @@ class LiveFeed:
                             continue
                         self._take(message)
                         wait_s = 0.5
-            except ConnectionClosed as closed:
-                code = closed.rcvd.code if closed.rcvd else None
-                self.problem = (
-                    "the service already feeds two models; close another model viewer"
-                    if code == TOO_MANY_FEEDS
-                    else "the service closed the connection"
-                )
+            except ConnectionClosed:
+                self.problem = "the service closed the connection"
             except InvalidStatus as refused:
                 self.problem = (
                     f"the service refused the connection ({refused.response.status_code})"
@@ -161,6 +178,7 @@ class LiveFeed:
                 return
             with self._lock:
                 self._status, self._heard_s, self.problem = status, now, None
+                self._turned(status, now)
             return
         parts = _split_frame(message)
         if parts is None:
@@ -174,10 +192,35 @@ class LiveFeed:
         captured = _captured_s(header, now)
         with self._lock:
             self._count += 1
-            self._frames.append(LiveFrame(self._count, now, frame, captured))
+            self._frames.append(LiveFrame(self._count, now, frame, captured, jpeg))
             while self._frames and now - self._frames[0].received_s > HISTORY_S:
                 self._frames.popleft()
             self._heard_s = now
+
+    def _turned(self, status: dict[str, Any], now: float) -> None:
+        """Add the turn since the last fresh gyro reading to the running angle."""
+        motion = status.get("motion") or {}
+        rate = motion.get("yaw_rate_dps")
+        if not motion.get("fresh") or rate is None:
+            return
+        # A resting gyro wanders a little; that is not the chair turning.
+        if self._gyro_s is not None and now - self._gyro_s < GYRO_FRESH_S and abs(rate) > 0.5:
+            self._yaw_rad += math.radians(rate) * (now - self._gyro_s)
+        self._gyro_s = now
+
+    def yaw_rad(self) -> float:
+        """How far the chair has turned since the feed began, positive left."""
+        return self._yaw_rad
+
+    def gyro_fresh(self) -> bool:
+        return self._gyro_s is not None and self._clock() - self._gyro_s < GYRO_FRESH_S
+
+    def fresh_frame(self) -> LiveFrame | None:
+        """The newest frame, or None when there is none young enough to drive on."""
+        frame = self.latest().frame
+        if frame is None or frame.age_s(self._clock()) > MAX_FRAME_AGE_S:
+            return None
+        return frame
 
     def latest(self) -> LiveSample:
         with self._lock:
@@ -185,7 +228,7 @@ class LiveFeed:
             silent = float("inf") if self._heard_s is None else self._clock() - self._heard_s
             return LiveSample(dict(self._status), frame, silent)
 
-    def window(self, count: int, frame_hz: float) -> list[np.ndarray]:
+    def window(self, count: int, frame_hz: float) -> list[LiveFrame]:
         """The newest ``count`` frames about ``1 / frame_hz`` apart, oldest first.
 
         Spaced by when each picture was taken, so a stall that delivers several
@@ -210,51 +253,42 @@ class LiveFeed:
         for back in range(count):
             wanted = newest - back / frame_hz
             nearest = min(range(len(frames)), key=lambda i: abs(times[i] - wanted))
-            picked.append(frames[nearest].image)
+            picked.append(frames[nearest])
         return picked[::-1]
 
 
 def ipad_message(status: dict[str, Any]) -> dict[str, Any]:
     """What the rider has asked for on the iPad, in words for a person to read."""
-    goal, destination = status.get("goal"), status.get("destination")
+    goal, destination = status.get("goal"), status.get("destination") or {}
+    # ``request`` changes when the rider asks for something new, and only then.
     if goal and goal.get("kind") == "instruction":
-        return {"kind": "instruction", "text": f"“{goal['instruction']}”"}
+        return {
+            "kind": "instruction",
+            "text": f"“{goal['instruction']}”",
+            "request": f"goal-{goal.get('version')}",
+        }
     if not goal and not destination:
-        return {"kind": None, "text": "Nothing set on the iPad"}
-    away = (destination or {}).get("distance_m")
+        return {"kind": None, "text": "Nothing set on the iPad", "request": None}
+    away = destination.get("distance_m")
     where = f"{away:.0f} m away" if away is not None else "distance unknown without GPS"
     if goal and goal.get("kind") == "route":
-        return {"kind": "route", "text": f"Map destination, {where}, by a planned route"}
-    return {"kind": "destination", "text": f"Map destination, {where}, no route"}
-
-
-def to_sensors(sample: LiveSample, now_ms: float) -> Sensors:
-    """A live sample as the pipeline's input. Ages come from the service's own status."""
-    status = sample.status
-    frame, gps, heading = status.get("frame"), status.get("gps"), status.get("heading") or {}
-
-    def taken(reading: dict[str, Any] | None) -> float | None:
-        # Only a reading the service calls fresh gets a time; a stale one counts as missing.
-        if not reading or not reading.get("fresh") or reading.get("age_ms") is None:
-            return None
-        return now_ms - float(reading["age_ms"])
-
-    # Only a heading against true north can be combined with a map route.
-    true_heading = heading.get("deg") if heading.get("reference") == "true" else None
-    return Sensors(
-        t_ms=now_ms,
-        frame=sample.frame.image if sample.frame else None,
-        frame_t_ms=taken(frame),
-        lat=gps.get("lat") if gps else None,
-        lon=gps.get("lon") if gps else None,
-        fix_t_ms=taken(gps),
-        heading_deg=true_heading,
-        speed_mps=gps.get("speed_mps") if gps else None,
-    )
+        return {
+            "kind": "route",
+            "text": f"Map destination, {where}, by a planned route",
+            "request": f"goal-{goal.get('version')}",
+        }
+    return {
+        "kind": "destination",
+        "text": f"Map destination, {where}, no route",
+        "request": f"point-{destination.get('lat')}-{destination.get('lon')}",
+    }
 
 
 # How far along the route the model is aimed.
 ROUTE_LOOKAHEAD_M = 10.0
+# Closer than this counts as there: a phone's GPS cannot tell much finer.
+ARRIVE_M = 3.0
+ARRIVED = "arrived at the iPad's destination"
 
 
 class ChairGoal:
@@ -286,7 +320,7 @@ class ChairGoal:
         if goal and goal.get("kind") == "instruction":
             return Goal(instruction=goal["instruction"]), f"iPad: “{goal['instruction']}”"
 
-        destination = status.get("destination")
+        destination = status.get("destination") or {}
         if not goal and not destination:
             return None, "no destination set on the iPad yet"
 
@@ -295,6 +329,9 @@ class ChairGoal:
         if not placed or heading.get("deg") is None:
             return None, "the iPad has a destination, but the chair has no fresh GPS and heading"
         facing = float(heading["deg"])
+        distance = destination.get("distance_m")
+        if distance is not None and float(distance) <= ARRIVE_M:
+            return None, ARRIVED
 
         if goal and goal.get("kind") == "route":
             try:
@@ -305,6 +342,8 @@ class ChairGoal:
                 east, north = to_local(gps["lat"], gps["lon"], route.origin)
                 self._progress_m = route.project(east, north, self._progress_m)
                 left_m = route.length_m - self._progress_m
+                if left_m <= ARRIVE_M:
+                    return None, ARRIVED
                 target = route.point_at(self._progress_m + ROUTE_LOOKAHEAD_M)
                 ahead, left = world_to_chair(target, east, north, facing)[0]
                 return Goal(
@@ -312,7 +351,7 @@ class ChairGoal:
                 ), f"iPad route: {left_m:.0f} m left"
 
         # A bare destination: aim straight at it.
-        distance, bearing = destination.get("distance_m"), destination.get("bearing_deg")
+        bearing = destination.get("bearing_deg")
         if distance is None or bearing is None:
             return None, "the iPad has a destination, but the chair has no fresh GPS"
         off = math.radians(float(bearing) - facing)

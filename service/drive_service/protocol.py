@@ -2,7 +2,7 @@
 
 Text WebSocket messages are JSON objects tagged by ``type``. Binary messages
 are camera frames: ``[uint32 LE header length][header JSON][JPEG bytes]``.
-The contract is documented in docs/phone-protocol.md; keep the two in sync.
+The senders are web/shared/protocol.ts (capture page) and the iPad app; keep them in sync.
 """
 
 from __future__ import annotations
@@ -70,8 +70,7 @@ class Hello(_PhoneMessage):
     # supplies the frames).
     camera: CameraInfo | None = None
     mount: MountInfo | None = None
-    # "device_xyz": imu rx, ry, rz are rotation about device x, y, z. Absent on
-    # older pages, which wrote [about y, about z, about x] in those columns.
+    # "device_xyz": imu rx, ry, rz are rotation about device x, y, z. Every sender sets it.
     imu_axes: Literal["device_xyz"] | None = None
 
 

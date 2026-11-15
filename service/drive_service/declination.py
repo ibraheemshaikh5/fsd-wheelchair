@@ -120,9 +120,7 @@ DEFAULT_CACHE = DeclinationCache()
 
 
 def resolve_declination(
-    configured_deg: float | None, fresh_fix: Gps | None, cache: DeclinationCache = DEFAULT_CACHE
+    fresh_fix: Gps | None, cache: DeclinationCache = DEFAULT_CACHE
 ) -> float | None:
-    """The configured declination if set, otherwise the model's value at the fix."""
-    if configured_deg is not None:
-        return configured_deg
+    """The World Magnetic Model's declination at the fix; None until there is one."""
     return cache.lookup(fresh_fix)

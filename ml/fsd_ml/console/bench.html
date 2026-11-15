@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chair test bench</title>
+<style>
+  :root {
+    --bg: #0d1014; --panel: #161b22; --line: #2a313b; --text: #e6edf3; --muted: #8b949e;
+    --teal: #3ddbd9; --good: #4cd964; --warn: #ffd54f; --bad: #ff5252; --amber: #ffa726;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap; padding: 10px 16px; background: rgba(13, 16, 20, 0.96);
+    border-bottom: 1px solid var(--line); }
+  h1 { font-size: 16px; margin: 0 6px 0 0; }
+  h2 { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted);
+    margin: 0 0 10px; font-weight: 600; }
+  .chip { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+    font-size: 13px; white-space: nowrap; }
+  .chip.ok { color: var(--good); border-color: rgba(76, 217, 100, 0.5); }
+  .chip.no { color: var(--bad); border-color: rgba(255, 82, 82, 0.6); }
+  .spacer { flex: 1; }
+  a { color: var(--teal); }
+  button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.primary { background: var(--teal); border-color: var(--teal); color: #06231f; font-weight: 600; }
+  button.stop { background: #c62828; border: 0; color: #fff; font-weight: 700; letter-spacing: 0.05em;
+    padding: 11px 30px; font-size: 16px; }
+  button.stop:hover { background: #e53935; }
+  main { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 14px;
+    padding: 14px 16px 40px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .stack { display: grid; gap: 14px; align-content: start; }
+  .note { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .camwrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
+  #top { width: 100%; max-width: 360px; display: block; border-radius: 8px; }
+  .running { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal) inset; }
+  .banner { padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); }
+  .banner.go { border-color: var(--teal); }
+  .banner.arrived, .banner.finished { border-color: var(--good); }
+  .banner.failed, .banner.aborted { border-color: var(--bad); }
+  .banner strong { display: block; }
+  .case { border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: grid; gap: 6px; }
+  .case .head { display: flex; align-items: center; gap: 10px; }
+  .case .title { font-weight: 600; flex: 1; }
+  .case .does { color: var(--muted); font-size: 13px; }
+  input[type=text], input[type=number] { width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; }
+  input[type=number] { width: 90px; padding: 3px 6px; text-align: right; }
+  input[type=range] { width: 150px; accent-color: var(--teal); vertical-align: middle; }
+  details summary { cursor: pointer; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+  td { padding: 3px 0; border-bottom: 1px solid var(--line); }
+  td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .error { color: var(--bad); }
+  label.toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+  #cam { width: 100%; display: block; aspect-ratio: 16 / 9; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Chair test bench</h1>
+  <span class="chip" id="chipFeed">camera</span>
+  <span class="chip" id="chipGyro">gyro</span>
+  <span class="chip" id="chipChair">chair</span>
+  <span class="chip" id="chipFloor">floor</span>
+  <span class="spacer"></span>
+  <a href="/">Full console</a>
+  <button class="stop" id="stop" title="Stops the chair now (Esc)">STOP</button>
+</header>
+
+<main>
+  <section class="stack">
+    <div class="banner" id="banner"><strong id="bannerTitle">Ready.</strong><span id="bannerText" class="note">Pick a test on the right.</span></div>
+    <div class="panel">
+      <h2>What the chair sees</h2>
+      <div class="camwrap"><canvas id="cam" width="640" height="360"></canvas></div>
+    </div>
+    <div class="panel">
+      <h2>From above</h2>
+      <canvas id="top" width="360" height="360"></canvas>
+      <p class="note"><span style="color:var(--bad)">●</span> what the obstacle sense sees now</p>
+    </div>
+    <div class="panel">
+      <h2>Drive by hand</h2>
+      <div class="row">
+        <label class="toggle"><input type="checkbox" id="wasd"> W A S D / arrow keys</label>
+        <span>speed <input type="range" id="wasdSpeed" min="1" max="30" step="1" value="6"> <output id="wasdOut">6%</output></span>
+      </div>
+      <p class="note" id="wasdNote">Hold a key to move, let go to stop. S reverses.</p>
+    </div>
+  </section>
+
+  <section class="stack">
+    <div class="panel">
+      <h2>Tests</h2>
+      <div class="stack" id="cases"></div>
+      <p class="error" id="error" role="alert"></p>
+    </div>
+
+    <div class="panel">
+      <details>
+        <summary>How the chair is being driven (settings)</summary>
+        <table id="settings"></table>
+        <p class="note">Stick numbers are percent, capped at 30. A change takes effect at once, for
+          every way of driving, and is kept in runs/console/bench/settings.json.</p>
+      </details>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { bench: null, built: false, settings: "" };
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || "request failed");
+  return body;
+}
+function showError(message) { $("error").textContent = message || ""; }
+function chip(id, text, ok) {
+  $(id).textContent = text;
+  $(id).className = "chip " + (ok === null ? "" : ok ? "ok" : "no");
+}
+
+// The tests.
+function buildCases(cases) {
+  $("cases").innerHTML = "";
+  for (const test of cases) {
+    const card = document.createElement("div");
+    card.className = "case"; card.id = `case-${test.id}`;
+    card.innerHTML = `
+      <div class="head"><span class="title"></span><button class="primary run">Run</button></div>
+      <div class="does"></div>
+      ${test.input ? '<input type="text" class="say" aria-label="What to go to">' : ""}`;
+    card.querySelector(".title").textContent = test.title;
+    card.querySelector(".does").textContent = test.does;
+    if (test.input) card.querySelector(".say").value = test.params.say;
+    card.querySelector(".run").addEventListener("click", () => run(test.id));
+    $("cases").appendChild(card);
+  }
+  state.built = true;
+}
+async function run(caseId) {
+  const card = $(`case-${caseId}`), say = card && card.querySelector(".say");
+  const query = new URLSearchParams({ case: caseId });
+  if (say) query.set("say", say.value);
+  try {
+    showError("");
+    render(await api(`/api/bench/run?${query}`, { method: "POST" }));
+  } catch (error) { showError(error.message); }
+}
+async function stop() {
+  held.clear();
+  try { render(await api("/api/bench/stop", { method: "POST" })); } catch (error) { showError(error.message); }
+}
+
+function render(bench) {
+  state.bench = bench;
+  if (!state.built) buildCases(bench.cases);
+  const run = bench.run || {}, running = Boolean(run.running);
+  for (const test of bench.cases) $(`case-${test.id}`).querySelector(".run").disabled = running;
+
+  // The banner: what is happening now, or how the last run ended.
+  const banner = $("banner");
+  if (running) {
+    banner.className = "banner go";
+    $("bannerTitle").textContent = `Running: ${titleOf(run)}`;
+    $("bannerText").textContent = run.phase || "";
+  } else if (run.outcome) {
+    banner.className = `banner ${run.outcome}`;
+    $("bannerTitle").textContent = `${titleOf(run)}: ${run.outcome.toUpperCase()}`;
+    $("bannerText").textContent = `${run.reason || ""} · ${run.seconds} s`;
+  } else {
+    banner.className = "banner";
+    $("bannerTitle").textContent = "Ready.";
+    $("bannerText").textContent = "Pick a test on the right.";
+  }
+
+  // Settings: rebuilt only when they change, so typing in a box is not interrupted.
+  const settings = JSON.stringify(bench.settings);
+  if (settings !== state.settings) {
+    state.settings = settings;
+    $("settings").innerHTML = "";
+    for (const [name, value] of Object.entries(bench.settings)) {
+      const row = $("settings").insertRow(), box = document.createElement("input");
+      row.insertCell().textContent = name.replace(/_/g, " ");
+      box.type = "number"; box.step = "any"; box.value = value;
+      box.addEventListener("change", async () => {
+        try { render(await api(`/api/bench/set?name=${name}&value=${Number(box.value)}`, { method: "POST" })); showError(""); }
+        catch (error) { showError(error.message); }
+      });
+      row.insertCell().appendChild(box);
+    }
+  }
+
+  chip("chipFeed", bench.waiting ? `camera: ${bench.waiting}` : "camera live", !bench.waiting);
+  chip("chipGyro", bench.gyro_fresh ? "gyro live" : "gyro: no reading", bench.gyro_fresh);
+  const sight = bench.sight;
+  if (!sight) chip("chipFloor", "obstacle sense: not installed", null);
+  else chip("chipFloor", sight.problem ? "obstacle sense: error" : sight.floor ? `floor in view · ${bench.obstacles.length} obstacles` : "cannot see the floor", Boolean(sight.floor));
+  const board = bench.board || {};
+  if ("chair_listening" in board) chip("chipChair", board.chair_listening ? "chair on" : "chair not listening: switched on?", board.chair_listening);
+  else chip("chipChair", "chair: checked when a run starts", null);
+  if ($("wasd").checked !== bench.manual && !wasdBusy) { $("wasd").checked = bench.manual; }
+  drawTop(bench);
+}
+function titleOf(run) {
+  const test = state.bench.cases.find((c) => c.kind === run.kind && (c.kind !== "turn" || c.params.degrees_left === run.degrees_left));
+  return test ? test.title : run.kind;
+}
+$("stop").addEventListener("click", stop);
+
+// Driving by hand.
+const KEYS = { w: [0, 1], arrowup: [0, 1], s: [0, -1], arrowdown: [0, -1], a: [-1, 0], arrowleft: [-1, 0], d: [1, 0], arrowright: [1, 0] };
+const held = new Set();
+let lastStick = "0,0", wasdBusy = false;
+function stickNow() {
+  let x = 0, y = 0;
+  for (const key of held) { x += KEYS[key][0]; y += KEYS[key][1]; }
+  const strength = Math.max(1, Math.min(30, Number($("wasdSpeed").value) || 6));
+  return [Math.sign(x) * strength, Math.sign(y) * strength];
+}
+async function sendDrive(force) {
+  if (!$("wasd").checked) return;
+  const [x, y] = stickNow(), now = `${x},${y}`;
+  if (now === "0,0" && lastStick === "0,0" && !force) return;
+  lastStick = now;
+  try {
+    const answer = await api(`/api/live/drive?x=${x}&y=${y}`, { method: "POST" });
+    $("wasdNote").textContent = answer.warning ? `Sent, but ${answer.warning}`
+      : answer.sent ? `Stick x ${x}%, y ${y}%` : `Not sent: ${answer.problem}`;
+    if (!answer.sent) setWasd(false);
+  } catch (error) { $("wasdNote").textContent = error.message; setWasd(false); }
+}
+async function setWasd(on) {
+  held.clear(); lastStick = "0,0"; wasdBusy = true;
+  try { await api(`/api/live/manual?on=${on ? 1 : 0}`, { method: "POST" }); }
+  catch (error) { on = false; $("wasdNote").textContent = error.message; }
+  $("wasd").checked = on; wasdBusy = false;
+  if (on) $("wasdNote").textContent = "Hold a key to move, let go to stop. S reverses.";
+}
+setInterval(() => sendDrive(false), 150);
+$("wasd").addEventListener("change", (event) => { event.target.blur(); setWasd(event.target.checked); });
+$("wasdSpeed").addEventListener("input", (event) => {
+  $("wasdOut").textContent = `${event.target.value}%`;
+  try { localStorage.setItem("benchWasdSpeed", event.target.value); } catch (error) { /* private window */ }
+  if (held.size) sendDrive(true);
+});
+$("wasdSpeed").addEventListener("change", (event) => event.target.blur());
+try {
+  const saved = Number(localStorage.getItem("benchWasdSpeed"));
+  if (saved >= 1 && saved <= 30) { $("wasdSpeed").value = saved; $("wasdOut").textContent = `${saved}%`; }
+} catch (error) { /* private window */ }
+function typing(event) { return event.target.tagName === "INPUT" && ["text", "number"].includes(event.target.type); }
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { stop(); return; }
+  const key = event.key.toLowerCase();
+  if (!$("wasd").checked || !(key in KEYS) || typing(event) || event.metaKey || event.ctrlKey) return;
+  event.preventDefault();
+  if (!held.has(key)) { held.add(key); sendDrive(true); }
+});
+document.addEventListener("keyup", (event) => { if (held.delete(event.key.toLowerCase())) sendDrive(true); });
+window.addEventListener("blur", () => { if (held.size) { held.clear(); sendDrive(true); } });
+
+// The camera and the map.
+const topc = $("top"), tctx = topc.getContext("2d");
+
+// The camera: the phone's own frames, as fast as they load, cut to the 16:9 middle the
+// models see.
+const cam = $("cam"), cctx = cam.getContext("2d");
+async function camLoop() {
+  while (true) {
+    const began = performance.now();
+    const image = new Image();
+    await new Promise((resolve) => { image.onload = image.onerror = resolve; image.src = `/live/now.jpg?t=${began}`; });
+    if (image.naturalWidth) {
+      const w = image.naturalWidth, h = image.naturalHeight;
+      const keepW = Math.min(w, Math.round(h * 16 / 9)), keepH = Math.min(h, Math.round(w * 9 / 16));
+      if (cam.width !== keepW || cam.height !== keepH) { cam.width = keepW; cam.height = keepH; }
+      cctx.drawImage(image, (w - keepW) / 2, (h - keepH) / 2, keepW, keepH, 0, 0, keepW, keepH);
+    }
+    const wait = image.naturalWidth ? 33 - (performance.now() - began) : 500;
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+}
+function drawTop(live) {
+  const size = topc.width, reach = 4, scale = size / reach;
+  const map = (ahead, left) => [size / 2 - left * scale, size - 60 - ahead * scale];
+  tctx.fillStyle = "#0d1014"; tctx.fillRect(0, 0, size, size);
+  tctx.strokeStyle = "#2a313b"; tctx.lineWidth = 1;
+  for (let m = -2; m <= 2; m++) { tctx.beginPath(); tctx.moveTo(...map(-1, m)); tctx.lineTo(...map(reach, m)); tctx.stroke(); }
+  for (let m = 0; m <= reach; m++) { tctx.beginPath(); tctx.moveTo(...map(m, -3)); tctx.lineTo(...map(m, 3)); tctx.stroke(); }
+  for (const [ahead, left, radius] of live.obstacles || []) {
+    const at = map(ahead, left);
+    tctx.beginPath(); tctx.arc(at[0], at[1], Math.max(2, radius * scale), 0, Math.PI * 2);
+    tctx.fillStyle = "rgba(255, 82, 82, 0.85)"; tctx.fill();
+  }
+  const chair = live.chair;
+  const corner = map(chair.length_m / 2, chair.width_m / 2);
+  tctx.fillStyle = "#e6edf3"; tctx.fillRect(corner[0], corner[1], chair.width_m * scale, chair.length_m * scale);
+  tctx.fillStyle = "#0d1014";
+  const nose = map(chair.length_m / 2 - 0.08, 0);
+  tctx.beginPath(); tctx.moveTo(nose[0], nose[1] - 6); tctx.lineTo(nose[0] + 6, nose[1] + 5); tctx.lineTo(nose[0] - 6, nose[1] + 5); tctx.fill();
+}
+
+// This poll is also the page's heartbeat: a run stops when the console stops hearing it.
+async function pollBench() {
+  try { render(await api("/api/bench")); } catch (error) { chip("chipFeed", "console not answering", false); }
+  setTimeout(pollBench, 500);
+}
+pollBench();
+camLoop();
+</script>
+</body>
+</html>

@@ -1,15 +1,14 @@
 """The one interface every driver model sits behind.
 
 A driver looks at recent camera frames and proposes where to drive. It only
-proposes: whether the chair fits, and how fast it goes, is decided elsewhere
-(docs/driving-pipeline.md).
+proposes: whether the chair fits is decided by the footprint check, and the command by the
+controller (fsd_ml/pipeline).
 
 Paths are in the chair's frame, in metres: x ahead, y to the left.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -62,27 +61,11 @@ class Driver(Protocol):
         ...
 
 
-class StraightDriver:
-    """Always proposes driving straight ahead. A floor for the bake-off, not a model."""
-
-    name = "straight"
-    context_frames = 1
-    frame_hz = 20.0
-
-    def __init__(self, distance_m: float = 4.0, points: int = 20) -> None:
-        self._path = np.column_stack(
-            [np.linspace(distance_m / points, distance_m, points), np.zeros(points)]
-        )
-
-    def propose(self, frames: list[np.ndarray], goal: Goal, motion: Motion) -> list[Candidate]:
-        return [Candidate(path_xy=self._path.copy(), score=1.0)]
-
-
 class FanDriver:
     """Heads for the goal point, and offers detours to either side.
 
-    It ignores the camera, so it stands in for a model in the simulator: it gives
-    the rest of the pipeline several scored paths to choose between.
+    It ignores the camera, so it is not a model: it lets the console be opened and its
+    drawing checked with no GPU. It is never allowed to drive the chair.
     """
 
     name = "fan"
@@ -118,33 +101,12 @@ class FanDriver:
         return candidates
 
 
-def _s2e() -> Driver:
-    from fsd_ml.s2e import S2EDriver
-
-    return S2EDriver()
-
-
-def _flowpilot() -> Driver:
-    from fsd_ml.flowpilot import FlowPilotDriver
-
-    return FlowPilotDriver()
-
-
-# Built on demand, so a model's runtime is only imported when that model is used.
-DRIVERS: dict[str, Callable[[], Driver]] = {
-    StraightDriver.name: StraightDriver,
-    FanDriver.name: FanDriver,
-    "s2e": _s2e,
-    "flowpilot": _flowpilot,
-}
-
-
 def make_driver(name: str) -> Driver:
-    """A driver by name, or ``remote:<url>`` for one served over HTTP (see remote.py)."""
+    """``remote:<url>`` for a model served over HTTP (see remote.py), or the ``fan`` stand-in."""
     if name.startswith("remote:"):
         from fsd_ml.remote import RemoteDriver
 
         return RemoteDriver(name.removeprefix("remote:"))
-    if name not in DRIVERS:
-        raise KeyError(f"unknown driver {name!r}; have {', '.join(sorted(DRIVERS))}")
-    return DRIVERS[name]()
+    if name != FanDriver.name:
+        raise KeyError(f"unknown driver {name!r}; use remote:<url> or {FanDriver.name}")
+    return FanDriver()

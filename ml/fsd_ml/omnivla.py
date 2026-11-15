@@ -8,8 +8,6 @@ It needs a GPU with about 20 GB of memory and OmniVLA's own code on the Python
 path, so it runs on Modal (modal_omnivla.py) and is called through
 ``remote:<url>``. The loading and forward pass follow OmniVLA's
 ``inference/run_omnivla.py`` (MIT licence, github.com/NHirose/OmniVLA).
-
-Not yet run: nothing here has been executed against the real model.
 """
 
 from __future__ import annotations

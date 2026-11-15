@@ -1,5 +1,4 @@
-// Small DOM helpers shared by the pages. Thin browser wrappers; exercised by
-// the Playwright test rather than unit tests.
+// Small DOM helpers shared by the pages. Thin browser wrappers.
 
 import type { StatusRow } from './status';
 

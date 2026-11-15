@@ -1,9 +1,8 @@
-"""A planned route, and where the chair is along it (pipeline stage 3)."""
+"""A planned route, and where the chair is along it."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -30,11 +29,6 @@ class Route:
         self._legs = np.linalg.norm(np.diff(self.xy, axis=0), axis=1)
         self._starts = np.concatenate([[0.0], np.cumsum(self._legs)])
         self.length_m = float(self._starts[-1])
-
-    @classmethod
-    def from_app(cls, route: Mapping[str, Any]) -> Route:
-        """From the iPad's ``Route`` shape: ``{"points": [{"lat": .., "lng": ..}, ...]}``."""
-        return cls([(point["lat"], point["lng"]) for point in route["points"]])
 
     def project(self, east: float, north: float, near_m: float | None = None) -> float:
         """Distance along the route of the point on it closest to (east, north).
@@ -69,9 +63,3 @@ class Route:
         )
         fraction = (along - self._starts[index]) / self._legs[index]
         return self.xy[index] + fraction * (self.xy[index + 1] - self.xy[index])
-
-    def ahead(self, along_m: float, distance_m: float, spacing_m: float = 1.0) -> np.ndarray:
-        """World points from ``along_m`` to ``distance_m`` further on, shape (n, 2)."""
-        end = min(self.length_m, along_m + distance_m)
-        count = max(2, int(np.ceil((end - along_m) / spacing_m)) + 1)
-        return np.array([self.point_at(s) for s in np.linspace(along_m, end, count)])

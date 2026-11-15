@@ -39,9 +39,6 @@ export const bump = (counters: LinkCounters, key: LinkCounter): LinkCounters => 
 export const countSkip = (counters: LinkCounters, reason: SkipReason): LinkCounters =>
   bump(counters, SKIP_COUNTER[reason]);
 
-/** Frames the link itself held back: what adaptive quality reacts to. */
-export const linkSkips = (counters: LinkCounters): number => counters.skipped_flow + counters.skipped_socket;
-
 /** Counters gained since `before`. */
 export const counterDelta = (after: LinkCounters, before: LinkCounters): LinkCounters => ({
   captured: after.captured - before.captured,
@@ -73,14 +70,6 @@ export function buildLinkMessage(snapshot: LinkSnapshot, wallNowMs: number): Lin
   };
 }
 
-/**
- * Whether the service acks frames: 'acking' once it has on this connection,
- * 'waiting' while an ack may still come (none sent yet, the first is under
- * ACK_TIMEOUT_MS old, or the service acked on an earlier connection), and
- * 'none' once a frame has gone unacked past that (an older service).
- */
-export type AckStatus = 'acking' | 'waiting' | 'none';
-
 /** What the phone's status panel shows about the link, refreshed once a second. */
 export interface LinkView {
   readonly capturedFps: number;
@@ -90,20 +79,14 @@ export interface LinkView {
   /** Frames held back by flow control since this connection opened. */
   readonly flowSkips: number;
   readonly jpegQuality: number;
+  /** Null until this connection's first ack. */
   readonly ackRttMs: number | null;
-  /** Flow control applies only while 'acking'. */
-  readonly ackStatus: AckStatus;
 }
 
 const MS_PER_SECOND = 1000;
 
 /** Rates over one window of `elapsedMs`. */
-export function linkView(
-  window: LinkCounters,
-  elapsedMs: number,
-  snapshot: LinkSnapshot,
-  ackStatus: AckStatus,
-): LinkView {
+export function linkView(window: LinkCounters, elapsedMs: number, snapshot: LinkSnapshot): LinkView {
   const perSecond = (count: number): number => (elapsedMs > 0 ? (count * MS_PER_SECOND) / elapsedMs : 0);
   return {
     capturedFps: perSecond(window.captured),
@@ -112,6 +95,5 @@ export function linkView(
     flowSkips: snapshot.counters.skipped_flow,
     jpegQuality: snapshot.jpegQuality,
     ackRttMs: snapshot.ackRttMs,
-    ackStatus,
   };
 }

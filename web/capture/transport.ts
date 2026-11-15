@@ -12,16 +12,9 @@ import {
 
 export const SOCKET_OPEN = 1;
 
-// Close codes; see docs/phone-protocol.md and service/drive_service/sockets.py.
+// Close codes; see service/drive_service/sockets.py.
 /** A newer phone connection replaced this one. Reconnecting would just kick it back off. */
 export const CLOSE_REPLACED = 4410;
-/** A priority phone holds the slot. Reconnecting would just be turned away again. */
-export const CLOSE_BUSY = 4409;
-
-/** Whether the service closed this phone for good, so it must not reconnect. */
-export function isFinalClose(code: number): boolean {
-  return code === CLOSE_REPLACED || code === CLOSE_BUSY;
-}
 /** The service heard nothing from this phone for its idle timeout. */
 export const CLOSE_IDLE = 4408;
 export const CLOSE_POLICY_VIOLATION = 1008;
@@ -174,7 +167,8 @@ export class Transport {
       if (this.socket !== socket) return;
       this.socket = null;
       const lastClose = { code: event.code, reason: event.reason };
-      if (isFinalClose(event.code)) {
+      // Reconnecting would only kick the newer phone back off.
+      if (event.code === CLOSE_REPLACED) {
         this.setState({ status: 'stopped', attempt: 0, lastClose });
         return;
       }

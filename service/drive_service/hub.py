@@ -5,7 +5,6 @@ It is only touched from the event loop thread.
 
 The snapshot is latest-wins: every validated message replaces the previous
 reading, so a burst can never leave an older reading in place of a newer one.
-The flood limits only decide what is written to a recording.
 
 Every IMU batch and GPS fix also feeds the motion estimator (speed, turn rate,
 acceleration). Its latest estimate is kept in the snapshot, stamped with the
@@ -19,8 +18,8 @@ on its next tick. The phone's own link report is kept,
 stamped with its receive time, and recorded like any other sensor message.
 
 Frames can come from an external camera instead of the phone
-(``external_camera=True``): a separate sender on /ws/camera, today a USB camera
-on the Mac, later one on the chair's board. It has its own connection slot, hello
+(``external_camera=True``): a separate sender on /ws/camera (a USB camera read
+by scripts/camera_sender.py). It has its own connection slot, hello
 and clock estimate, so its frames are aged by its own clock and the phone (or
 iPad) only supplies GPS, compass and motion. In that mode the phone's frames are
 acked, so its flow control keeps working, but never stored.
@@ -42,10 +41,9 @@ from drive_service.clock import (
     is_synced,
     to_server_ms,
 )
-from drive_service.config import Settings
+from drive_service.config import CLOCK_WINDOW, MAX_CLOCK_RTT_MS, MAX_CLOCK_SKEW_MS, STATS_WINDOW
 from drive_service.motion import MotionState, motion_record, update_gps, update_imu
 from drive_service.protocol import Ack, Frame, Gps, Heading, Hello, Imu, Link, Ping, Pong
-from drive_service.ratelimit import RateWindow, admit
 from drive_service.state import MS_PER_S, SensorSnapshot, Stamped
 from drive_service.stats import StreamStats, record_frame
 from drive_service.timeutil import TimeSource
@@ -66,12 +64,10 @@ class RecorderSink(Protocol):
 class Hub:
     def __init__(
         self,
-        settings: Settings,
         recorder: RecorderSink,
         time_source: TimeSource,
         external_camera: bool = False,
     ) -> None:
-        self._settings = settings
         self._external_camera = external_camera
         self._recorder = recorder
         self._time = time_source
@@ -79,10 +75,7 @@ class Hub:
         self._stats = StreamStats()
         self._clock_samples: tuple[ClockSample, ...] = ()
         self._motion = MotionState()
-        self._frame_window = RateWindow()
-        self._text_window = RateWindow()
         self._rejected = 0
-        self._rate_limited = 0
         self._phone_lease: int | None = None
         self._lease_seq = 0
         self._camera_clock_samples: tuple[ClockSample, ...] = ()
@@ -106,10 +99,6 @@ class Hub:
     @property
     def rejected(self) -> int:
         return self._rejected
-
-    @property
-    def rate_limited(self) -> int:
-        return self._rate_limited
 
     def attach_phone(self) -> int:
         """Give the phone slot to a new connection and return its lease.
@@ -173,7 +162,7 @@ class Hub:
             self._camera_clock_samples = add_sample(
                 self._camera_clock_samples,
                 ClockSample(rtt_ms=ping.rtt_ms, offset_ms=ping.offset_ms),
-                self._settings.clock_window,
+                CLOCK_WINDOW,
             )
             camera_clock = estimate(self._camera_clock_samples)
             self._snapshot = replace(self._snapshot, camera_clock=camera_clock)
@@ -184,7 +173,7 @@ class Hub:
         now = self._time.mono()
         wall_ms = self._time.wall_ms()
         clock = self._snapshot.camera_clock
-        captured, future_ms = _capture_time(frame.header.t, now, wall_ms, clock, self._settings)
+        captured, future_ms = _capture_time(frame.header.t, now, wall_ms, clock)
         if future_ms is not None:
             log.warning(
                 "camera frame is %.0f ms in the future; camera clock dropped until its next ping",
@@ -207,10 +196,9 @@ class Hub:
         return Ack(seq=seq, t=self._time.wall_ms())
 
     def handle_frame(self, frame: Frame) -> Ack:
-        """Store a validated frame, and record it unless the frame flood limit is hit.
+        """Store and record a validated frame, and return the ack to send.
 
-        Returns the ack to send, whether or not the frame was recorded. With an
-        external camera the phone's frame is only acked.
+        With an external camera the phone's frame is only acked.
         """
         now = self._time.mono()
         wall_ms = self._time.wall_ms()
@@ -231,14 +219,8 @@ class Hub:
         self._snapshot = replace(self._snapshot, frame=Stamped(frame, now, captured))
         arrived, self._frame_arrived = self._frame_arrived, asyncio.Event()
         arrived.set()
-        self._stats = record_frame(
-            self._stats, frame.header.seq, now, latency_ms, self._settings.stats_window
-        )
-        allowed, self._frame_window = self._admit(
-            self._frame_window, now, self._settings.max_frame_rate_hz
-        )
-        if allowed:
-            self._recorder.write_frame(frame, wall_ms)
+        self._stats = record_frame(self._stats, frame.header.seq, now, latency_ms, STATS_WINDOW)
+        self._recorder.write_frame(frame, wall_ms)
         return Ack(seq=frame.header.seq, t=wall_ms)
 
     def handle_message(self, message: Hello | Gps | Heading | Imu | Ping | Link) -> Pong | None:
@@ -248,14 +230,9 @@ class Hub:
         if isinstance(message, Ping):
             return self._handle_ping(message, wall_ms)
         derived = self._store(message, now, wall_ms)
-        allowed, self._text_window = self._admit(
-            self._text_window, now, self._settings.max_text_rate_hz
-        )
-        if allowed:
-            self._recorder.write_sensor(message, wall_ms)
-            # Only beside a recorded batch, so motion lines match imu lines 1:1.
-            if derived is not None:
-                self._recorder.write_derived(derived, wall_ms)
+        self._recorder.write_sensor(message, wall_ms)
+        if derived is not None:
+            self._recorder.write_derived(derived, wall_ms)
         return None
 
     def _store(
@@ -279,10 +256,7 @@ class Hub:
         return None
 
     def _store_imu(self, batch: Imu, now: float, wall_ms: float) -> dict[str, Any]:
-        hello = self._snapshot.hello
-        # Without the marker the page is older and wrote rotation as [y, z, x].
-        legacy_axes = hello is None or hello.imu_axes != "device_xyz"
-        self._motion, result = update_imu(self._motion, batch, legacy_axes)
+        self._motion, result = update_imu(self._motion, batch)
         if result.newest_t_ms is not None:
             captured = self._captured_mono(result.newest_t_ms, now, wall_ms)
             motion = Stamped(self._motion.estimate, now, captured)
@@ -297,12 +271,6 @@ class Hub:
             motion = replace(current, value=self._motion.estimate)
             self._snapshot = replace(self._snapshot, motion=motion)
 
-    def _admit(self, window: RateWindow, now: float, limit: int) -> tuple[bool, RateWindow]:
-        allowed, updated = admit(window, now, limit)
-        if not allowed:
-            self._rate_limited += 1
-        return allowed, updated
-
     def _captured_mono(self, phone_t: float, now_mono: float, wall_ms: float) -> float | None:
         """Service monotonic time a reading stamped ``phone_t`` was captured.
 
@@ -310,9 +278,7 @@ class Hub:
         later step of the server's wall clock has no effect. None without a
         trusted clock estimate, which makes the reading never fresh.
         """
-        captured, future_ms = _capture_time(
-            phone_t, now_mono, wall_ms, self._snapshot.clock, self._settings
-        )
+        captured, future_ms = _capture_time(phone_t, now_mono, wall_ms, self._snapshot.clock)
         if future_ms is not None:
             self._forget_clock(future_ms)
         return captured
@@ -331,18 +297,14 @@ class Hub:
             self._clock_samples = add_sample(
                 self._clock_samples,
                 ClockSample(rtt_ms=ping.rtt_ms, offset_ms=ping.offset_ms),
-                self._settings.clock_window,
+                CLOCK_WINDOW,
             )
             self._snapshot = replace(self._snapshot, clock=estimate(self._clock_samples))
         return Pong(t=ping.t, server_t=wall_ms)
 
 
 def _capture_time(
-    device_t: float,
-    now_mono: float,
-    wall_ms: float,
-    clock: ClockEstimate | None,
-    settings: Settings,
+    device_t: float, now_mono: float, wall_ms: float, clock: ClockEstimate | None
 ) -> tuple[float | None, float | None]:
     """(service monotonic capture time, ms in the future) for a reading stamped ``device_t``.
 
@@ -351,11 +313,11 @@ def _capture_time(
     from further in the future than the allowed skew: the offset is wrong and the
     caller must drop it.
     """
-    if clock is None or not is_synced(clock, settings.max_clock_rtt_ms):
+    if clock is None or not is_synced(clock, MAX_CLOCK_RTT_MS):
         return None, None
     # Half the round trip is the worst-case error of a min-RTT offset; adding
     # it can only make the reading look older.
     transit_ms = wall_ms - to_server_ms(device_t, clock) + clock.rtt_ms / 2
-    if transit_ms < -settings.max_clock_skew_ms:
+    if transit_ms < -MAX_CLOCK_SKEW_MS:
         return None, -transit_ms
     return now_mono - max(0.0, transit_ms) / MS_PER_S, None
