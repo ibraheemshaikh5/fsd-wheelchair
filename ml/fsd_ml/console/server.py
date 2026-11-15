@@ -22,6 +22,7 @@ import os
 import threading
 import time
 import webbrowser
+from collections.abc import Sequence
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,7 +41,15 @@ from fsd_ml.live import MAX_FRAME_AGE_S, ChairGoal, LiveFeed, LiveFrame, ipad_me
 from fsd_ml.moves import Runner
 from fsd_ml.pilot import Pilot
 from fsd_ml.pipeline.control import ControlConfig, follow
-from fsd_ml.pipeline.footprint import FootprintConfig, choose, first_hit, stop_distance_m
+from fsd_ml.pipeline.footprint import (
+    FootprintConfig,
+    choose,
+    first_hit,
+    first_hit_from_here,
+    stop_distance_m,
+)
+from fsd_ml.pipeline.types import Obstacle
+from fsd_ml.route_pilot import RoutePilot
 from fsd_ml.runlog import Episode, RunLog, prompt_stamp
 from fsd_ml.video import FPS, Conversion, VideoError, standardize
 
@@ -155,11 +164,13 @@ class Session:
         # Where the chair is believed to be since this connection began (see ``record``),
         # when that was last moved on, and the forward stick last sent.
         self._pose_xy = [0.0, 0.0]
+        self._axle_xy = [0.0, 0.0]
         self._pose_s = 0.0
         self._stick_y = 0.0
         self._waiting_logged: str | None = None
         # A depth model that finds what stands on the floor. None if torch is not installed.
         self.sight: obstacles.ObstacleWatcher | None = None
+        self._depth: obstacles.DepthObstacles | None = None
         self._blocked_looks = 0
 
         # The one sender this console ever makes, kept for its whole life: the board lets one
@@ -368,10 +379,11 @@ class Session:
         feed.start()
         self._service_file.write_text(json.dumps(service))
         self.runlog = RunLog(self.work_dir / "live" / time.strftime("%Y%m%d-%H%M%S"))
-        self._pose_xy, self._pose_s, self._stick_y = [0.0, 0.0], 0.0, 0.0
+        self._pose_xy, self._axle_xy, self._pose_s, self._stick_y = [0.0, 0.0], [0.0, 0.0], 0.0, 0.0
         self.log("connected", service=service, model=self.driver.name)
         if obstacles.available():
             depth, camera = obstacles.DepthObstacles(), self.setup.camera
+            self._depth = depth
 
             def look() -> tuple[np.ndarray, float] | None:
                 frame = feed.fresh_frame()
@@ -380,7 +392,11 @@ class Session:
             self.sight = obstacles.ObstacleWatcher(
                 look,
                 lambda image: depth.find(
-                    image, camera.hfov_deg, camera.height_m, self.setup.lens_xy
+                    image,
+                    camera.hfov_deg,
+                    camera.height_m,
+                    self.setup.lens_xy,
+                    camera.tilt_down_deg if self.setup.measured else None,
                 ),
             )
             self.sight.start()
@@ -456,8 +472,14 @@ class Session:
             step_s = min(now - self._pose_s, 0.3) if self._pose_s else 0.0
             y = self._stick_y
             step = math.copysign(self.speed_for(abs(y)), y) * step_s
-            self._pose_xy[0] += step * math.cos(self.yaw_rad())
-            self._pose_xy[1] += step * math.sin(self.yaw_rad())
+            # What moves on is the point the chair turns about; its middle is ahead of that.
+            yaw, ahead = self.yaw_rad(), self.setup.chair.pivot_behind_m
+            self._axle_xy[0] += step * math.cos(yaw)
+            self._axle_xy[1] += step * math.sin(yaw)
+            self._pose_xy = [
+                self._axle_xy[0] + ahead * (math.cos(yaw) - 1),
+                self._axle_xy[1] + ahead * math.sin(yaw),
+            ]
             self._pose_s, self._stick_y = now, result.y if result.sent else 0
             if not fresh and self.sending and now - self._warned_s > 1.0:
                 self._warned_s = now
@@ -528,6 +550,9 @@ class Session:
     def stop_chair(self) -> dict[str, Any]:
         """Stop the chair now and hand it back to its own joystick. Never waits on a model."""
         was, self.sending = self.sending, False
+        if self._manual and self.episode is not None:
+            self.episode.end("finished", "driving by hand was switched off")
+            self.episode = None
         self.chair_steps, self._manual = None, False
         sender = self._sender
         if sender is None:
@@ -575,6 +600,16 @@ class Session:
         self._engage()
         self._manual, self.chair_steps = True, None
         self.log("manual on")
+        if self.runlog is not None:
+            # Driving by hand is recorded as an episode too, so a demonstration made while
+            # the camera had stopped is marked as such.
+            self.episode = self.runlog.episode(
+                kind="manual",
+                task=None,
+                calibration=self.setup.as_dict(),
+                settings=self.bench.settings(),
+                session=self.runlog.folder.name,
+            )
         return {"manual": True}
 
     def _mode(self) -> str:
@@ -583,7 +618,7 @@ class Session:
             return "manual"
         if self.runner.running():
             kind = self.runner.state().get("kind")
-            return kind if kind in ("pilot", "gemini") else "bench"
+            return kind if kind in ("pilot", "gemini", "route") else "bench"
         return "model"
 
     def drive(self, x_pct: float, y_pct: float, reverse: bool = False) -> str | None:
@@ -761,21 +796,50 @@ class Session:
             seen, self.setup, self.setting("path_clearance_m"), stop_m + candidates.PLAN_SLACK_M
         )
 
+    def sighted(self) -> tuple[tuple[Obstacle, ...], float] | None:
+        """What the obstacle sense last found and when its picture was taken, if it has a
+        recent sight of the floor."""
+        if self.sight is None or self.sight.fresh() is None:
+            return None
+        return self.sight.obstacles, self.sight.at_s
+
+    def ground(self, frame: LiveFrame) -> obstacles.Ground | None:
+        """Where each part of one picture is on the floor (obstacles.Ground), by the depth
+        model. None without one, or when it finds no floor."""
+        if self._depth is None:
+            return None
+        camera = self.setup.camera
+        return self._depth.ground(
+            frame.image,
+            camera.hfov_deg,
+            camera.height_m,
+            self.setup.lens_xy,
+            camera.tilt_down_deg if self.setup.measured else None,
+        )
+
     def picture_change(self) -> float | None:
         return self.live.picture_change() if self.live else None
 
-    def blocked(self, speed_mps: float = 0.0, path_xy: np.ndarray | None = None) -> str | None:
+    def blocked(
+        self,
+        speed_mps: float = 0.0,
+        path_xy: np.ndarray | None = None,
+        obstacles: Sequence[Obstacle] | None = None,
+    ) -> str | None:
         """Why the chair must not go on: what stands in its way, and where. None when the
         way is clear, and when no obstacle sense is installed.
 
-        The way is ``path_xy`` (what is left of the path being followed, in the chair's
-        frame, kept ``path_clearance_m`` clear as it was when offered), or the next metre
-        straight ahead for a set move (kept ``clearance_m`` clear). It is blocked when less
-        of it is left than ``stop_distance_m`` at this speed.
+        The way is ``path_xy`` (what is left of the path being followed, from the point of
+        it the chair is at, in the chair's frame, kept ``path_clearance_m`` clear as it was
+        when offered), or the next metre straight ahead for a set move (kept
+        ``clearance_m`` clear). It is blocked when less of it is left than
+        ``stop_distance_m`` at this speed.
 
         What the obstacle sense reports is from a picture taken a moment ago, and a chair
         driving at ``speed_mps`` has come that much closer to all of it since, so the stretch
-        checked and the stop distance both grow by speed times the picture's age.
+        checked and the stop distance both grow by speed times the picture's age. A caller
+        that keeps track of where the chair has got to gives ``obstacles`` instead: what is
+        in the way as it stands now, remembered ones included.
         """
         if self.sight is None:
             return None
@@ -783,15 +847,21 @@ class Session:
         if seen is None:
             return "the obstacle sense has had no sight of the floor for 1 s"
         moved = max(0.0, speed_mps) * self.sight.age_s()
+        if obstacles is not None:
+            seen, moved = obstacles, 0.0
         if path_xy is None:
             ahead = np.arange(0.1, 1.0 + moved + 1e-9, 0.1)
             path_xy, margin = np.column_stack([ahead, np.zeros_like(ahead)]), "clearance_m"
         else:
             margin = "path_clearance_m"
         body = self.setup.chair
-        hit = first_hit(
-            path_xy, seen, chair.Body(body.width_m, body.length_m, self.setting(margin))
-        )
+        shape = chair.Body(body.width_m, body.length_m, self.setting(margin))
+        # A path is checked as it was when offered (things the chair stands beside need only
+        # be cleared); a set move keeps its plain margin ahead.
+        if margin == "clearance_m":
+            hit = first_hit(path_xy, seen, shape)
+        else:
+            hit = first_hit_from_here(path_xy, seen, shape, from_chair=False)
         if hit is None or hit[0] > stop_distance_m(speed_mps) + moved:
             self._blocked_looks = 0
             return None
@@ -825,7 +895,7 @@ class Session:
                 "no Claude API key: put ANTHROPIC_API_KEY in ml/.env and start the console"
                 " with uv run --env-file .env"
             )
-        if chosen["kind"] == "gemini" and not os.environ.get("GEMINI_API_KEY"):
+        if chosen["kind"] in ("gemini", "route") and not os.environ.get("GEMINI_API_KEY"):
             raise ConsoleError(
                 "no Gemini API key: put GEMINI_API_KEY in ml/.env and start the console"
                 " with uv run --env-file .env"
@@ -834,9 +904,11 @@ class Session:
             self.stop_chair()  # whoever was driving (keyboard or model) gives way to the run
         self._armed, self._page_at = True, time.monotonic()
         self.log("run", case=case_id, params=params, settings=self.bench.settings())
-        pilot: GeminiPilot | Pilot | None = None
+        pilot: GeminiPilot | Pilot | RoutePilot | None = None
         if chosen["kind"] == "gemini":
             pilot = GeminiPilot(params["say"])
+        elif chosen["kind"] == "route":
+            pilot = RoutePilot(params["say"])
         elif chosen["kind"] == "pilot":
             pilot = Pilot(params["say"])
         if self.runlog is not None:
@@ -863,6 +935,8 @@ class Session:
                 self.runner.turn(params["degrees_left"])
             elif isinstance(pilot, GeminiPilot):
                 self.runner.gemini(params["say"], pilot, max_looks=looks)
+            elif isinstance(pilot, RoutePilot):
+                self.runner.route(params["say"], pilot, max_looks=looks)
             else:
                 self.runner.pilot(params["say"], pilot, max_turns=looks)
         except RuntimeError as error:
@@ -883,7 +957,26 @@ class Session:
                 waiting = "no phone is streaming"
             if waiting is None and sample.frame is None:
                 waiting = "waiting for the first camera frame"
+        # Driving or recording with no camera or gyro must not go unnoticed.
+        frame = self.live.latest().frame if self.live else None
+        age = frame.age_s(time.monotonic()) if frame else None
+        alert = None
+        if self.sending or self.runner.running():
+            if age is None or age > MAX_FRAME_AGE_S:
+                old = (
+                    "there is no camera frame"
+                    if age is None
+                    else f"the last frame is {age:.0f} s old"
+                )
+                alert = (
+                    f"CAMERA STOPPED: {old}. Nothing driven now is recorded with pictures,"
+                    " and the chair cannot see obstacles. Wake the phone and reopen its page."
+                )
+            elif not self.gyro_fresh():
+                alert = "GYRO STOPPED: the phone is not reporting how the chair turns."
         return {
+            "alert": alert,
+            "camera_age_s": None if age is None else round(age, 2),
             "cases": bench.CASES,
             "settings": self.bench.settings(),
             "run": self.runner.state(),

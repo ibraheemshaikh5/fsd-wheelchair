@@ -28,7 +28,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from fsd_ml.chair import Body, ChairSetup
-from fsd_ml.pipeline.footprint import SAMPLE_SPACING_M, first_hit
+from fsd_ml.pipeline.footprint import SAMPLE_SPACING_M, first_hit_from_here
 from fsd_ml.pipeline.types import Obstacle
 
 # Where each path ends, as seen from the middle of the chair: degrees to the left of straight
@@ -93,7 +93,7 @@ def fan(
         aside = np.abs(np.degrees(np.arctan2(left, ahead)))
         unseen = (ahead > NEAR_M) & (aside > setup.camera.hfov_deg / 2 - VIEW_EDGE_DEG)
         clear = int(np.argmax(unseen)) if unseen.any() else len(path)
-        hit = first_hit(path, obstacles, shape)
+        hit = first_hit_from_here(path, obstacles, shape)
         if hit is not None:
             clear = min(clear, round((hit[0] - stop_m) / SAMPLE_SPACING_M) - 1)
         if clear * SAMPLE_SPACING_M >= MIN_M:

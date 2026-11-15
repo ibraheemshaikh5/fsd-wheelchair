@@ -141,3 +141,7 @@ def test_a_run_is_one_whole_episode_in_the_record(tmp_path: Path) -> None:
     assert ended["ended"] == "finished" and ended["planned"] == {"distance_m": 0.2}
     assert ended["achieved"]["believed_m"] == pytest.approx(0.2, abs=0.08)
     assert records[-1]["success"] is None and records[-1]["totals"]["actions"] == 1
+    # No camera frame came at all: the episode says so, and that it is no use as data.
+    assert records[-1]["coverage"]["camera_fresh"] == 0 and records[-1]["usable"] is False
+    session.sending = True
+    assert "CAMERA STOPPED" in session.bench_state()["alert"]

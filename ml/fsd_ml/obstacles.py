@@ -68,12 +68,57 @@ def rays(width: int, height: int, hfov_deg: float) -> np.ndarray:
     return np.dstack([grid_x, grid_y, np.ones_like(grid_x)])
 
 
-def fit_floor(points: np.ndarray) -> tuple[np.ndarray, float] | None:
+# With the camera's tilt known: how far the floor found may lean from it, and how much of the
+# picture (from the bottom) is searched for it.
+MAX_LEAN_DEG = 5.0
+FLOOR_SEARCH_ROWS = 0.3
+
+
+def floor_by_tilt(points: np.ndarray, tilt_down_deg: float) -> tuple[np.ndarray, float] | None:
+    """The floor, for a camera whose tilt is known (ml/chair.json): the lowest level surface.
+
+    A plane fitted freely to the bottom of the picture is tipped by whatever fills it: beside
+    a wall, or close behind a chest, the "floor" comes out leaning 10 degrees and every
+    distance with it. But the camera is fixed to the chair, so which way is down is known to
+    a few degrees. Measured along that, the floor is the lowest level the picture shows much
+    of. A plane is then fitted to the points at that level, and kept only if it leans less
+    than MAX_LEAN_DEG from the known tilt (the chair pitches a little as it moves).
+    """
+    tilt = math.radians(tilt_down_deg)
+    down = np.array([0.0, math.cos(tilt), math.sin(tilt)])
+    low = points[int(points.shape[0] * (1 - FLOOR_SEARCH_ROWS)) :].reshape(-1, 3)
+    low = low[(low[:, 2] > 0.1) & (low[:, 2] < 6.0)]
+    below = low @ down
+    low, below = low[below > 0.02], below[below > 0.02]
+    if len(low) < 50:
+        return None
+    # Levels 4% apart; the floor is the lowest of those nearly as full as the fullest.
+    step = 0.04 * float(np.median(below))
+    counts = np.bincount((below / step).astype(int))
+    full = np.nonzero(counts >= 0.5 * counts.max())[0]
+    level = (full[-1] + 0.5) * step
+    on_it = low[np.abs(below - level) < 1.5 * step]
+    if len(on_it) < 50:
+        return None
+    centre = on_it.mean(axis=0)
+    _, _, axes = np.linalg.svd(on_it - centre, full_matrices=False)
+    normal = axes[2] if axes[2][1] > 0 else -axes[2]
+    if math.degrees(math.acos(min(1.0, float(normal @ down)))) > MAX_LEAN_DEG:
+        normal = down
+    return normal, float(normal @ centre)
+
+
+def fit_floor(
+    points: np.ndarray, tilt_down_deg: float | None = None
+) -> tuple[np.ndarray, float] | None:
     """The floor as a plane ``normal . p = distance`` below the lens, from the lowest points.
 
-    Starts from the bottom of the picture, which is nearly always floor, and refits twice
-    on the points that agree, so a box or a foot in that region does not tip the plane.
+    With the camera's tilt known, see ``floor_by_tilt``. Without it: starts from the bottom
+    of the picture, which is nearly always floor, and refits twice on the points that agree,
+    so a box or a foot in that region does not tip the plane.
     """
+    if tilt_down_deg is not None:
+        return floor_by_tilt(points, tilt_down_deg)
     height = points.shape[0]
     low = points[int(height * 0.72) :].reshape(-1, 3)
     low = low[(low[:, 2] > 0.1) & (low[:, 2] < 6.0)]
@@ -131,11 +176,15 @@ def ground_from_depth(
     hfov_deg: float,
     camera_height_m: float,
     lens_xy: tuple[float, float] = (0.0, 0.0),
+    tilt_down_deg: float | None = None,
 ) -> Ground | None:
-    """Every cell of a depth map placed in the chair's frame, or None if no floor is found."""
+    """Every cell of a depth map placed in the chair's frame, or None if no floor is found.
+
+    ``tilt_down_deg`` is the camera's tilt if it has been measured (see ``floor_by_tilt``).
+    """
     height, width = depth.shape
     points = rays(width, height, hfov_deg) * depth[:, :, None]
-    floor = fit_floor(points)
+    floor = fit_floor(points, tilt_down_deg)
     if floor is None:
         return None
     normal, distance = floor
@@ -158,10 +207,11 @@ def obstacles_from_depth(
     hfov_deg: float,
     camera_height_m: float,
     lens_xy: tuple[float, float] = (0.0, 0.0),
+    tilt_down_deg: float | None = None,
 ) -> tuple[list[Obstacle], dict[str, Any]]:
     """What stands on the floor, in the chair's frame, from a depth map in any consistent unit."""
     height, width = depth.shape
-    ground = ground_from_depth(depth, hfov_deg, camera_height_m, lens_xy)
+    ground = ground_from_depth(depth, hfov_deg, camera_height_m, lens_xy, tilt_down_deg)
     if ground is None:
         return [], {"floor": False}
     ahead, left, above = ground.ahead - lens_xy[0], ground.left - lens_xy[1], ground.above
@@ -242,8 +292,11 @@ class DepthObstacles:
         hfov_deg: float,
         camera_height_m: float,
         lens_xy: tuple[float, float] = (0.0, 0.0),
+        tilt_down_deg: float | None = None,
     ) -> tuple[list[Obstacle], dict[str, Any]]:
-        return obstacles_from_depth(self.depth(image), hfov_deg, camera_height_m, lens_xy)
+        return obstacles_from_depth(
+            self.depth(image), hfov_deg, camera_height_m, lens_xy, tilt_down_deg
+        )
 
     def ground(
         self,
@@ -251,8 +304,11 @@ class DepthObstacles:
         hfov_deg: float,
         camera_height_m: float,
         lens_xy: tuple[float, float] = (0.0, 0.0),
+        tilt_down_deg: float | None = None,
     ) -> Ground | None:
-        return ground_from_depth(self.depth(image), hfov_deg, camera_height_m, lens_xy)
+        return ground_from_depth(
+            self.depth(image), hfov_deg, camera_height_m, lens_xy, tilt_down_deg
+        )
 
 
 class ObstacleWatcher:

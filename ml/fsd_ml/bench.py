@@ -61,6 +61,16 @@ CASES: list[dict[str, Any]] = [
         "input": "say",
     },
     {
+        "id": "route",
+        "title": "Gemini draws its route to a named thing",
+        "does": "Gemini draws the way to go on the camera's picture; the chair follows it "
+        "without stopping, asks for the next route on the way, and stops when Gemini says "
+        "it has arrived. The chair still stops itself for obstacles.",
+        "kind": "route",
+        "params": {"say": "go to the bottom of the stairs and stop in front of the first step"},
+        "input": "say",
+    },
+    {
         "id": "gemini",
         "title": "Gemini drives to a named thing",
         "does": "Paths the chair fits along are drawn and numbered on the camera's picture; "

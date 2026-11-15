@@ -159,7 +159,9 @@ def drawn(jpeg: bytes, depth: Any = None) -> tuple[dict[str, Any], bytes, dict[s
     if depth is not None:
         rgb = np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
         camera = setup.camera
-        seen, info = depth.find(rgb, camera.hfov_deg, camera.height_m, setup.lens_xy)
+        seen, info = depth.find(
+            rgb, camera.hfov_deg, camera.height_m, setup.lens_xy, camera.tilt_down_deg
+        )
     # As a live run lays them (Session.candidates), at the bench's default settings.
     settings = bench.DEFAULTS
     speed = settings["drive_stick_pct"] / 100 * settings["v_full_mps"]

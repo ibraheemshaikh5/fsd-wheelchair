@@ -5,6 +5,7 @@
     runner.turn(90)                        # degrees to the left, by the phone's gyro
     runner.pilot("go to the door", pilot)  # a model picks straights and turns; see pilot.py
     runner.gemini("go to the door", pilot) # a model picks drawn paths; see gemini_pilot.py
+    runner.route("go to the door", pilot)  # a model draws its route; see route_pilot.py
     runner.state()                         # what it is doing, for the page
     runner.abort("why")                    # stops the chair now
 
@@ -37,6 +38,7 @@ from fsd_ml.chair_link import to_stick
 from fsd_ml.gemini_pilot import GeminiPilot
 from fsd_ml.pilot import MAX_BACKWARD_M, MAX_FORWARD_M, MAX_TURN_DEG, Call, Pilot
 from fsd_ml.pipeline.control import follow
+from fsd_ml.route_pilot import RoutePilot
 
 if TYPE_CHECKING:
     from fsd_ml.console.server import Session
@@ -99,6 +101,8 @@ class Runner:
         # The move under way, for the record: see _begin and _end.
         self._moves = 0
         self._move: dict[str, Any] | None = None
+        # What the last move achieved, as its end was recorded.
+        self.achieved: dict[str, Any] = {}
         self._move_s = 0.0
         self._state: dict[str, Any] = {"running": False, "phase": "idle"}
 
@@ -141,6 +145,16 @@ class Runner:
         Stop and go: the chair stands still while the model looks and decides.
         """
         return self._start("gemini", lambda: self._gemini(pilot, max_looks), background, say=say)
+
+    def route(
+        self, say: str, pilot: RoutePilot, max_looks: int = 30, background: bool = True
+    ) -> dict[str, Any]:
+        """Let a model drive by drawing its route on the picture: the chair follows it
+        without stopping and asks for the next while still driving. See route_run.py."""
+        from fsd_ml.route_run import RouteRun
+
+        work = RouteRun(self, pilot, max_looks).run
+        return self._start("route", work, background, say=say)
 
     def _gemini(self, pilot: GeminiPilot, max_looks: int) -> tuple[str, str]:
         start = self._chair.yaw_rad()
@@ -235,7 +249,8 @@ class Runner:
             step, last = v * tick, self._clock()
             x, y, gone = x + step * math.cos(heading), y + step * math.sin(heading), gone + step
             # What is left of the path, as seen from the chair now.
-            ahead, left = (path[np.searchsorted(along, min(gone, length)) :] - [x, y]).T
+            at = int(np.searchsorted(along, min(gone, length)))
+            ahead, left = (path[max(0, at - 1) :] - [x, y]).T
             rest = np.column_stack(
                 [
                     ahead * math.cos(heading) + left * math.sin(heading),
@@ -544,6 +559,7 @@ class Runner:
         takeover, link, heartbeat, disarmed, stopped, exception.
         """
         move, self._move = self._move or {}, None
+        self.achieved = achieved
         self._phase(self._state.get("phase", ""), action=None)
         self._chair.note(
             "action_end",

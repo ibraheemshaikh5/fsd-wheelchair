@@ -55,7 +55,7 @@ from PIL import Image, ImageDraw, ImageFont
 from fsd_ml import candidates
 from fsd_ml.chair import Body, ChairSetup
 from fsd_ml.obstacles import Ground
-from fsd_ml.pipeline.footprint import SAMPLE_SPACING_M, first_hit
+from fsd_ml.pipeline.footprint import BESIDE_M, SAMPLE_SPACING_M, beside, first_hit_from_here
 from fsd_ml.pipeline.types import Obstacle
 
 MODEL = os.environ.get("GEMINI_PILOT_MODEL", "gemini-robotics-er-2-preview")
@@ -74,6 +74,7 @@ NEAR_M = 0.5
 MAX_ROUTE_M = 3.5
 # A route with less to drive than this is not worth setting off for.
 MIN_ROUTE_M = 0.3
+KEEP_OUT = (255, 40, 40)
 PREVIOUS = (60, 220, 255, 230)
 GOAL = (255, 60, 220, 255)
 
@@ -247,7 +248,8 @@ def interpret(
         if math.hypot(ahead, left) >= NEAR_M and ahead > 0:
             kept.append((ahead, left))
     path = smooth(kept)
-    hit = first_hit(path, obstacles, Body(setup.chair.width_m, setup.chair.length_m, margin_m))
+    shape = Body(setup.chair.width_m, setup.chair.length_m, margin_m)
+    hit = first_hit_from_here(path, obstacles, shape)
     blocked = ""
     if hit is not None:
         clear = max(0, round((hit[0] - stop_m) / SAMPLE_SPACING_M) - 1)
@@ -301,6 +303,10 @@ def into(pose: Pose, points_xy: np.ndarray) -> np.ndarray:
 # cells are that they are remembered in.
 REMEMBER_S = 20.0
 REMEMBER_CELL_M = 0.15
+# A remembered obstacle is taken to be bigger by this share of how far the chair has driven
+# since it was last seen: where it is, is only as good as the chair's sense of how far it
+# has gone, which is speed times time.
+DRIFT_SHARE = 0.15
 
 
 class Remembered:
@@ -315,10 +321,15 @@ class Remembered:
 
     def __init__(self, setup: ChairSetup) -> None:
         self._setup = setup
-        self._cells: dict[tuple[int, int], tuple[float, float, float, float]] = {}
+        # By cell: where (run's frame), how big, when last seen, and how far the chair had
+        # driven by then.
+        self._cells: dict[tuple[int, int], tuple[float, float, float, float, float]] = {}
+        self._driven_m = 0.0
 
-    def see(self, obstacles: Sequence[Obstacle], pose: Pose, at_s: float) -> None:
-        """Take in what one picture showed, taken at ``pose`` at time ``at_s``."""
+    def see(self, obstacles: Sequence[Obstacle], pose: Pose, at_s: float, driven_m: float) -> None:
+        """Take in what one picture showed, taken at ``pose`` at time ``at_s``, when the
+        chair had driven ``driven_m`` in all."""
+        self._driven_m = driven_m
         camera = self._setup.camera
         if self._cells:
             # Forget what this picture should have shown again: it is in view and in range.
@@ -338,16 +349,24 @@ class Remembered:
             where = out_of(pose, np.array([[o.x, o.y] for o in obstacles]))
             for (x, y), obstacle in zip(where, obstacles, strict=True):
                 key = (round(x / REMEMBER_CELL_M), round(y / REMEMBER_CELL_M))
-                self._cells[key] = (float(x), float(y), obstacle.radius_m, at_s)
+                self._cells[key] = (float(x), float(y), obstacle.radius_m, at_s, driven_m)
 
-    def around(self, pose: Pose) -> list[Obstacle]:
-        """Everything remembered, in the chair's frame at ``pose``."""
+    def around(self, pose: Pose, driven_m: float | None = None) -> list[Obstacle]:
+        """Everything remembered, in the chair's frame at ``pose``, each as much bigger as
+        the chair may have lost track of it since (DRIFT_SHARE)."""
+        driven_m = self._driven_m if driven_m is None else driven_m
         if not self._cells:
             return []
         cells = list(self._cells.values())
         where = into(pose, np.array([cell[:2] for cell in cells]))
         return [
-            Obstacle(f"m{n}", "object", float(ahead), float(left), radius_m=cell[2])
+            Obstacle(
+                f"m{n}",
+                "object",
+                float(ahead),
+                float(left),
+                radius_m=cell[2] + DRIFT_SHARE * max(0.0, driven_m - cell[4]),
+            )
             for n, ((ahead, left), cell) in enumerate(zip(where, cells, strict=True))
         ]
 
@@ -405,12 +424,20 @@ def report(
 def picture(
     jpeg: bytes,
     setup: ChairSetup,
+    obstacles: Sequence[Obstacle] = (),
+    margin_m: float = 0.0,
     previous: np.ndarray | None = None,
     goal: tuple[float, float] | None = None,
 ) -> bytes:
-    """The camera's JPEG as the model is shown it: the guide lines, a triangle at the
-    chair's middle, what is left of its last route (``previous``, in the chair's frame now),
-    and where it last marked the goal (``goal``, likewise), if that is in view."""
+    """The camera's JPEG as the model is shown it.
+
+    Drawn on it: the guide lines; a triangle at the chair's middle; a red tint on the floor
+    round each obstacle, half the chair's width and ``margin_m`` wide (where the chair's
+    middle cannot go without its body coming too near: the harness's own rule, shown, so a
+    route can be drawn to pass it; narrower round what the chair already stands beside, as
+    the rule is); what is left of the last route (``previous``); and where the goal was last marked
+    (``goal``), if in view. Everything is given in the chair's frame as it is now.
+    """
     image = Image.open(io.BytesIO(jpeg)).convert("RGB")
     if image.width < candidates.DRAW_WIDTH:
         scale = candidates.DRAW_WIDTH / image.width
@@ -418,6 +445,20 @@ def picture(
             (candidates.DRAW_WIDTH, round(image.height * scale)), Image.Resampling.LANCZOS
         )
     width, height = image.size
+    if obstacles and margin_m > 0:
+        # Each obstacle's circle of floor, as the camera sees it; all of them tinted once.
+        tint = Image.new("L", image.size, 0)
+        fill = ImageDraw.Draw(tint)
+        ring = np.linspace(0.0, 2 * math.pi, 24, endpoint=False)
+        circle = np.column_stack([np.cos(ring), np.sin(ring)])
+        half = setup.chair.width_m / 2
+        near = {id(o) for o in beside(obstacles, Body(half * 2, setup.chair.length_m, margin_m))}
+        for obstacle in obstacles:
+            reach = half + obstacle.radius_m + (BESIDE_M if id(obstacle) in near else margin_m)
+            edge = setup.to_pixels(reach * circle + [obstacle.x, obstacle.y], width, height)
+            if not np.isnan(edge).any():
+                fill.polygon([tuple(point) for point in edge], fill=90)
+        image.paste(Image.new("RGB", image.size, KEEP_OUT), mask=tint)
     pen = ImageDraw.Draw(image, "RGBA")
     candidates.guides(pen, setup, image.size)
     # The chair's middle: where the floor straight ahead of it meets the picture's bottom.
@@ -464,7 +505,8 @@ def answered(shown: bytes, plan: Plan, route: Route, setup: ChairSetup) -> bytes
         pen.line(drawn, fill=(255, 255, 255, 160), width=2)
     if len(route.path) > 1:
         line = candidates.in_view(setup.to_pixels(route.path, width, height), width, height)
-        pen.line([tuple(p) for p in line], fill=(40, 255, 90, 255), width=6, joint="curve")
+        if len(line) > 1:
+            pen.line([tuple(p) for p in line], fill=(40, 255, 90, 255), width=6, joint="curve")
     font = ImageFont.load_default(size=16)
     for n, ((x, y), (_, _, floor)) in enumerate(zip(drawn, route.points, strict=False), start=1):
         colour = (40, 220, 80, 255) if floor else (255, 50, 50, 255)
@@ -489,7 +531,12 @@ def main() -> None:
     parser.add_argument("pictures", nargs="+", type=Path, help="recorded camera JPEGs")
     parser.add_argument("--say", default="go to the bottom of the stairs", help="the task")
     parser.add_argument("--out", type=Path, default=Path("runs/routes"))
-    parser.add_argument("--times", type=int, default=1, help="ask this many times per picture")
+    parser.add_argument(
+        "--times",
+        type=int,
+        default=1,
+        help="ask again up to this often while no route can be driven",
+    )
     args = parser.parse_args()
     setup, settings = chair.load(), bench.DEFAULTS
     camera = setup.camera
@@ -504,14 +551,27 @@ def main() -> None:
         if depth is not None:
             rgb = np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
             cells = depth.depth(rgb)
-            lens = (camera.hfov_deg, camera.height_m, setup.lens_xy)
+            lens = (camera.hfov_deg, camera.height_m, setup.lens_xy, camera.tilt_down_deg)
             ground = obstacles.ground_from_depth(cells, *lens)
             seen, _ = obstacles.obstacles_from_depth(cells, *lens)
-        shown = picture(jpeg, setup)
+        shown = picture(jpeg, setup, seen, margin)
         name = f"{source.parent.parent.name}-{source.stem}"
         (args.out / f"{name}.shown.jpg").write_bytes(shown)
+        # Asked again and again on the same picture, each time told what the chair made of
+        # its last route: what a standing chair that could not follow a route would see.
+        happened: list[str] = []
+        notes: list[str] = []
         for n in range(args.times):
-            plan = pilot.next(shown, "This is the first look. The chair is standing still.")
+            said = report(
+                n + 1,
+                "The chair is standing still.",
+                happened,
+                (0.0, 0.0, 0.0),
+                None,
+                notes,
+                camera.hfov_deg / 2,
+            )
+            plan = pilot.next(shown, said)
             if plan is None:
                 print(f"{source} #{n}: no usable answer: {pilot.last.get('raw')}")
                 continue
@@ -525,6 +585,10 @@ def main() -> None:
                 f"  goal: {plan.goal}  note: {plan.note}\n  told: {route.said or 'all driven'}"
                 f"\n  {saved}"
             )
+            notes.append(plan.note)
+            happened = [f"You drew a route. {route.said} The chair has not moved."]
+            if len(route.path):
+                break
 
 
 if __name__ == "__main__":

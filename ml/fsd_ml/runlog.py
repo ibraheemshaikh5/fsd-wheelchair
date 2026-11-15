@@ -56,8 +56,15 @@ seconds), ``mono`` (monotonic seconds) and ``type``:
   words the model was told in ``detail``.
 - ``warning`` (a command given on a camera frame older than half a second), ``exception``
   (with its traceback), ``refused`` (a move the model asked for that was not run).
-- ``episode_end``: the outcome and reason, ``success`` (null: for a person to fill in), and
-  totals: seconds, looks, actions, stops by reason, takeovers, warnings, ticks.
+- ``episode_end``: the outcome and reason, ``success`` (null: for a person to fill in),
+  totals (seconds, looks, actions, stops by reason, takeovers, warnings, ticks), and
+  ``coverage``: of the stick commands, the share given on a fresh camera frame and with a
+  fresh gyro, how many different frames they were given on, and the oldest frame any was
+  given on. ``usable`` is false when under USABLE_SHARE of them had a fresh frame and gyro:
+  a recording made while the phone had stopped streaming is driving with no pictures.
+
+Driving by hand from the keyboard is an episode too (``kind: manual``), from switching it on
+to switching it off, so a demonstration is checked the same way.
 
 That is what a dataset export needs (LeRobot: frames, timestamps, the stick as the action,
 the believed pose as the state, the task; GNM: frames and poses): no exporter is written yet.
@@ -71,6 +78,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import subprocess
 import threading
 import time
@@ -159,6 +167,11 @@ def prompt_stamp(prompt: Path) -> dict[str, Any]:
         return {"file": prompt.name, "sha256": None}
 
 
+# An episode is usable as data only if this share of its commands had a fresh camera frame
+# and a fresh gyro.
+USABLE_SHARE = 0.95
+
+
 class Episode:
     """One run's whole record, in order, in its own file. See the top of this module."""
 
@@ -168,12 +181,23 @@ class Episode:
         self._began = time.monotonic()
         self._counts: Counter[str] = Counter()
         self._stops: Counter[str] = Counter()
+        # Of its stick commands: how many had a fresh camera frame, a fresh gyro, which
+        # frames they were given on, and the oldest frame any was given on.
+        self._fresh: Counter[str] = Counter()
+        self._frames: set[Any] = set()
+        self._oldest_s = 0.0
         self.write("episode_start", episode=number, code=code_version(), **header)
 
     def write(self, kind: str, /, **fields: Any) -> None:
         self._counts[kind] += 1
         if kind == "action_end" and fields.get("ended") != "finished":
             self._stops[str(fields.get("ended"))] += 1
+        if kind == "tick":
+            self._fresh["camera"] += bool(fields.get("camera_fresh"))
+            self._fresh["gyro"] += bool(fields.get("gyro_fresh"))
+            self._frames.add(fields.get("frame_seen_n"))
+            age = fields.get("frame_age_s")
+            self._oldest_s = max(self._oldest_s, math.inf if age is None else age)
         try:
             stamp = {"t": round(time.time(), 3), "mono": round(time.monotonic(), 3)}
             line = json.dumps({**stamp, "type": kind, **fields}, default=str)
@@ -183,6 +207,8 @@ class Episode:
             pass
 
     def end(self, outcome: Any, reason: Any) -> None:
+        ticks = self._counts["tick"]
+        camera, gyro = (self._fresh[name] / ticks if ticks else 1.0 for name in ("camera", "gyro"))
         self.write(
             "episode_end",
             outcome=outcome,
@@ -196,8 +222,15 @@ class Episode:
                 "stops": dict(self._stops),
                 "takeovers": self._stops["takeover"],
                 "warnings": self._counts["warning"],
-                "ticks": self._counts["tick"],
+                "ticks": ticks,
             },
+            coverage={
+                "camera_fresh": round(camera, 3),
+                "gyro_fresh": round(gyro, 3),
+                "frames": len(self._frames - {None}),
+                "oldest_frame_s": None if math.isinf(self._oldest_s) else round(self._oldest_s, 2),
+            },
+            usable=min(camera, gyro) >= USABLE_SHARE,
         )
 
 

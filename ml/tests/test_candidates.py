@@ -40,3 +40,34 @@ def test_floor_points_land_where_a_level_camera_sees_them():
     focal = 480 / np.tan(np.radians(40))
     assert np.allclose([x, y], [480, 270 + focal * 0.3 / 3.0])
     assert x_left < x and np.isnan(behind).all()
+
+
+def test_a_drawn_route_is_kept_only_on_floor_and_cut_short_of_what_it_meets():
+    from fsd_ml import route_pilot
+
+    setup = ChairSetup()
+
+    def drawn(*floor_xy):
+        """A route drawn through these floor points, as fractions of the picture."""
+        pixels = setup.to_pixels(np.array(floor_xy), 1000, 1000)
+        return route_pilot.Plan("route", points=tuple((x / 1000, y / 1000) for x, y in pixels))
+
+    # A pixel and the floor it shows go both ways.
+    there = np.array([[1.0, 0.0], [2.5, -0.8]])
+    assert np.allclose(setup.to_floor(setup.to_pixels(there, 960, 540), 960, 540), there)
+    # Open floor: the whole route is driven, from the chair's middle, smoothly.
+    route = route_pilot.interpret(
+        drawn((1.0, 0.2), (2.0, 0.6), (3.0, 0.6)), None, [], setup, 0.2, 0.4
+    )
+    assert route.said == "" and np.hypot(*(route.path[-1] - (3.0, 0.6))) < 0.15
+    # A box on the way: the path ends short of it by the stop distance, and the model is told.
+    box = [Obstacle("box", "object", 2.5, 0.6, radius_m=0.1)]
+    cut = route_pilot.interpret(
+        drawn((1.0, 0.2), (2.0, 0.6), (3.0, 0.6)), None, box, setup, 0.2, 0.4
+    )
+    assert 0.5 < len(cut.path) * 0.1 < 1.6 and "can follow it for" in cut.said
+    assert first_hit(cut.path, box, Body(setup.chair.width_m, setup.chair.length_m, 0.2)) is None
+    # A point above the horizon is not floor: the route ends before it.
+    sky = route_pilot.Plan("route", points=(*drawn((1.0, 0.0), (2.0, 0.0)).points, (0.5, 0.2)))
+    kept = route_pilot.interpret(sky, None, [], setup, 0.2, 0.4)
+    assert "point 3" in kept.said and np.hypot(*(kept.path[-1] - (2.0, 0.0))) < 0.15

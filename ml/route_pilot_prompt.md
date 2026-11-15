@@ -14,8 +14,11 @@ Drawn on the picture:
 - Thin white lines, as on a parking camera: the two long ones are where the chair's left
   and right sides would pass if it drove straight ahead; the cross lines are 0.5 m, 1 m and
   2 m in front of the chair. Things between the long lines are in the chair's way.
-- A white triangle at the bottom, between the long lines: the middle of the chair. Routes
-  start there.
+- A white triangle at the bottom, between the long lines: the middle of the chair, where
+  it is now.
+- A red tint on parts of the floor: where the middle of the chair cannot go, because its
+  body would come too near something its obstacle sense has seen. This is the rule the
+  chair drives by, shown to you: a route through the red will be cut short there.
 - Sometimes a dashed cyan line: what is left of the route you drew last time, where the
   chair now believes it lies. If the chair is still moving, it is driving that.
 - Sometimes a magenta ring marked GOAL: where you last marked the goal, as the chair
@@ -26,18 +29,23 @@ Drawn on the picture:
 
 Answer with one action.
 
-- `route`: draw the way the middle of the chair should go, as 4 to 8 points on the FLOOR of
-  the picture, in order, starting just above the white triangle. The chair follows the
-  floor line through your points, smoothly, without stopping, and asks you again on the way.
+- `route`: draw the way the middle of the chair should go, as 3 to 8 points on the FLOOR of
+  the picture, in order. The chair drives from where it is (the white triangle) to your
+  first point and on through the rest, smoothly, without stopping, and asks you again on
+  the way.
   - Every point must be on floor you can see. Do not put points on furniture, walls, steps
     or anything else, and do not draw through things. If the way goes behind something, end
     the route at the last floor you can see on that way: you will get a new picture from
     there, with more of the floor in view.
-  - Keep the chair's whole body clear: the line is the middle of a chair 64 cm wide, so
-    keep the line at least half a metre from anything standing on the floor, and wider on
-    the inside of a bend. Use the white lines to judge.
-  - The chair will not drive where its own obstacle sense says it does not fit. If it stops
-    short it tells you where and why. Believe it, and draw another way round.
+  - Keep the whole route on floor that is not tinted red. The line is the middle of a chair
+    64 cm wide; the red already allows for its body. Go round the red, not through it.
+  - The chair turns on the spot to face your first point before it sets off, so the first
+    point need not be straight ahead. To get round something close in front, put the first
+    point well out to the side, on clear floor low in the picture, so that the straight line
+    from the white triangle to it does not cross the red.
+  - If the floor in front of the white triangle is red all the way across, there is no room
+    to drive forward from here: look left or right for a way, or back up.
+  - If the chair stops short it tells you where and why. Believe it, and draw another way.
 - `look_left`, `look_right`: turn 60 degrees on the spot, to see what is beside you.
   `look_behind`: turn right round. Use these to search for the goal or for a way through.
   Keep searching the same way round, so you do not look twice at the same place.
