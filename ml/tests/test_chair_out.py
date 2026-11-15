@@ -48,6 +48,8 @@ def test_mapping_never_reverses_and_caps_the_stick():
     assert to_stick(-1.0, 0.0) == (0, 0)
     assert to_stick(10.0, -10.0) == (MAX_PCT, MAX_PCT)
     assert to_stick(0.0, 10.0) == (-MAX_PCT, 0)
+    # Over the cap the curve is kept: forward and turn shrink together.
+    assert to_stick(1.0, 0.25) == (-8, MAX_PCT)
 
 
 def test_sender_switches_fsd_on_sends_and_stops():
@@ -113,4 +115,36 @@ def test_send_stick_caps_never_reverses_and_halts_on_takeover():
     chair.board["takeover"] = True
     result = sender.send_stick(10, 10)
     assert result.halted and not result.sent and (10, 10) not in chair.sets
+    sender.close()
+
+
+def test_braking_pulls_back_only_when_it_was_just_driving_forward():
+    chair, clock = FakeChair(), Clock()
+    sender = ChairSender(chair, clock=clock, sleep=lambda _: None)
+    # Standing still: a brake is a plain stop, never a reverse.
+    assert sender.brake(10, 200).y == 0
+    assert chair.sets == [(0, 0)]
+    sender.send_stick(0, 20)
+    chair.sets.clear()
+    assert sender.brake(10, 200).y == -10
+    assert chair.sets == [(0, -10)] * 4 + [(0, 0)]
+    # Already braked: asking again does not pull back a second time.
+    chair.sets.clear()
+    sender.brake(10, 200)
+    assert chair.sets == [(0, 0)]
+    sender.close()
+
+
+def test_braking_is_capped_and_skipped_after_a_takeover():
+    chair, clock = FakeChair(), Clock()
+    sender = ChairSender(chair, clock=clock, sleep=lambda _: None)
+    sender.send_stick(0, 20)
+    chair.sets.clear()
+    sender.brake(90, 5000)
+    assert chair.sets == [(0, -25)] * 10 + [(0, 0)]
+    sender.send_stick(0, 20)
+    chair.board["takeover"] = True
+    chair.sets.clear()
+    sender.brake(10, 200)
+    assert chair.sets == [(0, 0)]
     sender.close()

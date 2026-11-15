@@ -34,6 +34,10 @@ MAX_PCT = 30
 # Long enough to ride over one slow decision, short enough that a stalled model stops the chair.
 DEFAULT_HOLD_MS = 600
 TICK_S = 0.1
+# The reverse pull that brakes the chair on a stop: never harder or longer than this.
+MAX_BRAKE_PCT = 25
+MAX_BRAKE_MS = 500
+BRAKE_TICK_S = 0.05
 
 
 class ChairOutError(Exception):
@@ -70,8 +74,15 @@ def _cap(pct: float) -> int:
 
 
 def to_stick(v_mps: float, w_radps: float) -> tuple[int, int]:
-    """Forward speed (never reverse) and turn rate (positive left) as capped stick (x, y)."""
-    return _cap(-100 * w_radps / W_FULL_RADPS), _cap(100 * max(0.0, v_mps) / V_FULL_MPS)
+    """Forward speed (never reverse) and turn rate (positive left) as capped stick (x, y).
+
+    Over the cap, both shrink together, so the chair drives the same curve more slowly
+    rather than a tighter one.
+    """
+    x = -100 * w_radps / W_FULL_RADPS
+    y = 100 * max(0.0, v_mps) / V_FULL_MPS
+    scale = min(1.0, MAX_PCT / max(abs(x), y, 1e-9))
+    return round(x * scale), round(y * scale)
 
 
 class ChairSender:
@@ -82,6 +93,7 @@ class ChairSender:
         chair: Wheelchair | None = None,
         hold_ms: int = DEFAULT_HOLD_MS,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if chair is None:
             try:
@@ -92,6 +104,7 @@ class ChairSender:
         self.chair = chair
         self.hold_s = hold_ms / 1000
         self._clock = clock
+        self._sleep = sleep
         self._command: tuple[int, int, float] | None = None  # x, y, when decided
         # Held around every set so a stop can never be followed by a stale repeat.
         self._lock = threading.Lock()
@@ -111,9 +124,12 @@ class ChairSender:
         v, w = max(0.0, float(v_mps)), float(w_radps)
         return replace(self.send_stick(*to_stick(v, w)), v_mps=v, w_radps=w)
 
-    def send_stick(self, x: float, y: float) -> SendResult:
-        """Drive at stick percent (x right, y forward, never reverse), capped, held ``hold_ms``."""
-        x, y = _cap(x), _cap(max(0.0, y))
+    def send_stick(self, x: float, y: float, reverse: bool = False) -> SendResult:
+        """Drive at stick percent (x right, y forward), capped, held ``hold_ms``.
+
+        Never backward unless ``reverse`` is set, which only a person driving by hand does.
+        """
+        x, y = _cap(x), _cap(y if reverse else max(0.0, y))
         reason = self._halt_reason()
         if reason is not None:
             self._command = None
@@ -141,6 +157,32 @@ class ChairSender:
             self._command = None
             self.chair.stop()
         return SendResult(True, 0.0, 0.0)
+
+    def brake(self, pct: float, ms: float) -> SendResult:
+        """Stop, pulling the stick back briefly first so the chair does not coast.
+
+        The pull happens only if a forward command was live a moment ago: nothing
+        measures the chair's speed, and pulling back on a standing chair would reverse it.
+        """
+        pct, ms = min(float(pct), MAX_BRAKE_PCT), min(float(ms), MAX_BRAKE_MS)
+        pulled = 0
+        with self._lock:
+            was, self._command = self._command, None
+            driving = was is not None and was[1] > 0 and self._clock() - was[2] < self.hold_s
+            if driving and pct >= 1 and ms > 0 and self._halt_reason() is None:
+                pulled = -round(pct)
+                for _ in range(max(1, round(ms / 1000 / BRAKE_TICK_S))):
+                    self.chair.set(0, pulled)
+                    self._sleep(BRAKE_TICK_S)
+            self.chair.stop()
+        return SendResult(True, 0.0, 0.0, y=pulled)
+
+    def telemetry(self) -> dict[str, Any]:
+        """What the board last reported: the stick it feeds the chair, the real stick, health."""
+        try:
+            return dict(self.chair.stats())
+        except (TypeError, AttributeError):  # no answer from the board yet
+            return {}
 
     def close(self) -> None:
         self._closed.set()
