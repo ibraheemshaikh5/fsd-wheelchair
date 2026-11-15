@@ -6,7 +6,7 @@ import math
 import pytest
 from PIL import Image
 
-from fsd_ml import candidates
+from fsd_ml import bench, candidates
 from fsd_ml.chair import ChairSetup
 from fsd_ml.moves import Runner
 from fsd_ml.pilot import Call
@@ -31,9 +31,10 @@ class FakeChair:
             "drive_stick_pct": 12.0,
             "ramp_s": 0.0,
             "turn_stick_pct": 3.0,
-            "turn_lead_deg": 10.0,
-            "turn_done_deg": 5.0,
-            "turn_passes": 4.0,
+            "turn_min_pct": 1.0,
+            "turn_slow_deg": 40.0,
+            "turn_coast_s": 0.0,
+            "turn_done_deg": 3.0,
             "settle_s": 0.3,
             "v_full_mps": 1.5,
             "w_full_radps": 1.5,
@@ -79,7 +80,7 @@ class FakeChair:
         return type("Frame", (), {"jpeg": jpeg.getvalue()})(), "nothing sensed"
 
     def candidates(self):
-        return candidates.fan((), self.setup.chair), None
+        return candidates.fan((), self.setup, 0.25), None
 
     def note(self, event, **fields):
         pass
@@ -142,7 +143,7 @@ def test_disarming_stops_it_and_nothing_starts_unarmed():
     chair.drive = drive_then_disarm
     run, _ = runner(chair)
     done = run.straight(2.0, background=False)
-    assert done["outcome"] == "aborted" and done["reason"] == "disarmed"
+    assert done["outcome"] == "aborted" and done["reason"].endswith("then stopped: disarmed")
     assert len(chair.sticks) == 3 and stopped(chair)
     with pytest.raises(RuntimeError, match="not armed"):
         run.straight(2.0, background=False)
@@ -179,7 +180,8 @@ def test_a_turn_that_cannot_be_measured_or_does_not_happen_is_stopped():
     chair = FakeChair()
     chair.turns = False
     done = runner(chair)[0].turn(90, background=False)
-    assert done["outcome"] == "failed" and "not turning" in done["reason"] and stopped(chair)
+    assert done["outcome"] == "failed" and "no rotation" in done["reason"] and stopped(chair)
+    assert done["reason"].startswith("asked left 90°, gyro measured left 0°")
 
     # No gyro: the turn never starts.
     chair = FakeChair()
@@ -233,7 +235,13 @@ def test_what_the_pilot_asks_for_is_cut_to_what_is_allowed():
     # A metre forward at most (cut further by the 4 s move cap), 0.4 m back at most
     # (0.2 m/s believed, a command every 0.1 s).
     assert 35 <= len(forward) <= 41 and 15 <= len(back) <= 25
-    assert "the most allowed" in pilot.told[1][0][1]
+    # It is told what was allowed and how far the chair is believed to have got, not what
+    # it asked for.
+    assert pilot.told[1][0][1].startswith("Drove forward about 0.8")
+    assert (
+        "of 1.00 m (believed)" in pilot.told[1][0][1]
+        and "1 m is what is allowed" in pilot.told[1][0][1]
+    )
     # A negative distance is refused, not driven the other way or as its absolute value.
     assert pilot.told[2][0][2] and "not a positive amount" in pilot.told[2][0][1]
     assert stopped(chair)
@@ -241,7 +249,7 @@ def test_what_the_pilot_asks_for_is_cut_to_what_is_allowed():
 
 def test_an_obstacle_cuts_a_move_short_and_the_rest_of_the_reply_is_not_run():
     chair = FakeChair()
-    chair.obstacle = "Waiting for obstacle"
+    chair.obstacle = "obstacle 0.8 m ahead of the chair's front, 0.2 m to the right"
     pilot = ScriptedPilot(
         [
             [
@@ -254,7 +262,8 @@ def test_an_obstacle_cuts_a_move_short_and_the_rest_of_the_reply_is_not_run():
     done = runner(chair)[0].pilot("go", pilot, background=False)
     assert done["outcome"] == "failed"
     first, second = pilot.told[1]
-    assert first[2] and "obstacle" in first[1]
+    assert first[2] and first[1].startswith("Drove forward about 0.00 m of 0.50 m (believed)")
+    assert "then stopped: obstacle 0.8 m ahead" in first[1]
     assert second[2] and "Not run" in second[1]
     assert chair.sticks == [] and stopped(chair)  # neither move happened
 
@@ -281,7 +290,7 @@ def test_gemini_follows_the_path_it_picks_and_is_told_how_it_went():
     assert done["outcome"] == "arrived" and stopped(chair)
     # Path 1 curves left: the chair steered left along it, and the next look was told so.
     assert chair.yaw > math.radians(15) and all(y > 0 for _, y in chair.sticks)
-    assert "done" in pilot.told[1][0] and pilot.told[1][1] > 15
+    assert "What happened: drove about" in pilot.told[1][0] and pilot.told[1][1] > 15
     assert len(chair.pictures) == 2  # every look's drawn picture goes to the record
 
 
@@ -290,3 +299,44 @@ def test_gemini_run_ends_on_a_pick_that_was_not_offered():
     chair.candidates = lambda: ({}, None)  # everything blocked: only turns and ends on offer
     done = runner(chair)[0].gemini("go to the door", Picks("4"), background=False)
     assert done["outcome"] == "failed" and not chair.sticks and stopped(chair)
+
+
+class Coasting(FakeChair):
+    """A chair like the real one when turning: it answers late, its turn rate lags the stick
+    (so it coasts on 12-17 degrees from full turn stick), and a small stick does not move it."""
+
+    def __init__(self, dead_pct=5.0, lag_s=0.45, delay_s=0.2):
+        super().__init__()
+        self.settings.update(bench.DEFAULTS)
+        self.dead_pct, self.lag_s, self.delay_s = dead_pct, lag_s, delay_s
+        self.now, self.rate, self.stick, self.queue = 0.0, 0.0, 0.0, []
+
+    def drive(self, x_pct, y_pct, reverse=False):
+        self.queue.append((self.now + self.delay_s, x_pct))
+
+    def hold(self):
+        self.queue.append((self.now + self.delay_s, 0.0))
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        for _ in range(round(seconds / 0.01)):
+            self.now += 0.01
+            while self.queue and self.queue[0][0] <= self.now:
+                self.stick = self.queue.pop(0)[1]
+            push = abs(self.stick) - self.dead_pct  # 27 degrees a second at 12% stick
+            want = -math.copysign(27.0 * push / (12 - self.dead_pct), self.stick) if push > 0 else 0
+            self.rate += (want - self.rate) * 0.01 / self.lag_s
+            self.yaw += math.radians(self.rate * 0.01)
+
+
+@pytest.mark.parametrize("plant", [{}, {"dead_pct": 9.0}, {"lag_s": 0.65, "delay_s": 0.35}])
+def test_a_turn_ends_within_three_degrees_on_a_chair_that_coasts(plant):
+    for asked in (10, 25, -50, 90):
+        chair = Coasting(**plant)
+        chair.sending = True
+        run = Runner(chair, clock=chair.clock, sleep=chair.sleep)
+        run._state = {"running": True}
+        outcome, said = run._turn(asked)
+        assert outcome == "finished" and abs(math.degrees(chair.yaw) - asked) <= 3.5, said

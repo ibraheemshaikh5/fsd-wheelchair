@@ -690,34 +690,34 @@ class Session:
             ]
         )
 
-    def _watched_shape(self) -> chair.Body:
-        """The chair with the space a run keeps clear: a run is short and watched, so it keeps
-        a hand's width (the bench's ``clearance_m``), not the full margin of ml/chair.json."""
-        body = self.setup.chair
-        return chair.Body(body.width_m, body.length_m, self.setting("clearance_m"))
-
     def candidates(self) -> tuple[dict[str, np.ndarray], float | None]:
         """The paths on offer now (fsd_ml/candidates.py), each ending where ``blocked`` would
         stop the chair, and the camera's tilt as the obstacle sense fitted it. No paths when
         the obstacle sense is on but cannot see the floor."""
+        clearance = self.setting("clearance_m")
         if self.sight is None:
-            return candidates.fan((), self._watched_shape()), None
+            return candidates.fan((), self.setup, clearance), None
         seen = self.sight.fresh()
         if seen is None:
             return {}, None
-        return candidates.fan(seen, self._watched_shape(), STOP_M), self.sight.info.get("tilt_deg")
+        tilt = self.sight.info.get("tilt_deg")
+        return candidates.fan(seen, self.setup, clearance, STOP_M), tilt
 
     def blocked(self) -> str | None:
-        """Whether the next metre straight ahead meets an obstacle. None when it is clear,
-        and when no obstacle sense is installed."""
+        """Why the chair must not go on: what stands in the next metre straight ahead, and
+        where. None when it is clear, and when no obstacle sense is installed."""
         if self.sight is None:
             return None
         seen = self.sight.fresh()
         if seen is None:
-            return "cannot see the floor ahead"
+            return "the obstacle sense has had no sight of the floor for 1 s"
         ahead = np.arange(0.1, 1.0 + 1e-9, 0.1)
+        # A set move is short and watched, so it keeps a hand's width clear, not the full
+        # clearance used when a model picks its own way.
         tight = FootprintConfig(
-            shape=self._watched_shape(),
+            shape=chair.Body(
+                self.setup.chair.width_m, self.setup.chair.length_m, self.setting("clearance_m")
+            ),
             caution_m=0.05,
             slow_distance_m=2.0,
             stop_distance_m=STOP_M,
@@ -733,11 +733,11 @@ class Session:
         self._blocked_looks += 1
         if self._blocked_looks < 3:
             return None
-        near = min(seen, key=lambda o: o.x * o.x + o.y * o.y, default=None)
-        if near is None:
-            return picked.reason or "obstacle"
+        # The one in the way, measured from the chair's front and its centre line.
+        near = next(o for o in seen if o.id == picked.yielding_to_id)
+        gap = max(0.0, near.x - self.setup.chair.length_m / 2)
         side = "left" if near.y > 0 else "right"
-        return f"{picked.reason or 'obstacle'} ({near.x:.1f} m ahead, {abs(near.y):.1f} m {side})"
+        return f"obstacle {gap:.1f} m ahead of the chair's front, {abs(near.y):.1f} m to the {side}"
 
     # The bench page.
 

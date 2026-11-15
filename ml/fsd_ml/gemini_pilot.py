@@ -61,14 +61,10 @@ class GeminiPilot:
         did, ``heading_deg`` how far the chair has turned since the start (left positive).
         Returns one of the labels, or None if the model gave no usable answer.
         """
-        from google import genai
         from google.genai import types
 
         if self.client is None:
-            # v1beta: the SDK's default API version does not serve the Robotics-ER models.
-            self.client = genai.Client(
-                http_options=types.HttpOptions(api_version="v1beta", timeout=40_000)
-            )
+            self.client = client()
         way = "left" if heading_deg >= 0 else "right"
         text = "\n".join(
             [
@@ -133,12 +129,44 @@ class GeminiPilot:
         return choice if choice in options else None
 
 
-def main() -> None:
+def client() -> Any:
+    """The Gemini client. v1beta: the SDK's default API version does not serve Robotics-ER."""
+    from google import genai
+    from google.genai import types
+
+    return genai.Client(http_options=types.HttpOptions(api_version="v1beta", timeout=40_000))
+
+
+def drawn(jpeg: bytes, depth: Any = None) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
+    """A recorded picture as a live run would show it: the paths on offer, the picture with
+    them drawn, and what the obstacle sense made of it.
+
+    ``depth`` is an obstacles.DepthObstacles; without one there are no obstacles and every
+    path is offered whole.
+    """
     import numpy as np
     from PIL import Image
 
-    from fsd_ml import bench, candidates, chair, obstacles
+    from fsd_ml import bench, candidates, chair
     from fsd_ml.console.server import STOP_M
+
+    setup = chair.load()
+    seen, info = [], {"floor": None}
+    if depth is not None:
+        rgb = np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
+        camera = setup.camera
+        seen, info = depth.find(rgb, camera.hfov_deg, camera.height_m, setup.lens_xy)
+    # The space kept clear and the stop distance of a live run (Session.candidates).
+    paths = (
+        candidates.fan(seen, setup, bench.DEFAULTS["clearance_m"], STOP_M)
+        if info["floor"] is not False
+        else {}
+    )
+    return paths, candidates.draw(jpeg, paths, setup, info.get("tilt_deg")), info
+
+
+def main() -> None:
+    from fsd_ml import candidates, obstacles
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("pictures", nargs="+", type=Path, help="recorded camera JPEGs")
@@ -146,25 +174,14 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("runs/gemini"))
     parser.add_argument("--no-ask", action="store_true", help="only draw; do not call Gemini")
     args = parser.parse_args()
-    setup = chair.load()
-    # The space kept clear and the stop distance of a live run (Session.candidates).
-    body = setup.chair
-    shape = chair.Body(body.width_m, body.length_m, bench.DEFAULTS["clearance_m"])
     depth = obstacles.DepthObstacles() if obstacles.available() else None
     args.out.mkdir(parents=True, exist_ok=True)
     for source in args.pictures:
-        jpeg = source.read_bytes()
-        seen, info = [], {"floor": None}
-        if depth is not None:
-            rgb = np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
-            camera = setup.camera
-            seen, info = depth.find(rgb, camera.hfov_deg, camera.height_m, setup.lens_xy)
-        paths = candidates.fan(seen, shape, STOP_M) if info["floor"] is not False else {}
-        picture = candidates.draw(jpeg, paths, setup, info.get("tilt_deg"))
-        drawn = args.out / f"{source.parent.parent.name}-{source.stem}.picks.jpg"
-        drawn.write_bytes(picture)
+        paths, picture, info = drawn(source.read_bytes(), depth)
+        saved = args.out / f"{source.parent.parent.name}-{source.stem}.picks.jpg"
+        saved.write_bytes(picture)
         lengths = {label: round(len(path) * 0.1, 1) for label, path in paths.items()}
-        print(f"{source}\n  obstacles: {len(seen)} {info}\n  paths (m): {lengths}\n  {drawn}")
+        print(f"{source}\n  floor: {info}\n  paths (m): {lengths}\n  {saved}")
         if not args.no_ask:
             pilot = GeminiPilot(args.say)
             choice = pilot.next(picture, candidates.options(paths), "none yet.", 0.0)

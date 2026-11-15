@@ -11,6 +11,13 @@
 Nothing here moves the chair unless ``chair.armed()`` is true, which only a press of Run on
 the bench page makes it, and a run ends the moment that page stops asking after it. Every
 way a run can end stops the chair first.
+
+Every move answers with what actually happened, in plain words, for the model that asked
+for it (and for the record): what was asked and what was measured ("asked left 25°, gyro
+measured left 18°"), how far it is believed to have driven of how far was asked, and, if it
+was stopped, exactly why. Only turning is measured (the gyro). Distance is believed: speed
+times time, since nothing on the chair measures it, so a chair that is pushed but not
+moving forward cannot be told from one that is.
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -35,10 +43,25 @@ if TYPE_CHECKING:
 # How the chair is driven (stick strengths, ramps, how early a turn lets go) comes from the
 # bench's settings, read afresh on every move: see fsd_ml/bench.py.
 TURN_TIMEOUT_S_PER_DEG = 0.12
+TURN_TICK_S = 0.05
+# The turn rate is the change in the gyro's angle over this long.
+RATE_WINDOW_S = 0.2
+# A turn is over once the chair has turned slower than this for this long.
+STILL_DEG_PER_S = 1.5
+STILL_S = 0.3
+# A stick held this long that has turned the chair less than this is not turning it.
+STUCK_S = 2.0
+STUCK_DEG = 2.0
+# How fast a stick that is not turning the chair is raised.
+RAISE_PCT_PER_S = 6.0
 
 
 # Longest a straight or backing move may drive, however slow the chair is believed to be.
 MAX_MOVE_S = 4.0
+# Standing still before each look: longer than a frame stays fresh, so the picture shown is
+# from after the move, and sharp.
+LOOK_SETTLE_S = 0.6
+NO_PICTURE = "no camera picture newer than 0.5 s arrived within 5 s: the phone's stream has stopped"
 # Longest one picked path may be driven. Its distance is believed too, but the gyro steers
 # it and each pick is meant to cover ground, so it gets longer than a blind straight.
 MAX_PATH_S = 12.0
@@ -105,7 +128,7 @@ class Runner:
                 return "aborted", why
             frame, _ = self._look()
             if frame is None:
-                return "failed", "no fresh camera picture to show Gemini"
+                return "failed", NO_PICTURE
             paths, tilt = self._chair.candidates()
             picture = candidates.draw(frame.jpeg, paths, self._chair.setup, tilt)
             heading = math.degrees(self._chair.yaw_rad() - start)
@@ -144,8 +167,7 @@ class Runner:
             self._phase(self._state["phase"], call=None)
             if result == "aborted":
                 return result, text
-            ended = "done" if result == "finished" else "cut short"
-            outcome = f"{choice} ({words}), {ended}: {text}."
+            outcome = f"{choice} ({words}). What happened: {text}."
         return "failed", f"not done after {max_looks} looks"
 
     def _follow(self, path_xy: np.ndarray) -> tuple[str, str]:
@@ -156,29 +178,29 @@ class Runner:
         to be, and the path follower (pipeline/control.py) steers for it. It stops for an
         obstacle ahead, and never drives longer than MAX_PATH_S.
         """
+        path = np.asarray(path_xy, dtype=np.float64).reshape(-1, 2)
+        along = np.cumsum(np.linalg.norm(np.diff(path, axis=0, prepend=[[0.0, 0.0]]), axis=1))
+        length = float(along[-1])
         if not self._chair.gyro_fresh():
-            return "failed", "the gyro is not reporting, so a path cannot be followed"
+            return "failed", _drove(0.0, length, "the gyro is not reporting, so it did not start")
         stick = self._chair.setting("drive_stick_pct")
         ramp = max(0.0, self._chair.setting("ramp_s"))
         speed = self._chair.speed_for(stick)
         if speed <= 0:
-            return "failed", "no speed is known for that stick"
-        path = np.asarray(path_xy, dtype=np.float64).reshape(-1, 2)
-        along = np.cumsum(np.linalg.norm(np.diff(path, axis=0, prepend=[[0.0, 0.0]]), axis=1))
-        length = float(along[-1])
+            return "failed", _drove(0.0, length, "no speed is known for that stick")
         seconds = min(length / speed + ramp, MAX_PATH_S)
         yaw, x, y, gone, v = self._chair.yaw_rad(), 0.0, 0.0, 0.0, 0.0
         started = last = self._clock()
         while (now := self._clock() - started) < seconds:
             if why := self._stopped():
-                return "aborted", why
+                return "aborted", _drove(gone, length, why)
             if why := self._chair.blocked():
                 self._chair.hold()
                 self._chair.note("stopped for an obstacle", why=why)
-                return "failed", f"stopped for an obstacle after about {gone:.1f} m: {why}"
+                return "failed", _drove(gone, length, why)
             if not self._chair.gyro_fresh():
                 self._chair.hold()
-                return "failed", f"the gyro stopped reporting after about {gone:.1f} m"
+                return "failed", _drove(gone, length, "the gyro stopped reporting")
             heading = self._chair.yaw_rad() - yaw
             step = v * (self._clock() - last)
             last = self._clock()
@@ -201,15 +223,25 @@ class Runner:
             # Never a harder turn than a turn on the spot is given.
             most = self._chair.setting("turn_stick_pct")
             if problem := self._chair.drive(max(-most, min(most, turn)), forward):
-                return "aborted", problem
+                return "aborted", _drove(gone, length, problem)
             self._sleep(0.1)
         self._chair.hold()
-        self._chair.note("path", asked_m=round(length, 2), believed_m=round(gone, 2))
-        return "finished", f"drove about {gone:.1f} m of {length:.1f} m along it"
+        turned = math.degrees(self._chair.yaw_rad() - yaw)
+        self._chair.note(
+            "path", asked_m=round(length, 2), believed_m=round(gone, 2), turned_deg=round(turned, 1)
+        )
+        capped = (
+            f"the {MAX_PATH_S:.0f} s allowed for one path ran out" if length - gone > 0.1 else ""
+        )
+        return "finished", _drove(gone, length, capped) + f"; gyro measured {_degrees(turned)}"
 
     def _look(self) -> tuple[Any, str]:
-        """Stand still, then a fresh camera frame and the obstacle report; no frame if none came."""
-        self._settle(0.4)  # so the picture is sharp and shows where the chair ended up
+        """Stand still, then a fresh camera frame and the obstacle report; no frame if none came.
+
+        A frame counts as fresh for half a second (live.MAX_FRAME_AGE_S), so standing longer
+        than that first means the picture was taken after the last move ended.
+        """
+        self._settle(LOOK_SETTLE_S)
         frame, report = self._chair.observe()
         waited = 0.0
         while frame is None and waited < 5.0 and not self._stopped():
@@ -225,7 +257,7 @@ class Runner:
                 return "aborted", why
             frame, report = self._look()
             if frame is None:
-                return "failed", "no fresh camera picture to show the pilot"
+                return "failed", NO_PICTURE
             self._phase(f"look {turn}: the pilot is thinking", steps=turn)
             calls = pilot.next(frame.jpeg, report, results)
             self._chair.record(
@@ -280,24 +312,17 @@ class Runner:
             return "failed", f"Not run: {amount!r} is not a positive amount."
         if call.name.startswith("move_"):
             forward = call.name == "move_forward"
-            distance = max(0.05, min(MAX_FORWARD_M if forward else MAX_BACKWARD_M, amount))
-            outcome, text = self._straight(distance) if forward else self._back(distance)
-            if outcome == "finished":
-                cut = (
-                    f" (you asked for {amount:.2f} m; that is the most allowed)"
-                    if amount > distance
-                    else ""
-                )
-                return (
-                    "ok",
-                    f"Drove {'forward' if forward else 'back'} about {distance:.2f} m{cut}.",
-                )
+            allowed, unit = (
+                max(0.05, min(MAX_FORWARD_M if forward else MAX_BACKWARD_M, amount)),
+                "m",
+            )
+            outcome, text = self._straight(allowed) if forward else self._back(allowed)
         else:
-            degrees = max(3.0, min(MAX_TURN_DEG, amount))
-            outcome, text = self._turn(degrees if call.name == "turn_left" else -degrees)
-            if outcome == "finished":
-                return "ok", f"The gyro says the chair {text}."
-        return ("aborted", text) if outcome == "aborted" else ("failed", f"Stopped: {text}")
+            allowed, unit = max(3.0, min(MAX_TURN_DEG, amount)), "°"
+            outcome, text = self._turn(allowed if call.name == "turn_left" else -allowed)
+        if amount != allowed:
+            text += f" (you asked for {amount:g} {unit}; {allowed:g} {unit} is what is allowed)"
+        return {"finished": "ok"}.get(outcome, outcome), f"{text[0].upper()}{text[1:]}."
 
     def _settle(self, seconds: float | None = None) -> None:
         """Stand still for a moment so one move does not run into the next."""
@@ -316,35 +341,46 @@ class Runner:
         stick = self._chair.setting("drive_stick_pct")
         ramp = max(0.0, self._chair.setting("ramp_s"))
         speed = self._chair.speed_for(stick)
+        way = "forward" if forward else "back"
         if speed <= 0:
-            return "failed", "no speed is known for that stick"
+            return "failed", _drove(0.0, distance_m, "no speed is known for that stick", way)
         # Easing in and out each cover half the ground of the same time at full stick. The
         # believed speed is a guess (nothing measures distance), so a move never runs past
         # MAX_MOVE_S whatever it says.
         seconds, started = min(distance_m / speed + ramp, MAX_MOVE_S), self._clock()
+        gone, y, last = 0.0, 0.0, started
         while (now := self._clock() - started) < seconds:
+            gone += self._chair.speed_for(y) * (self._clock() - last)
+            last = self._clock()
             if why := self._stopped():
-                return "aborted", why
+                return "aborted", _drove(gone, distance_m, why, way)
             if forward and (why := self._chair.blocked()):
                 self._chair.hold()
                 self._chair.note("stopped for an obstacle", why=why)
-                return "failed", f"stopped for an obstacle: {why}"
+                return "failed", _drove(gone, distance_m, why, way)
             # Stick straight and nothing else. Pushed straight, the chair goes straight; and
             # because of the stick's dead zone the smallest sideways nudge is a real turn, so
             # "correcting" the heading here only makes it weave.
             eased = min(1.0, now / ramp, (seconds - now) / ramp) if ramp > 0 else 1.0
             y = max(1.0, stick * eased)
             if problem := self._chair.drive(0.0, y if forward else -y, reverse=not forward):
-                return "aborted", problem
+                return "aborted", _drove(gone, distance_m, problem, way)
             self._sleep(0.1)
+        gone += self._chair.speed_for(y) * (self._clock() - last)
         self._chair.hold()
         self._chair.note(
             "straight" if forward else "back",
             asked_m=round(distance_m, 3),
+            believed_m=round(gone, 3),
             seconds=round(seconds, 2),
             stick_pct=stick,
         )
-        return "finished", f"drove for {seconds:.1f} s at {speed:.2f} m/s believed"
+        capped = (
+            f"the {MAX_MOVE_S:.0f} s allowed for one move ran out"
+            if distance_m - gone > 0.05
+            else ""
+        )
+        return "finished", _drove(gone, distance_m, capped, way)
 
     def _straight(self, distance_m: float) -> tuple[str, str]:
         return self._drive_for(distance_m, forward=True)
@@ -412,63 +448,102 @@ class Runner:
     def _turn(self, degrees_left: float) -> tuple[str, str]:
         """Rotate on the spot by an angle, by the gyro. Positive is to the left.
 
-        The stick is released early, because the chair coasts; then it stands still, the
-        gyro says where it really ended up, and it is nudged again if that is still off.
-        Without a fresh gyro reading the turn cannot be measured, so it stops at once.
+        The chair keeps turning for a moment after the stick lets go, so what is steered is
+        where it would end up if let go now (its angle plus its turn rate times
+        ``turn_coast_s``). The stick is in proportion to what is then left to turn: full
+        ``turn_stick_pct`` beyond ``turn_slow_deg``, easing down to ``turn_min_pct``. It lets
+        go once that is within ``turn_done_deg``, waits for the chair to stand still, and
+        pushes again (either way) if it did not end there. A stick that is not turning the
+        chair is raised little by little, and given up on after STUCK_S.
+
+        Whatever ends it, what is said is what was asked and what the gyro measured.
         """
+        asked = _degrees(degrees_left)
         if not self._chair.gyro_fresh():
-            return "failed", "the gyro is not reporting, so a turn cannot be measured"
+            return "failed", f"asked {asked}, did not turn: the gyro is not reporting"
         start = self._chair.yaw_rad()
         goal = start + math.radians(degrees_left)
-        deadline = self._clock() + 6.0 + abs(degrees_left) * TURN_TIMEOUT_S_PER_DEG
-        lead = min(self._chair.setting("turn_lead_deg"), abs(degrees_left) / 2)
-        turn_stick = self._chair.setting("turn_stick_pct")
+        cap_s = 6.0 + abs(degrees_left) * TURN_TIMEOUT_S_PER_DEG
+        most = self._chair.setting("turn_stick_pct")
+        least = min(most, self._chair.setting("turn_min_pct"))
+        slow = max(1.0, self._chair.setting("turn_slow_deg"))
         close_enough = self._chair.setting("turn_done_deg")
+        coast_s = self._chair.setting("turn_coast_s")
         if self._state.get("kind") == "turn":
             self._phase("turning")
-        passes = []
-        for _ in range(max(1, round(self._chair.setting("turn_passes")))):
-            to_go = math.degrees(goal - self._chair.yaw_rad())
-            if abs(to_go) <= close_enough:
-                break
-            way = math.copysign(1.0, to_go)
-            stick = -way * turn_stick  # stick right is positive; a left turn is stick left
-            before = self._chair.yaw_rad()
-            while way * math.degrees(goal - self._chair.yaw_rad()) > lead:
-                if why := self._stopped():
-                    return "aborted", why
-                done = math.degrees(self._chair.yaw_rad() - start)
-                if not self._chair.gyro_fresh():
-                    self._chair.hold()
-                    return "failed", f"the gyro stopped reporting after {done:+.0f} degrees"
-                if self._clock() > deadline:
-                    self._chair.hold()
-                    return "failed", (
-                        f"turned only {done:+.0f} of {degrees_left:+.0f} degrees:"
-                        " the chair is not turning"
-                    )
-                if problem := self._chair.drive(stick, 0.0):
-                    return "aborted", problem
-                self._sleep(0.05)
-            released = self._chair.yaw_rad()
-            self._settle()
+
+        def measured(why: str = "") -> str:
+            got = math.degrees(self._chair.yaw_rad() - start)
+            return f"asked {asked}, gyro measured {_degrees(got)}{why}"
+
+        began = self._clock()
+        # (when, yaw) over the last RATE_WINDOW_S, for the turn rate.
+        seen: deque[tuple[float, float]] = deque()
+        # The push under way: when it began, the yaw then, and the stick added since.
+        pushing: tuple[float, float] | None = None
+        raised, still_since, top = 0.0, None, 0.0
+        while True:
+            now, yaw = self._clock(), self._chair.yaw_rad()
             if why := self._stopped():
-                return "aborted", why
-            coasted = math.degrees(self._chair.yaw_rad() - released)
-            passes.append(
-                {
-                    "driven_deg": round(math.degrees(released - before), 1),
-                    "coasted_deg": round(coasted, 1),
-                }
-            )
-            # Next time, let go by as much as it just coasted.
-            lead = max(2.0, min(40.0, abs(coasted) * 0.9))
-        done = math.degrees(self._chair.yaw_rad() - start)
+                return "aborted", measured(f": {why}")
+            if not self._chair.gyro_fresh():
+                self._chair.hold()
+                return "failed", measured(": the gyro stopped reporting, so the turn was stopped")
+            if now - began > cap_s:
+                self._chair.hold()
+                return "failed", measured(f": the {cap_s:.0f} s allowed for this turn ran out")
+            seen.append((now, yaw))
+            while now - seen[0][0] > RATE_WINDOW_S:
+                seen.popleft()
+            rate = math.degrees(yaw - seen[0][1]) / (now - seen[0][0]) if now > seen[0][0] else 0.0
+            to_go = math.degrees(goal - yaw) - rate * coast_s
+            if abs(to_go) <= close_enough:
+                if pushing:
+                    self._chair.hold()
+                pushing, raised = None, 0.0
+                if abs(rate) >= STILL_DEG_PER_S:
+                    still_since = None
+                elif still_since is None:
+                    still_since = now
+                elif now - still_since >= STILL_S:
+                    break
+            else:
+                still_since = None
+                if pushing is None:
+                    pushing = (now, yaw)
+                elif now - pushing[0] >= STUCK_S:
+                    if abs(math.degrees(yaw - pushing[1])) < STUCK_DEG:
+                        self._chair.hold()
+                        return "failed", measured(
+                            f": the stick was held {STUCK_S:.0f} s (up to {top:.0f}%) but the gyro"
+                            " shows no rotation: the chair may be stuck or blocked"
+                        )
+                    pushing = (now, yaw)
+                if abs(rate) < STILL_DEG_PER_S:
+                    raised = min(most, raised + RAISE_PCT_PER_S * TURN_TICK_S)
+                stick = min(most, max(least, most * abs(to_go) / slow) + raised)
+                top = max(top, stick)
+                # Stick right is positive; a left turn is stick left.
+                if problem := self._chair.drive(-math.copysign(stick, to_go), 0.0):
+                    return "aborted", measured(f": {problem}")
+            self._sleep(TURN_TICK_S)
+        got = math.degrees(self._chair.yaw_rad() - start)
         self._chair.note(
             "turn",
             asked_deg=degrees_left,
-            got_deg=round(done, 1),
-            stick_pct=turn_stick,
-            passes=passes,
+            got_deg=round(got, 1),
+            seconds=round(self._clock() - began, 1),
+            top_stick_pct=round(top, 1),
         )
-        return "finished", f"turned {done:+.0f} degrees (asked {degrees_left:+.0f})"
+        return "finished", measured()
+
+
+def _drove(gone_m: float, asked_m: float, stopped: str = "", way: str = "") -> str:
+    """How a straight or a path went: believed distance of what was asked, and why it ended."""
+    said = f"drove {way + ' ' if way else ''}about {gone_m:.2f} m of {asked_m:.2f} m (believed)"
+    return f"{said}, then stopped: {stopped}" if stopped else said
+
+
+def _degrees(left: float) -> str:
+    """An angle to the left in words: "left 25°"."""
+    return f"{'left' if left >= 0 else 'right'} {abs(left):.0f}°"

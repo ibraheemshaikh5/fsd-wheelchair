@@ -17,11 +17,16 @@ DEFAULTS: dict[str, float] = {
     # Forward stick on a straight, and how long it takes to ease up to it and back down.
     "drive_stick_pct": 6.0,
     "ramp_s": 0.8,
-    # Stick while turning on the spot, and how early it is released (the chair coasts on).
+    # Turning on the spot (moves.Runner._turn). The stick is in proportion to the angle
+    # left: the most beyond turn_slow_deg, easing to the least, which should be the smallest
+    # stick that still turns the chair. The chair coasts on after the stick lets go for about
+    # turn_coast_s (measured: 11-18 degrees at 12%), so it lets go that early; a turn is done
+    # within turn_done_deg.
     "turn_stick_pct": 12.0,
-    "turn_lead_deg": 10.0,
-    "turn_done_deg": 5.0,
-    "turn_passes": 3.0,
+    "turn_min_pct": 6.0,
+    "turn_slow_deg": 40.0,
+    "turn_coast_s": 0.5,
+    "turn_done_deg": 3.0,
     # Standing still between one move and the next.
     "settle_s": 1.0,
     # A reverse pull to stop harder. Off: it is the harshest thing the chair can be asked for.
