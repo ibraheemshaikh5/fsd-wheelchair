@@ -1,10 +1,10 @@
 {
   "camera": {
     "height_m": 0.279,
-    "tilt_down_deg": 3.0,
-    "left_m": 0.197,
+    "tilt_down_deg": -2.0,
+    "left_m": 0.241,
     "from_rear_m": 0.794,
-    "hfov_deg": 80.0
+    "hfov_deg": 105.0
   },
   "chair": {
     "width_m": 0.635,
