@@ -17,12 +17,14 @@ environment (``ANTHROPIC_API_KEY``; ``uv run --env-file .env`` sets it from ml/.
 from __future__ import annotations
 
 import base64
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-MODEL = "claude-sonnet-5-5"
+# PILOT_MODEL=claude-haiku-5-5 for a faster, cheaper pilot.
+MODEL = os.environ.get("PILOT_MODEL", "claude-sonnet-5-5")
 PROMPT_FILE = Path(__file__).resolve().parent.parent / "pilot_prompt.md"
 # What an earlier picture is replaced with once a newer one has been sent.
 OLD_PICTURE = {"type": "text", "text": "[An earlier picture from the camera, no longer shown.]"}
@@ -157,8 +159,9 @@ class Pilot:
             max_tokens=2000,
             system=self._prompt(),
             tools=TOOLS,
-            # A quick decision about once every few seconds, not a long think.
-            thinking={"type": "between_tools"},
+            # A quick decision about once every few seconds, not a long think. Haiku has no
+            # between-tools thinking, so it thinks adaptively instead.
+            thinking={"type": "adaptive" if "haiku" in self.model else "between_tools"},
             output_config={"effort": self.effort},
             messages=self.messages,
         )
