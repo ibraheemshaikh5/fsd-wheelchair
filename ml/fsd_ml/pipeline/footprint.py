@@ -18,10 +18,11 @@ from fsd_ml.drivers import Candidate
 from fsd_ml.pipeline.types import Obstacle, PathStatus
 
 SAMPLE_SPACING_M = 0.1
-# How far short of touching something a run stops: a little standing still, and more the
-# faster it goes (about 0.38 m at the 0.45 m/s creep, 0.53 m at 0.75 m/s). The time covers
-# noticing it (three looks in a row) and coasting to a stop.
-STOP_STILL_M = 0.15
+# How far short of touching something (with its margin) a run stops: next to nothing when
+# barely moving, and more the faster it goes (about 0.26 m at the 0.45 m/s creep, 0.41 m at
+# 0.75 m/s). The time covers noticing it (three looks in a row) and coasting to a stop. A
+# chair creeping up to something therefore ends about a hand's width from it.
+STOP_STILL_M = 0.03
 STOP_REACT_S = 0.5
 # The clearance kept from something the chair is already nearer to than its margin.
 BESIDE_M = 0.05

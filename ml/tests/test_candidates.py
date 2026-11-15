@@ -56,16 +56,12 @@ def test_a_drawn_route_is_kept_on_floor_slid_past_things_and_cut_only_when_block
     there = np.array([[1.0, 0.0], [2.5, -0.8]])
     assert np.allclose(setup.to_floor(setup.to_pixels(there, 960, 540), 960, 540), there)
     # Open floor: the whole route is driven, from the chair's middle, smoothly.
-    route = route_pilot.interpret(
-        drawn((1.0, 0.2), (2.0, 0.6), (3.0, 0.6)), None, [], setup, 0.08, 0.2
-    )
+    route = route_pilot.interpret(drawn((1.0, 0.2), (2.0, 0.6), (3.0, 0.6)), None, [], setup, 0.08)
     assert np.hypot(*(route.path[-1] - (3.0, 0.6))) < 0.15
     # A box beside the way: the route is slid to one side so the body clears it, not cut.
     shape = Body(setup.chair.width_m, setup.chair.length_m, 0.08)
     box = [Obstacle("box", "object", 2.0, 0.2, radius_m=0.03)]
-    past = route_pilot.interpret(
-        drawn((1.0, 0.6), (2.0, 0.6), (3.0, 0.6)), None, box, setup, 0.08, 0.2
-    )
+    past = route_pilot.interpret(drawn((1.0, 0.6), (2.0, 0.6), (3.0, 0.6)), None, box, setup, 0.08)
     assert len(past.path) >= 28 and first_hit(past.path, box, shape) is None
     assert past.path[20][1] > 0.6  # moved further from the box, to the left
     # A wall right across the way cannot be slid past: the path ends short of it.
@@ -73,14 +69,14 @@ def test_a_drawn_route_is_kept_on_floor_slid_past_things_and_cut_only_when_block
         Obstacle(f"w{n}", "object", 2.5, y, radius_m=0.03)
         for n, y in enumerate(np.arange(-2, 2, 0.15))
     ]
-    cut = route_pilot.interpret(
-        drawn((1.0, 0.0), (2.0, 0.0), (3.0, 0.0)), None, wall, setup, 0.08, 0.2
-    )
-    assert 1.0 < len(cut.path) * 0.1 < 2.1 and first_hit(cut.path, wall, shape) is None
-    assert cut.path[-1][0] + setup.chair.length_m / 2 < 2.5 - 0.08 - 0.15  # short of the wall
+    cut = route_pilot.interpret(drawn((1.0, 0.0), (2.0, 0.0), (3.0, 0.0)), None, wall, setup, 0.08)
+    # ...right up to it: the body ends its clearance from the wall, give or take a step.
+    assert first_hit(cut.path, wall, shape) is None
+    gap = 2.5 - 0.03 - (cut.path[-1][0] + setup.chair.length_m / 2)
+    assert 0.08 <= gap < 0.3
     # A point above the horizon is not floor: the route ends before it.
     sky = route_pilot.Plan("route", points=(*drawn((1.0, 0.0), (2.0, 0.0)).points, (0.5, 0.2)))
-    kept = route_pilot.interpret(sky, None, [], setup, 0.08, 0.2)
+    kept = route_pilot.interpret(sky, None, [], setup, 0.08)
     assert np.hypot(*(kept.path[-1] - (2.0, 0.0))) < 0.15
 
 
@@ -109,33 +105,3 @@ def test_a_turn_on_the_spot_needs_floor_known_to_be_clear_and_nothing_is_forgott
     blind = Remembered(setup, start)
     room, why = blind.turn_room((6.0, 4.0, 1.0), 30.0, 0.0)
     assert room == 0 and "not seen" in why
-
-
-def test_the_goal_is_driven_up_to_and_not_kept_clear_of():
-    from fsd_ml import route_pilot
-
-    setup = ChairSetup()
-    pixels = setup.to_pixels(np.array([(1.0, 0.0), (2.0, 0.0)]), 1000, 1000)
-    plan = route_pilot.Plan(
-        "route", points=tuple((x / 1000, y / 1000) for x, y in pixels), stop_short_m=0.5
-    )
-    # Someone standing 3 m ahead, and something else well off to the side.
-    person = [
-        Obstacle(f"leg{n}", "object", 3.0, side, radius_m=0.03)
-        for n, side in enumerate((-0.1, 0.1))
-    ]
-    other = [Obstacle("box", "object", 1.5, 1.5, radius_m=0.03)]
-    # The route was drawn only 2 m of the way, but ends near the goal: it is carried on, and
-    # ends with the chair's front half a metre from the person, as asked.
-    to_goal = route_pilot.interpret(plan, None, person + other, setup, 0.08, 0.2, goal=(3.0, 0.0))
-    front = to_goal.path[-1][0] + setup.chair.length_m / 2
-    assert to_goal.at_goal and 3.0 - front == pytest.approx(0.5 + 0.03, abs=0.15)
-    # Asked to stop right in front, it goes nearer than it would to an obstacle in its way.
-    close = route_pilot.Plan("route", points=plan.points, stop_short_m=0.15)
-    nearer = route_pilot.interpret(close, None, person + other, setup, 0.08, 0.2, goal=(3.0, 0.0))
-    plain = route_pilot.interpret(
-        route_pilot.Plan("route", points=(*plan.points, (0.5, 0.5))), None, person, setup, 0.08, 0.2
-    )
-    assert len(nearer.path) > len(to_goal.path) and len(nearer.path) >= len(plain.path)
-    parts, rest = route_pilot.goal_parts((3.0, 0.0), person + other)
-    assert len(parts) == 2 and rest == other
