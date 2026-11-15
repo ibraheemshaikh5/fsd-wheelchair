@@ -26,8 +26,12 @@ from typing import Any
 
 # Haiku by default for speed; PILOT_MODEL=claude-sonnet-5-5 (or another) to compare.
 MODEL = os.environ.get("PILOT_MODEL", "claude-haiku-5-5")
+# PILOT_THINKING=1 lets the model think (adaptively) before each move: slower, maybe smarter.
+THINKING = os.environ.get("PILOT_THINKING", "") not in ("", "0")
 PROMPT_FILE = Path(__file__).resolve().parent.parent / "pilot_prompt.md"
 # What an earlier picture is replaced with once a newer one has been sent.
+# Past this many pictures the oldest are dropped (rare: a normal run needs far fewer).
+KEEP_PICTURES = 20
 OLD_PICTURE = {"type": "text", "text": "[An earlier picture from the camera, no longer shown.]"}
 # The most any one call may ask for. Longer moves are cut to these, and the model is told.
 MAX_FORWARD_M = 1.0
@@ -110,6 +114,7 @@ class Pilot:
 
     task: str
     model: str = MODEL
+    thinking: bool = THINKING
     client: Any = None
     messages: list[dict[str, Any]] = field(default_factory=list)
     # How the last reply went, for the record.
@@ -126,19 +131,28 @@ class Pilot:
         ``results`` is (tool call id, what happened, whether it failed) for every call in
         its previous reply. Returns no calls if the model would not or could not answer.
 
-        Only the newest picture is sent: older ones are replaced with a line of text, since
-        the chair has moved on from them and they are most of what a request costs.
+        The whole conversation is sent, every picture included, so the model remembers what it
+        saw and did. Earlier turns are never edited, so they stay in the prompt cache and each
+        look only pays for the new picture. Only past KEEP_PICTURES are the oldest dropped.
         """
         if self.client is None:
             import anthropic
 
             self.client = anthropic.Anthropic(timeout=40.0, max_retries=1)
-        for message in self.messages:
-            if message["role"] == "user":
-                message["content"] = [
-                    OLD_PICTURE if block["type"] == "image" else block
-                    for block in message["content"]
-                ]
+        pictures = [
+            b
+            for m in self.messages
+            if m["role"] == "user"
+            for b in m["content"]
+            if b["type"] == "image"
+        ]
+        for block in pictures[: max(0, len(pictures) - KEEP_PICTURES + 1)]:
+            block.clear()
+            block.update(OLD_PICTURE)
+        for message in self.messages:  # one cache marker, on the newest turn only
+            for block in message["content"] if isinstance(message["content"], list) else []:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
         content: list[dict[str, Any]] = [
             {"type": "tool_result", "tool_use_id": call_id, "content": text, "is_error": failed}
             for call_id, text, failed in results or []
@@ -151,7 +165,9 @@ class Pilot:
             }
         )
         opening = f"Your task: {self.task}\n\n" if not self.messages else ""
-        content.append({"type": "text", "text": f"{opening}{report}"})
+        if text := f"{opening}{report}".strip():
+            content.append({"type": "text", "text": text})
+        content[-1]["cache_control"] = {"type": "ephemeral"}  # cache everything up to here
         self.messages.append({"role": "user", "content": content})
         started = time.perf_counter()
         response = self.client.messages.create(
@@ -159,9 +175,10 @@ class Pilot:
             max_tokens=2000,
             system=self._prompt(),
             tools=TOOLS,
-            # No extended thinking: a fast answer matters more than a long think here.
             messages=self.messages,
+            **({"thinking": {"type": "adaptive"}} if self.thinking else {}),
         )
+        # Kept whole, thinking included: history is never edited, so it stays valid and cached.
         self.messages.append({"role": "assistant", "content": response.content})
         usage = response.usage
         self.last = {
@@ -169,6 +186,7 @@ class Pilot:
             "stop_reason": response.stop_reason,
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
+            "cached_tokens": usage.cache_read_input_tokens or 0,
             "text": " ".join(b.text for b in response.content if b.type == "text").strip(),
         }
         if response.stop_reason != "tool_use":
