@@ -4,7 +4,7 @@ A model that sees is poor at judging metres and degrees, and good at pointing. S
 asked for a distance or an angle: a fan of paths is drawn on the floor of the picture, each
 with a number at its far end, and it answers with a number.
 
-    paths = fan(obstacles, setup, 0.2)   # {"1": path, ... "7": path}, blocked ones left out
+    paths = fan(obstacles, setup, 0.2, stop_m)  # {"1": path, ...}, blocked ones left out
     picture = draw(jpeg, paths, setup)   # the JPEG with the paths and their numbers on it
     listed = options(paths)                   # {"1": "path 1: curving left ...", ..., "L": ...}
 
@@ -41,6 +41,9 @@ VIEW_EDGE_DEG = 3.0
 # The nearest floor in the picture is about this far ahead of the lens: nearer than that a
 # path is under the picture, not beside it.
 NEAR_M = 0.4
+# A path ends this much further back than the stop rule asks, so that the small errors in
+# how far the chair believes it has gone do not trip the stop just before the end.
+PLAN_SLACK_M = 0.1
 # A path with less clear floor than this is not offered.
 MIN_M = 0.3
 # What can be picked besides a path: turns on the spot (degrees to the left), and the ends.
@@ -71,13 +74,16 @@ def arc(bearing_deg: float) -> np.ndarray:
     return radius * np.column_stack([np.sin(turned), 1 - np.cos(turned)])
 
 
-def fan(obstacles: Sequence[Obstacle], setup: ChairSetup, margin_m: float) -> dict[str, np.ndarray]:
+def fan(
+    obstacles: Sequence[Obstacle], setup: ChairSetup, margin_m: float, stop_m: float = 0.0
+) -> dict[str, np.ndarray]:
     """The paths the chair fits along, by number.
 
-    Each is cut where the chair's body would come within ``margin_m`` of an obstacle, and
-    where it leaves the camera's view, since nothing is sensed out there. This is planning:
-    how close a path may be laid. Stopping for what turns up while driving is the runner's
-    own check (Session.blocked), which is stricter straight ahead and may end a path early.
+    Each is cut ``stop_m`` short of where the chair's body would come within ``margin_m``
+    of an obstacle, and where it leaves the camera's view, since nothing is sensed out
+    there. ``stop_m`` is footprint.stop_distance_m at the speed it will be driven, plus
+    PLAN_SLACK_M: the runner stops by the same rule on what is left of the path, so a path
+    that was offered is driven to its end unless something has changed.
     """
     shape = Body(setup.chair.width_m, setup.chair.length_m, margin_m)
     paths = {}
@@ -89,7 +95,7 @@ def fan(obstacles: Sequence[Obstacle], setup: ChairSetup, margin_m: float) -> di
         clear = int(np.argmax(unseen)) if unseen.any() else len(path)
         hit = first_hit(path, obstacles, shape)
         if hit is not None:
-            clear = min(clear, round(hit[0] / SAMPLE_SPACING_M) - 1)
+            clear = min(clear, round((hit[0] - stop_m) / SAMPLE_SPACING_M) - 1)
         if clear * SAMPLE_SPACING_M >= MIN_M:
             paths[str(n)] = path[:clear]
     return paths

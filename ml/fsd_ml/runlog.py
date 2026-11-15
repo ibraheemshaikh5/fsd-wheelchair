@@ -22,7 +22,35 @@ A ``gemini`` decision's ``model`` holds what a training sample needs: ``say`` (t
 point every 0.1 m), ``choice``, ``scene``, ``note``, ``ms`` and the token counts.
 
 Other lines (``connected``, ``sending on``, ``stop``, ``waiting``, ``run finished`` ...) mark
-what happened around them.
+what happened around them. Every line also has ``mono``, this machine's monotonic clock.
+
+Each bench or pilot run is also an episode, ``episode-NNN.jsonl`` in the same folder: the
+whole run in one file, in order, with nothing left out. Every line has ``t`` (unix
+seconds), ``mono`` (monotonic seconds) and ``type``:
+
+- ``episode_start``: the task, the kind of run, the code's git commit, the camera and chair
+  calibration (ml/chair.json), every bench setting, and the model (name, thinking, its
+  prompt file and that file's sha256).
+- ``tick``: one per stick command (about 20 a second while a move is under way): the stick
+  asked for and sent, the frame it was given on (file, count, when taken, its age), the
+  gyro's summed ``yaw_deg``, the believed ``pose`` (metres ahead and left of where the
+  episode began, and heading; from the gyro and the calibrated speed, so believed not
+  measured), the age of the obstacle sense's picture, and whether gyro and camera are fresh.
+- ``model_call``: one per look: the picture exactly as the model was sent it (``picture``),
+  the raw frame, the full prompt text, what was on offer, the model's raw output and what
+  was made of it, how long it took, and the tokens.
+- ``action_start`` / ``action_end``: every turn, straight, back and path: what was planned
+  (degrees, metres, the path's points) and what was achieved (the gyro's degrees, believed
+  metres), how long it took, and ``ended``: finished, time_cap, obstacle, no_floor, stuck,
+  stale_gyro, no_speed, takeover, link, heartbeat, disarmed, stopped or exception, with the
+  words the model was told in ``detail``.
+- ``warning`` (a command given on a camera frame older than half a second), ``exception``
+  (with its traceback), ``refused`` (a move the model asked for that was not run).
+- ``episode_end``: the outcome and reason, ``success`` (null: for a person to fill in), and
+  totals: seconds, looks, actions, stops by reason, takeovers, warnings, ticks.
+
+That is what a dataset export needs (LeRobot: frames, timestamps, the stick as the action,
+the believed pose as the state, the task; GNM: frames and poses): no exporter is written yet.
 
     uv run python -m fsd_ml.runlog            # sum up the newest run
     uv run python -m fsd_ml.runlog runs/console/live/20261114-193000
@@ -31,7 +59,10 @@ what happened around them.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
+import subprocess
 import threading
 import time
 from collections import Counter
@@ -56,7 +87,8 @@ class RunLog:
 
     def write(self, event: str, **fields: Any) -> None:
         try:
-            line = json.dumps({"t": round(time.time(), 3), "event": event, **fields})
+            stamp = {"t": round(time.time(), 3), "mono": round(time.monotonic(), 3)}
+            line = json.dumps({**stamp, "event": event, **fields})
             with self._lock, (self.folder / "log.jsonl").open("a") as lines:
                 lines.write(line + "\n")
         except (OSError, TypeError, ValueError):
@@ -86,6 +118,103 @@ class RunLog:
             }
             self._last_s = now
             return dict(self._last)
+
+    def episode(self, **header: Any) -> Episode:
+        """Begin the record of one run: the next ``episode-NNN.jsonl`` in this folder."""
+        number = len(list(self.folder.glob("episode-*.jsonl"))) + 1
+        return Episode(self.folder / f"episode-{number:03d}.jsonl", number, header)
+
+
+def code_version() -> dict[str, Any]:
+    """The git commit this code is at, and whether files differ from it."""
+    here = Path(__file__).resolve().parent
+
+    def git(*args: str) -> str | None:
+        try:
+            done = subprocess.run(
+                ["git", *args], cwd=here, capture_output=True, text=True, timeout=5, check=True
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip()
+
+    changed = git("status", "--porcelain", "--untracked-files=no")
+    return {"commit": git("rev-parse", "HEAD"), "dirty": None if changed is None else bool(changed)}
+
+
+def prompt_stamp(prompt: Path) -> dict[str, Any]:
+    """A prompt file and the sha256 of what it holds now."""
+    try:
+        return {"file": prompt.name, "sha256": hashlib.sha256(prompt.read_bytes()).hexdigest()}
+    except OSError:
+        return {"file": prompt.name, "sha256": None}
+
+
+class Episode:
+    """One run's whole record, in order, in its own file. See the top of this module."""
+
+    def __init__(self, path: Path, number: int, header: dict[str, Any]) -> None:
+        self.path, self.number = path, number
+        self._lock = threading.Lock()
+        self._began = time.monotonic()
+        self._counts: Counter[str] = Counter()
+        self._stops: Counter[str] = Counter()
+        # The believed pose: metres ahead and left of where the episode began, the yaw then,
+        # and when it was last moved on.
+        self._xy = [0.0, 0.0]
+        self._yaw0: float | None = None
+        self._tick_s: float | None = None
+        self.write("episode_start", episode=number, code=code_version(), **header)
+
+    def write(self, kind: str, /, **fields: Any) -> None:
+        self._counts[kind] += 1
+        if kind == "action_end" and fields.get("ended") != "finished":
+            self._stops[str(fields.get("ended"))] += 1
+        try:
+            stamp = {"t": round(time.time(), 3), "mono": round(time.monotonic(), 3)}
+            line = json.dumps({**stamp, "type": kind, **fields}, default=str)
+            with self._lock, self.path.open("a") as lines:
+                lines.write(line + "\n")
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def tick(self, yaw_rad: float, speed_mps: float, **fields: Any) -> None:
+        """One stick command. ``speed_mps`` is what the stick sent is believed to give
+        (negative backing); the pose is moved on by it, along the gyro's heading, for the
+        time since the last tick."""
+        now = time.monotonic()
+        if self._yaw0 is None:
+            self._yaw0 = yaw_rad
+        heading = yaw_rad - self._yaw0
+        # A long gap is not driving: the board stops the chair when commands stop coming.
+        step = speed_mps * min(now - self._tick_s, 0.3) if self._tick_s is not None else 0.0
+        self._tick_s = now
+        self._xy[0] += step * math.cos(heading)
+        self._xy[1] += step * math.sin(heading)
+        pose = {
+            "x_m": round(self._xy[0], 3),
+            "y_m": round(self._xy[1], 3),
+            "heading_deg": round(math.degrees(heading), 2),
+        }
+        self.write("tick", yaw_deg=round(math.degrees(yaw_rad), 2), pose=pose, **fields)
+
+    def end(self, outcome: Any, reason: Any) -> None:
+        self.write(
+            "episode_end",
+            outcome=outcome,
+            reason=reason,
+            # For a person to fill in afterwards: did it really do the task?
+            success=None,
+            totals={
+                "seconds": round(time.monotonic() - self._began, 1),
+                "looks": self._counts["model_call"],
+                "actions": self._counts["action_end"],
+                "stops": dict(self._stops),
+                "takeovers": self._stops["takeover"],
+                "warnings": self._counts["warning"],
+                "ticks": self._counts["tick"],
+            },
+        )
 
 
 def read(run: Path) -> list[dict[str, Any]]:

@@ -47,6 +47,7 @@ class GeminiPilot:
     model: str = MODEL
     thinking: str = THINKING
     client: Any = None
+    prompt_file: Path = PROMPT_FILE
     # Every look and every answer so far, pictures included, so it remembers what it saw.
     contents: list[Any] = field(default_factory=list)
     # How the last reply went, for the record: the answer, the time it took, the tokens.
@@ -89,7 +90,7 @@ class GeminiPilot:
             model=self.model,
             contents=[*self.contents, look],
             config=types.GenerateContentConfig(
-                system_instruction=PROMPT_FILE.read_text(),
+                system_instruction=self.prompt_file.read_text(),
                 thinking_config=types.ThinkingConfig(thinking_level=self.thinking),
                 response_mime_type="application/json",
                 # Only what is on offer in this picture can be answered.
@@ -117,6 +118,9 @@ class GeminiPilot:
             "scene": answer.get("scene"),
             "choice": answer.get("choice"),
             "note": answer.get("note"),
+            # Exactly what was sent with the picture, and what came back.
+            "prompt": text,
+            "raw": response.text,
             "ms": ms,
             "model": self.model,
             "thinking": self.thinking,
@@ -148,6 +152,7 @@ def drawn(jpeg: bytes, depth: Any = None) -> tuple[dict[str, Any], bytes, dict[s
     from PIL import Image
 
     from fsd_ml import bench, candidates, chair
+    from fsd_ml.pipeline.footprint import stop_distance_m
 
     setup = chair.load()
     seen, info = [], {"floor": None}
@@ -155,9 +160,15 @@ def drawn(jpeg: bytes, depth: Any = None) -> tuple[dict[str, Any], bytes, dict[s
         rgb = np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
         camera = setup.camera
         seen, info = depth.find(rgb, camera.hfov_deg, camera.height_m, setup.lens_xy)
-    # As a live run lays them (Session.candidates).
-    clearance = bench.DEFAULTS["path_clearance_m"]
-    paths = candidates.fan(seen, setup, clearance) if info["floor"] is not False else {}
+    # As a live run lays them (Session.candidates), at the bench's default settings.
+    settings = bench.DEFAULTS
+    speed = settings["drive_stick_pct"] / 100 * settings["v_full_mps"]
+    stop_m = stop_distance_m(speed) + candidates.PLAN_SLACK_M
+    paths = (
+        candidates.fan(seen, setup, settings["path_clearance_m"], stop_m)
+        if info["floor"] is not False
+        else {}
+    )
     return paths, candidates.draw(jpeg, paths, setup), info
 
 

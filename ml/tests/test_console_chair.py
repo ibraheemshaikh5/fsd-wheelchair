@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -109,3 +110,31 @@ def test_anyone_can_stop_and_nothing_runs_unarmed(client: httpx.Client, tmp_path
         session.runner.straight(1.0, background=False)
     with pytest.raises(RuntimeError, match="not armed"):
         session.runner.turn(90, background=False)
+
+
+def test_a_run_is_one_whole_episode_in_the_record(tmp_path: Path) -> None:
+    session = driving(tmp_path, FakeSender())
+    session.sight = None  # no obstacle sense: nothing to stop for
+    session.page_alive = lambda: True
+    session._armed = True
+    session.episode = session.runlog.episode(kind="straight", task=None)
+    done = session.runner.straight(0.2, background=False)
+    assert done["outcome"] == "finished" and session.episode is None
+
+    lines = (session.runlog.folder / "episode-001.jsonl").read_text().splitlines()
+    records = [json.loads(line) for line in lines]
+    assert all({"t", "mono", "type"} <= set(r) for r in records)
+    kinds = [r["type"] for r in records]
+    assert kinds[0] == "episode_start" and kinds[-1] == "episode_end"
+    assert kinds.index("action_start") < kinds.index("tick") < kinds.index("action_end")
+    assert records[0]["code"]["commit"] and "settings" not in records[0]  # as given above
+    # Every stick command is there, with the believed pose moved on by it.
+    ticks = [r for r in records if r["type"] == "tick"]
+    assert ticks[-1]["pose"]["x_m"] == pytest.approx(0.2, abs=0.08)
+    assert {"stick", "frame", "yaw_deg", "gyro_fresh", "camera_fresh"} <= set(ticks[0])
+    # With no camera at all, that is warned of, not passed over.
+    assert "warning" in kinds
+    ended = next(r for r in records if r["type"] == "action_end")
+    assert ended["ended"] == "finished" and ended["planned"] == {"distance_m": 0.2}
+    assert ended["achieved"]["believed_m"] == pytest.approx(0.2, abs=0.08)
+    assert records[-1]["success"] is None and records[-1]["totals"]["actions"] == 1

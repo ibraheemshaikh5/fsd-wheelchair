@@ -17,6 +17,11 @@ from fsd_ml.drivers import Candidate
 from fsd_ml.pipeline.types import Obstacle, PathStatus
 
 SAMPLE_SPACING_M = 0.1
+# How far short of touching something a run stops: a little standing still, and more the
+# faster it goes (about 0.38 m at the 0.45 m/s creep, 0.53 m at 0.75 m/s). The time covers
+# noticing it (three looks in a row) and coasting to a stop.
+STOP_STILL_M = 0.15
+STOP_REACT_S = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +96,16 @@ def first_hit(
             if best is None or distance < best[0]:
                 best = (distance, obstacle)
     return best
+
+
+def stop_distance_m(speed_mps: float) -> float:
+    """How much of its way must be left clear in front of a chair going this fast.
+
+    The one rule for a bench or pilot run: paths are offered no closer than this to what
+    they meet (fsd_ml/candidates.py), and a run stops when less than this is left
+    (Session.blocked), so a path that was offered is not then cut off by a stricter rule.
+    """
+    return STOP_STILL_M + STOP_REACT_S * max(0.0, speed_mps)
 
 
 def _waiting_reason(obstacle: Obstacle, verb: str) -> str:

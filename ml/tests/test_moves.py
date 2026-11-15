@@ -32,7 +32,7 @@ class FakeChair:
             "ramp_s": 0.0,
             "turn_stick_pct": 3.0,
             "turn_min_pct": 1.0,
-            "turn_slow_deg": 40.0,
+            "turn_slow_deg": 15.0,
             "turn_coast_s": 0.0,
             "turn_done_deg": 3.0,
             "settle_s": 0.3,
@@ -78,7 +78,7 @@ class FakeChair:
     def picture_change(self):
         return self.change
 
-    def blocked(self, speed_mps=0.0):
+    def blocked(self, speed_mps=0.0, path_xy=None):
         return self.obstacle
 
     def observe(self):
@@ -339,14 +339,23 @@ class Coasting(FakeChair):
 
 
 @pytest.mark.parametrize("plant", [{}, {"dead_pct": 9.0}, {"lag_s": 0.65, "delay_s": 0.35}])
-def test_a_turn_ends_within_three_degrees_on_a_chair_that_coasts(plant):
+def test_a_turn_ends_near_its_goal_without_hunting_on_a_chair_that_coasts(plant):
     for asked in (10, 25, -50, 90):
         chair = Coasting(**plant)
         chair.sending = True
+        sent = []
+        chair.drive = lambda x, y, reverse=False, sent=sent, chair=chair: (
+            sent.append(x),
+            Coasting.drive(chair, x, y, reverse),
+        )[1]
         run = Runner(chair, clock=chair.clock, sleep=chair.sleep)
         run._state = {"running": True}
         outcome, said = run._turn(asked)
-        assert outcome == "finished" and abs(math.degrees(chair.yaw) - asked) <= 3.5, said
+        # Within 3 degrees on the chair as measured; never left more than 5 past the goal.
+        assert outcome == "finished", said
+        assert abs(math.degrees(chair.yaw) - asked) <= (3.5 if not plant else 5.5), said
+        # The stick changes side only to come back from a real overshoot: no hunting.
+        assert sum(1 for a, b in zip(sent, sent[1:], strict=False) if a * b < 0) <= 2
 
 
 def test_a_straight_holds_its_heading_and_gives_up_on_a_chair_that_is_not_moving():
