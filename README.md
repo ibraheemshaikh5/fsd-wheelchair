@@ -2,8 +2,6 @@
 
 A self-driving power wheelchair, made from a stock folding chair, an Arduino, an iPhone and an iPad. Built in one weekend at HackPrinceton Fall '26, for about 1% of what a comparable chair costs.
 
-<img src="docs/img/chair.jpg" alt="The Culver WOLF power wheelchair" width="420">
-
 Full write-up: [Building an FSD wheelchair with a post-trained model](https://ishaikh.com/blog/fsd-wheelchair)
 
 ## What it does
